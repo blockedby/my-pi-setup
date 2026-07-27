@@ -4,7 +4,9 @@ node_modules/
 # Downloaded/generated executables
 bin/
 
-# Pi runtime and private state
+# Pi runtime, agent artifacts, and private state
+.pi/
+.pi-subagents/
 sessions/
 /workflows/
 auth.json
@@ -18,7 +20,6 @@ extensions/summaries/config.private.json.*.tmp
 # Environment variables and secrets
 .env
 .env.*
-!.env.example
 *.pem
 *.key
 

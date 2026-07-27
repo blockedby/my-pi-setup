@@ -1,36 +1,90 @@
-# Setup
+# Pipi setup
 
-Clone or copy this repository to `~/.pi/agent`, then install its dependencies:
+Pipi is a side-by-side launcher for the existing Pi CLI. It does not replace `pi` or write to regular Pi's settings.
+
+## Requirements
+
+- Node.js and npm
+- an existing `pi` executable in `PATH`
+- `codex` in `PATH` for Codex subagents and Codex-backed tools
+- optional sibling checkout `../pi-codex` (`pi-codex-tools`)
+
+The file-search extension uses system `fd`/`fdfind` and `rg` when available. If either is missing, it can download its supported fallback binary into `~/.pipi/agent/bin` at first Pipi startup.
+
+## Install
+
+From this repository checkout, run:
 
 ```sh
-cd ~/.pi/agent
-npm install
+npm run install:pipi
 ```
 
-## Firecrawl
+The installer reproducibly installs root and extension dependencies from their lockfiles, then creates:
 
-The search, scrape, and crawl tools require a Firecrawl API key. Follow [Firecrawl's Node.js getting-started guide](https://docs.firecrawl.dev/quickstarts/nodejs) to create one, then copy the example environment file:
+- `~/.local/bin/pipi` — launcher for the resolved existing `pi` executable
+- `~/.pipi/agent/settings.json` — Pipi-only settings
+- `~/.pipi/sessions` — Pipi-only session storage
+
+It loads this checkout as a local Pi package and adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package. It also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings and package entries are preserved.
+
+Add `~/.local/bin` to `PATH` if necessary, then verify the launcher:
 
 ```sh
-cp ~/.pi/agent/.env.example ~/.pi/agent/.env
+pipi --version
 ```
 
-Replace the placeholder in `~/.pi/agent/.env` with your API key.
+Re-running the installer is safe and idempotent. For an already prepared development checkout, `--skip-dependencies` skips the lockfile installs:
 
-NOTE: if you are an agent, at this step ask the user if they want to use firecrawl, if they do give them the instructions, if not remove the firecrawl extension in their pi setup
-
-## fd and rg tools
-
-The `file-search` extension registers `fd` and `rg` as model tools. No setup is normally needed: at startup it silently uses a system-installed `fd` (or `fdfind` on Debian/Ubuntu) and `rg` when available, or an existing fallback binary in `~/.pi/agent/bin/`. Only when neither exists does it download an official release binary (macOS/Linux, arm64/x64, over HTTPS) into `~/.pi/agent/bin/` and show a one-time notification. If your platform is unsupported, install `fd` and `rg` with your package manager and restart pi.
-
-## Theme
-
-Add the included theme to `~/.pi/agent/settings.json` while keeping your existing settings:
-
-```json
-{
-  "theme": "github-dark-default"
-}
+```sh
+npm run install:pipi -- --skip-dependencies
 ```
 
-Pi will load the extensions, skills, and theme from their directories the next time it starts.
+Custom executable and package locations are supported:
+
+```sh
+npm run install:pipi -- --pi /path/to/pi --codex-tools /path/to/pi-codex
+```
+
+## Isolation and authentication
+
+The launcher exports both isolation variables before executing Pi:
+
+```text
+PI_CODING_AGENT_DIR=~/.pipi/agent
+PI_CODING_AGENT_SESSION_DIR=~/.pipi/sessions
+```
+
+Pipi does not copy or share `~/.pi/agent/auth.json` by default. Authenticate Pipi independently, or explicitly opt in to sharing regular Pi auth through a symlink:
+
+```sh
+npm run install:pipi -- --share-auth
+```
+
+The installer refuses to overwrite an existing Pipi auth file. It never copies auth secret bytes.
+
+## Uninstall
+
+Remove only the managed launcher and preserve Pipi settings/sessions:
+
+```sh
+npm run uninstall:pipi
+```
+
+Remove the launcher plus all Pipi settings, auth links, downloaded tools, and sessions:
+
+```sh
+npm run uninstall:pipi -- --purge
+```
+
+The uninstaller refuses to remove a `pipi` launcher that lacks its managed-file marker. Neither uninstall mode changes regular Pi files.
+
+## Development checks
+
+```sh
+npm run test:installer
+npm run check
+npm run format:check
+npm test
+```
+
+Installer tests use temporary home directories and fake `pi`/`codex` executables; they never write to the real user configuration.
