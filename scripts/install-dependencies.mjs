@@ -12,29 +12,29 @@ const hasRuntimeDependencies = (directory) => {
   return Object.keys(manifest.dependencies ?? {}).length > 0;
 };
 
-export const ensureIsolatedNpmPackages = ({ prefix, packages }) => {
-  const allInstalled = packages.every(({ packageName, expectedVersion }) => {
-    const manifestPath = join(
-      prefix,
-      "node_modules",
-      packageName,
-      "package.json",
-    );
-    if (!existsSync(manifestPath)) return false;
+export const ensureIsolatedNpmPackage = ({
+  prefix,
+  packageName,
+  packageSpec,
+  expectedVersion,
+}) => {
+  const manifestPath = join(
+    prefix,
+    "node_modules",
+    packageName,
+    "package.json",
+  );
+  if (existsSync(manifestPath)) {
     try {
       const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-      return manifest.version === expectedVersion;
+      if (manifest.version === expectedVersion) return;
     } catch {
-      return false;
+      // Reinstall an unreadable or invalid package below.
     }
-  });
-  if (allInstalled) return;
+  }
 
   mkdirSync(prefix, { recursive: true, mode: 0o700 });
-  const packageSpecs = packages.map(({ packageSpec }) => packageSpec);
-  console.log(
-    `Installing isolated Pi packages ${packageSpecs.join(", ")} in ${prefix}`,
-  );
+  console.log(`Installing isolated Pi package ${packageSpec} in ${prefix}`);
   const result = spawnSync(
     "npm",
     [
@@ -43,14 +43,14 @@ export const ensureIsolatedNpmPackages = ({ prefix, packages }) => {
       prefix,
       "--no-package-lock",
       "--no-save",
-      ...packageSpecs,
+      packageSpec,
     ],
     { stdio: "inherit" },
   );
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(
-      `npm install failed for ${packageSpecs.join(", ")} with exit code ${result.status ?? "unknown"}`,
+      `npm install failed for ${packageSpec} with exit code ${result.status ?? "unknown"}`,
     );
   }
 };

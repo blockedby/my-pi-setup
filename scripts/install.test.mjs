@@ -20,7 +20,6 @@ const installScript = join(repositoryRoot, "scripts", "install.mjs");
 const uninstallScript = join(repositoryRoot, "scripts", "uninstall.mjs");
 const mcpAdapterPackage = "npm:pi-mcp-adapter@2.15.0";
 const legacyMcpAdapterPackage = "npm:pi-mcp-adapter";
-const piSubagentsPackage = "npm:pi-subagents@0.37.0";
 const legacyPiSubagentsPackage = "npm:pi-subagents";
 const browserSkillSource = join(
   repositoryRoot,
@@ -29,21 +28,6 @@ const browserSkillSource = join(
   "skills",
   "browser-chrome",
 );
-const taskPackageSkillSource = join(
-  repositoryRoot,
-  "vendor",
-  "pi-agent-setup",
-  "skills",
-  "aad-task-package",
-);
-const browserAgentSource = join(
-  repositoryRoot,
-  "vendor",
-  "pi-agent-setup",
-  "agents",
-  "chrome-browser-agent.md",
-);
-
 const createFixture = async () => {
   const home = await mkdtemp(join(tmpdir(), "pipi-install-"));
   const fakeBin = join(home, "fake-bin");
@@ -174,34 +158,27 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   assert.deepEqual(settings.packages, [
     repositoryRoot,
     mcpAdapterPackage,
-    piSubagentsPackage,
     fixture.codexTools,
   ]);
 
   const pipiAgentDir = join(fixture.home, ".pipi", "agent");
   const installedBrowserSkill = join(pipiAgentDir, "skills", "browser-chrome");
-  const installedTaskPackageSkill = join(
-    pipiAgentDir,
-    "skills",
-    "aad-task-package",
-  );
-  const installedBrowserAgent = join(
-    pipiAgentDir,
-    "agents",
-    "chrome-browser-agent.md",
-  );
   const pipiMcpPath = join(pipiAgentDir, "mcp.json");
   assert.equal(
     readFileSync(join(installedBrowserSkill, "SKILL.md"), "utf8"),
     readFileSync(join(browserSkillSource, "SKILL.md"), "utf8"),
   );
   assert.equal(
-    readFileSync(join(installedTaskPackageSkill, "SKILL.md"), "utf8"),
-    readFileSync(join(taskPackageSkillSource, "SKILL.md"), "utf8"),
+    existsSync(join(pipiAgentDir, "skills", "aad-task-package")),
+    false,
   );
   assert.equal(
-    readFileSync(installedBrowserAgent, "utf8"),
-    readFileSync(browserAgentSource, "utf8"),
+    existsSync(join(pipiAgentDir, "agents", "chrome-browser-agent.md")),
+    false,
+  );
+  assert.equal(
+    existsSync(join(pipiAgentDir, "npm", "node_modules", "pi-subagents")),
+    false,
   );
   assert.equal(
     lstatSync(join(installedBrowserSkill, "scripts", "mcp.sh")).mode & 0o111,
@@ -233,13 +210,11 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   const firstLauncher = readFileSync(launcherPath, "utf8");
   const firstSettings = readFileSync(settingsPath, "utf8");
   const firstMcp = readFileSync(pipiMcpPath, "utf8");
-  const firstAgent = readFileSync(installedBrowserAgent, "utf8");
   const second = install(fixture);
   assert.equal(second.status, 0, second.stderr);
   assert.equal(readFileSync(launcherPath, "utf8"), firstLauncher);
   assert.equal(readFileSync(settingsPath, "utf8"), firstSettings);
   assert.equal(readFileSync(pipiMcpPath, "utf8"), firstMcp);
-  assert.equal(readFileSync(installedBrowserAgent, "utf8"), firstAgent);
   assert.equal(readFileSync(regularSettingsPath, "utf8"), regularSettings);
   assert.equal(
     readFileSync(join(regularAgentDir, "mcp.json"), "utf8"),
@@ -291,6 +266,26 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   const staleSkillDir = join(pipiAgentDir, "skills", "browser-chrome");
   mkdirSync(staleSkillDir, { recursive: true });
   writeFileSync(join(staleSkillDir, "stale.txt"), "remove me\n");
+  const removedTaskSkill = join(pipiAgentDir, "skills", "aad-task-package");
+  mkdirSync(removedTaskSkill, { recursive: true });
+  writeFileSync(join(removedTaskSkill, "SKILL.md"), "remove me\n");
+  const removedAgent = join(pipiAgentDir, "agents", "chrome-browser-agent.md");
+  mkdirSync(dirname(removedAgent), { recursive: true });
+  writeFileSync(removedAgent, "remove me\n");
+  const removedPackages = ["pi-subagents", "jiti", "typebox", "yaml"].map(
+    (name) => join(pipiAgentDir, "npm", "node_modules", name),
+  );
+  for (const path of removedPackages) {
+    mkdirSync(path, { recursive: true });
+    writeFileSync(join(path, "package.json"), '{"version":"0.0.0"}\n');
+  }
+  const removedBins = ["pi-subagents", "jiti", "yaml"].map((name) =>
+    join(pipiAgentDir, "npm", "node_modules", ".bin", name),
+  );
+  for (const path of removedBins) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "remove me\n");
+  }
 
   const result = install(fixture);
   assert.equal(result.status, 0, result.stderr);
@@ -301,7 +296,6 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
       "existing-package",
       repositoryRoot,
       { source: mcpAdapterPackage, extensions: ["index.ts"] },
-      { source: piSubagentsPackage, skills: [] },
       fixture.codexTools,
     ],
   });
@@ -312,6 +306,11 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
     },
   });
   assert.equal(existsSync(join(staleSkillDir, "stale.txt")), false);
+  assert.equal(existsSync(removedTaskSkill), false);
+  assert.equal(existsSync(removedAgent), false);
+  for (const path of [...removedPackages, ...removedBins]) {
+    assert.equal(existsSync(path), false);
+  }
 });
 
 test("install refuses a missing Pi executable before writing files", async (t) => {
