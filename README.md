@@ -36,5 +36,6 @@ Additional documentation:
 
 - [Complete local setup record and pending steps](docs/pipi-setup-record.md)
 - [Black-and-white subagent graph](docs/subagents-explained.html)
+- [Original subagent design plan used as a reference](https://github.com/davis7dotsh/my-pi-setup/blob/main/extensions/subagents/docs/design-plan.md)
 
 ![Pi setup interface](assets/pi-setup.jpeg)
