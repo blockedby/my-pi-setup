@@ -16,6 +16,10 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Codex tools package                     | `/home/kcnc/code/tools/pi-codex`                         |
 | MCP adapter                             | `npm:pi-mcp-adapter@2.15.0`                              |
 | Isolated MCP package files              | `/home/kcnc/.pipi/agent/npm/node_modules/pi-mcp-adapter` |
+| Named-agent runtime                     | `npm:pi-subagents@0.37.0`                                |
+| Browser Chrome skill                    | `/home/kcnc/.pipi/agent/skills/browser-chrome`           |
+| Browser agent                           | `/home/kcnc/.pipi/agent/agents/chrome-browser-agent.md`  |
+| Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
 | Pi version at initial acceptance        | `0.82.1`                                                 |
 | Codex CLI version at initial acceptance | `0.145.0`                                                |
@@ -27,7 +31,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - The launcher exports `PI_CODING_AGENT_SESSION_DIR=/home/kcnc/.pipi/sessions`.
 - Regular Pi settings, sessions, auth, and MCP override files remain under `/home/kcnc/.pi/agent`.
 - Pipi auth is separate by default. No auth secret bytes were copied.
-- Pipi's MCP adapter package is isolated under `~/.pipi/agent/npm`.
+- Pipi's MCP adapter and named-agent runtime are isolated under `~/.pipi/agent/npm`.
+- Browser skills, agent definition, and MCP commands are Pipi-owned copies under `~/.pipi/agent`.
 - Regular Pi's `mcp.json` was not copied or linked because it contains environment fields that may hold secrets.
 - The removed web-search provider is not installed, configured, or required.
 
@@ -103,14 +108,33 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Installed and verified version 2.15.0 at `/home/kcnc/.pipi/agent/npm/node_modules/pi-mcp-adapter`.
 - Recorded the MCP integration and documentation in the local `feat: add isolated MCP adapter` commit.
 
+### 9. Browser Chrome skill, agent, and MCP
+
+- Vendored the exact `browser-chrome` skill and `chrome-browser-agent.md` from `/tmp/opencode/pi-agent-setup-main`.
+- Vendored and installed the agent's required `aad-task-package` skill dependency.
+- Installed both skills under `~/.pipi/agent/skills` with private file modes and executable owner-only shell scripts.
+- Installed the named agent at `~/.pipi/agent/agents/chrome-browser-agent.md` without changing its prompt/frontmatter.
+- Pinned and isolated `npm:pi-subagents@0.37.0` so the named browser agent is discoverable alongside the creator setup's separate subagent tools.
+- Updated isolated npm installation to install all pinned Pi packages in one transaction, preventing npm from pruning one package while adding another.
+- Created Pipi's own `mcp.json` with exactly these browser entries:
+  - `browser-chrome-control`
+  - `browser-chrome-headed`
+  - `browser-chrome-headless`
+- Pointed every browser MCP command at Pipi-owned scripts; no regular Pi path, config, credential, or browser data was copied.
+- Preserved unrelated Pipi MCP entries during installer reruns.
+- Verified the control MCP exposes four policy tools and disposable headless MCP exposes 29 Chrome DevTools tools.
+- Verified the headless smoke probe cleaned up its temporary Chrome process and did not use an authenticated profile.
+- Verified `pi-subagents` discovers `chrome-browser-agent` with model `openai-codex/gpt-5.6-terra`, skills `browser-chrome,aad-task-package`, and tools `read,write,bash,mcp`.
+
 ## Current package sources
 
 The installer keeps these package sources in Pipi settings:
 
 ```text
 /home/kcnc/code/tools/pipi-alias
-/home/kcnc/code/tools/pi-codex
 npm:pi-mcp-adapter@2.15.0
+npm:pi-subagents@0.37.0
+/home/kcnc/code/tools/pi-codex
 ```
 
 Unrelated user-added Pipi packages are preserved.
@@ -133,13 +157,25 @@ Useful commands:
 /mcp-auth <server>
 ```
 
-The extension is installed, but Pipi does not automatically inherit regular Pi's private `~/.pi/agent/mcp.json`. Use `/mcp setup` to create or adopt an isolated Pipi configuration. Standard shared MCP files such as `~/.config/mcp/mcp.json` or a project `.mcp.json` are discovered automatically by the adapter.
+Pipi now has its own three browser Chrome MCP servers. Use `browser-chrome-control` first, then follow its guidance to use `browser-chrome-headless` or `browser-chrome-headed`. Pipi still does not automatically inherit regular Pi's private `~/.pi/agent/mcp.json`. Use `/mcp setup` only to add other isolated servers. Standard shared MCP files such as `~/.config/mcp/mcp.json` or a project `.mcp.json` remain discoverable by the adapter.
+
+## Request log
+
+1. Create isolated `pipi` beside regular Pi from the creator setup, reuse Codex, and exclude the removed web-search provider — completed.
+2. Check and install `/home/kcnc/code/tools/pi-codex` dependencies — completed.
+3. Explain where agent prompts are configured and provide the upstream subagents link — completed in chat and this record.
+4. Explain the leaf-subagent graph and “removes” in B2 English as a black-and-white HTML page — completed in `docs/subagents-explained.html`.
+5. Add the MCP adapter from regular Pi and record completed/future work — completed with isolated adapter 2.15.0 and this file.
+6. Add the `browser-chrome` skill, `chrome-browser-agent`, and browser MCP servers from `pi-agent-setup`, and log the work — completed and recorded in section 9.
+7. Add short README tables explaining the installed agents and skills — completed in `README.md`.
 
 ## Pending steps explicitly connected to user requests
 
-1. **Authenticate Pipi for model use.** Run `pipi`, then `/login`, unless auth sharing is explicitly requested. The default remains separate.
-2. **Choose Pipi MCP servers.** Run `/mcp setup` and select only the servers Pipi should use. Importing or sharing regular Pi's secret-bearing MCP config requires a separate explicit decision.
-3. **Keep this record current.** Append future requested Pipi changes, their evidence, and any remaining action here.
+1. **Authenticate Pipi for model and named-agent use.** Run `pipi`, then `/login`, unless auth sharing is explicitly requested. The default remains separate.
+2. **Reload after this installation.** Start a new Pipi session or run `/reload` so the new `pi-subagents`, skill, agent, and MCP entries are loaded.
+3. **Choose browser mode safely.** Use disposable headless mode by default. Use headed persistent mode only when a future requested task needs the current browser login/profile.
+4. **Choose any additional MCP servers.** Browser MCP is configured. Use `/mcp setup` only for other servers; importing regular Pi's secret-bearing config requires a separate explicit decision.
+5. **Keep this record current.** Append future requested Pipi changes, their evidence, and any remaining action here.
 
 ## Discussed ideas that are not requested implementation
 
@@ -157,6 +193,7 @@ cd /home/kcnc/code/tools/pipi-alias
 npm run test:installer
 npm run check
 npm run format:check
+node --test vendor/pi-agent-setup/skills/browser-chrome/control-mcp/*.test.mjs
 pipi --version
 pipi list
 ```

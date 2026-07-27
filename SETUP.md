@@ -8,7 +8,8 @@ Pipi is a side-by-side launcher for the existing Pi CLI. It does not replace `pi
 - an existing `pi` executable in `PATH`
 - `codex` in `PATH` for Codex subagents and Codex-backed tools
 - optional sibling checkout `../pi-codex` (`pi-codex-tools`)
-- npm access for the initial isolated `pi-mcp-adapter` install
+- npm access for the initial isolated `pi-mcp-adapter` and `pi-subagents` install
+- Google Chrome or Chromium plus `npx` for `chrome-devtools-mcp`
 
 The file-search extension uses system `fd`/`fdfind` and `rg` when available. If either is missing, it can download its supported fallback binary into `~/.pipi/agent/bin` at first Pipi startup.
 
@@ -26,7 +27,7 @@ The installer reproducibly installs root and extension dependencies from their l
 - `~/.pipi/agent/settings.json` — Pipi-only settings
 - `~/.pipi/sessions` — Pipi-only session storage
 
-It loads this checkout as a local Pi package, adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package, and registers `npm:pi-mcp-adapter@2.15.0`. The MCP adapter is installed under `~/.pipi/agent/npm` so an older global package cannot shadow it. The installer also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings and package entries are preserved.
+It loads this checkout as a local Pi package, adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package, and registers pinned `pi-mcp-adapter` and `pi-subagents` packages. Both npm packages are installed together under `~/.pipi/agent/npm` so older global packages cannot shadow them or one isolated install cannot prune the other. The installer copies the vendored `pi-agent-setup` browser skill, its `aad-task-package` dependency, and `chrome-browser-agent` into Pipi-owned paths. It also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings, package entries, and MCP servers are preserved.
 
 Add `~/.local/bin` to `PATH` if necessary, then verify the launcher:
 
@@ -34,7 +35,7 @@ Add `~/.local/bin` to `PATH` if necessary, then verify the launcher:
 pipi --version
 ```
 
-Re-running the installer is safe and idempotent. For an already prepared development checkout with the isolated MCP adapter already present, `--skip-dependencies` skips all dependency installs:
+Re-running the installer is safe and idempotent. For an already prepared development checkout with both isolated npm packages already present, `--skip-dependencies` skips all dependency installs while still refreshing browser skill/agent/MCP assets:
 
 ```sh
 npm run install:pipi -- --skip-dependencies
@@ -57,7 +58,32 @@ npm:pi-mcp-adapter@2.15.0
 
 Open Pipi and use `/mcp` or `/mcp setup`. Other useful commands include `/mcp tools`, `/mcp reconnect`, and `/mcp-auth <server>`.
 
-The installer deliberately does not copy or link `~/.pi/agent/mcp.json` because that file can contain server credentials or secret-bearing environment fields. Standard shared configs such as `~/.config/mcp/mcp.json` and project `.mcp.json` files remain discoverable. Use `/mcp setup` to create or adopt an isolated Pipi configuration.
+The installer deliberately does not copy or link `~/.pi/agent/mcp.json` because that file can contain server credentials or secret-bearing environment fields. Standard shared configs such as `~/.config/mcp/mcp.json` and project `.mcp.json` files remain discoverable. Use `/mcp setup` to create or adopt additional isolated Pipi configuration.
+
+## Browser Chrome skill, agent, and MCP
+
+The installer vendors these assets from the local `pi-agent-setup` checkout and installs them into isolated Pipi state:
+
+```text
+~/.pipi/agent/skills/browser-chrome
+~/.pipi/agent/skills/aad-task-package
+~/.pipi/agent/agents/chrome-browser-agent.md
+~/.pipi/agent/mcp.json
+```
+
+It also registers and installs `npm:pi-subagents@0.37.0`, which discovers the named `chrome-browser-agent`. The creator setup's separate `subagent_spawn` extension remains installed; the two systems use different parent tools.
+
+Pipi's MCP config contains three lazy browser servers that point only to Pipi-owned skill scripts:
+
+```text
+browser-chrome-control
+browser-chrome-headed
+browser-chrome-headless
+```
+
+Use `browser-chrome-control` first. Choose disposable headless mode for public/local checks. Use headed persistent mode only when the task needs your current login, saved session, password manager, extensions, or profile. Headed DevTools access can control private browser data, so do not use it for anonymous checks.
+
+Restart Pipi or use `/reload` after installation. The named browser agent requires Pipi model authentication (`/login`) before it can execute a model turn.
 
 ## Isolation and authentication
 
@@ -98,8 +124,9 @@ The uninstaller refuses to remove a `pipi` launcher that lacks its managed-file 
 npm run test:installer
 npm run check
 npm run format:check
+node --test vendor/pi-agent-setup/skills/browser-chrome/control-mcp/*.test.mjs
 ```
 
-Installer tests use temporary home directories and fake `pi`/`codex` executables; they never write to the real user configuration. Run the broad `npm test` command only when live backend calls are explicitly authorized: upstream tests can detect installed Claude/Codex CLIs and invoke them.
+Installer tests use temporary home directories and fake `pi`/`codex` executables; they never write to the real user configuration. Browser control tests do not open an authenticated profile. Run the broad `npm test` command only when live backend calls are explicitly authorized: upstream tests can detect installed Claude/Codex CLIs and invoke them.
 
 See [docs/pipi-setup-record.md](docs/pipi-setup-record.md) for the complete local change record and pending steps.

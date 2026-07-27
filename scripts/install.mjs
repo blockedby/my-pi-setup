@@ -2,12 +2,15 @@ import {
   accessSync,
   chmodSync,
   constants,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   renameSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -15,7 +18,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ensureIsolatedNpmPackage,
+  ensureIsolatedNpmPackages,
   installDependencies,
 } from "./install-dependencies.mjs";
 
@@ -24,6 +27,10 @@ const managedLauncherMarker = "# Managed by pipi-alias installer.";
 const mcpAdapterVersion = "2.15.0";
 const mcpAdapterPackage = `npm:pi-mcp-adapter@${mcpAdapterVersion}`;
 const mcpAdapterPackagePrefix = "npm:pi-mcp-adapter";
+const piSubagentsVersion = "0.37.0";
+const piSubagentsPackage = `npm:pi-subagents@${piSubagentsVersion}`;
+const piSubagentsPackagePrefix = "npm:pi-subagents";
+const browserAssetsRoot = join(repositoryRoot, "vendor", "pi-agent-setup");
 const modelDefaults = [
   "defaultProvider",
   "defaultModel",
@@ -125,16 +132,15 @@ const addPackage = (packages, path) => {
     packages.push(path);
 };
 
-const pinMcpAdapterPackage = (packages) => {
+const pinNpmPackage = (packages, packagePrefix, pinnedSource) => {
   const matchingIndexes = packages.flatMap((entry, index) => {
     const source = packageSource(entry);
-    return source === mcpAdapterPackagePrefix ||
-      source?.startsWith(`${mcpAdapterPackagePrefix}@`)
+    return source === packagePrefix || source?.startsWith(`${packagePrefix}@`)
       ? [index]
       : [];
   });
   if (matchingIndexes.length === 0) {
-    packages.push(mcpAdapterPackage);
+    packages.push(pinnedSource);
     return;
   }
 
@@ -142,8 +148,8 @@ const pinMcpAdapterPackage = (packages) => {
   const firstEntry = packages[firstIndex];
   packages[firstIndex] =
     typeof firstEntry === "string"
-      ? mcpAdapterPackage
-      : { ...firstEntry, source: mcpAdapterPackage };
+      ? pinnedSource
+      : { ...firstEntry, source: pinnedSource };
   for (const index of matchingIndexes.slice(1).reverse())
     packages.splice(index, 1);
 };
@@ -155,6 +161,86 @@ const writeJson = (path, value) => {
   });
   renameSync(temporaryPath, path);
   chmodSync(path, 0o600);
+};
+
+const secureAssetTree = (directory) => {
+  chmodSync(directory, 0o700);
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) secureAssetTree(path);
+    else chmodSync(path, entry.name.endsWith(".sh") ? 0o700 : 0o600);
+  }
+};
+
+const installAssetDirectory = (source, target) => {
+  if (!existsSync(source)) throw new Error(`Missing bundled asset: ${source}`);
+  rmSync(target, { recursive: true, force: true });
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  cpSync(source, target, { recursive: true });
+  secureAssetTree(target);
+};
+
+const installBrowserChromeAssets = (agentDir) => {
+  const browserSkillDir = join(agentDir, "skills", "browser-chrome");
+  installAssetDirectory(
+    join(browserAssetsRoot, "skills", "browser-chrome"),
+    browserSkillDir,
+  );
+  installAssetDirectory(
+    join(browserAssetsRoot, "skills", "aad-task-package"),
+    join(agentDir, "skills", "aad-task-package"),
+  );
+
+  const agentSource = join(
+    browserAssetsRoot,
+    "agents",
+    "chrome-browser-agent.md",
+  );
+  if (!existsSync(agentSource))
+    throw new Error(`Missing bundled asset: ${agentSource}`);
+  const agentsDir = join(agentDir, "agents");
+  const agentTarget = join(agentsDir, "chrome-browser-agent.md");
+  mkdirSync(agentsDir, { recursive: true, mode: 0o700 });
+  cpSync(agentSource, agentTarget);
+  chmodSync(agentTarget, 0o600);
+  return browserSkillDir;
+};
+
+const installBrowserChromeMcp = (mcpPath, browserSkillDir) => {
+  const current = readSettings(mcpPath, true);
+  const existingServers = current.mcpServers ?? {};
+  if (
+    !existingServers ||
+    typeof existingServers !== "object" ||
+    Array.isArray(existingServers)
+  ) {
+    throw new Error(`Cannot read ${mcpPath}: mcpServers must be an object`);
+  }
+  const commonEnv = { CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1" };
+  writeJson(mcpPath, {
+    ...current,
+    mcpServers: {
+      ...existingServers,
+      "browser-chrome-control": {
+        command: join(browserSkillDir, "scripts", "control-mcp.sh"),
+        args: [],
+        lifecycle: "lazy",
+      },
+      "browser-chrome-headed": {
+        command: join(browserSkillDir, "scripts", "mcp.sh"),
+        args: ["headed"],
+        lifecycle: "lazy",
+        env: commonEnv,
+      },
+      "browser-chrome-headless": {
+        command: join(browserSkillDir, "scripts", "mcp.sh"),
+        args: ["headless"],
+        lifecycle: "lazy",
+        idleTimeout: 1,
+        env: commonEnv,
+      },
+    },
+  });
 };
 
 const shellQuote = (value) => `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -198,6 +284,7 @@ const install = () => {
   const binDir = options.binDir ?? join(home, ".local", "bin");
   const launcherPath = join(binDir, "pipi");
   const pipiSettingsPath = join(agentDir, "settings.json");
+  const pipiMcpPath = join(agentDir, "mcp.json");
   const regularAgentDir = join(home, ".pi", "agent");
   const regularSettingsPath = join(regularAgentDir, "settings.json");
   const regularAuthPath = join(regularAgentDir, "auth.json");
@@ -218,7 +305,8 @@ const install = () => {
     ? [...pipiSettings.packages]
     : [];
   addPackage(packages, repositoryRoot);
-  pinMcpAdapterPackage(packages);
+  pinNpmPackage(packages, mcpAdapterPackagePrefix, mcpAdapterPackage);
+  pinNpmPackage(packages, piSubagentsPackagePrefix, piSubagentsPackage);
 
   const codexManifestPath = join(options.codexTools, "package.json");
   if (existsSync(codexManifestPath)) {
@@ -251,13 +339,24 @@ const install = () => {
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
   mkdirSync(binDir, { recursive: true });
   if (!options.skipDependencies) {
-    ensureIsolatedNpmPackage({
+    ensureIsolatedNpmPackages({
       prefix: join(agentDir, "npm"),
-      packageName: "pi-mcp-adapter",
-      packageSpec: `pi-mcp-adapter@${mcpAdapterVersion}`,
-      expectedVersion: mcpAdapterVersion,
+      packages: [
+        {
+          packageName: "pi-mcp-adapter",
+          packageSpec: `pi-mcp-adapter@${mcpAdapterVersion}`,
+          expectedVersion: mcpAdapterVersion,
+        },
+        {
+          packageName: "pi-subagents",
+          packageSpec: `pi-subagents@${piSubagentsVersion}`,
+          expectedVersion: piSubagentsVersion,
+        },
+      ],
     });
   }
+  const browserSkillDir = installBrowserChromeAssets(agentDir);
+  installBrowserChromeMcp(pipiMcpPath, browserSkillDir);
   writeJson(pipiSettingsPath, nextSettings);
 
   if (options.shareAuth && !existsSync(pipiAuthPath)) {
@@ -271,6 +370,11 @@ const install = () => {
   console.log(`Installed Pipi launcher: ${launcherPath}`);
   console.log(`Pipi settings: ${pipiSettingsPath}`);
   console.log(`Pipi sessions: ${sessionDir}`);
+  console.log(`Browser Chrome skill: ${browserSkillDir}`);
+  console.log(
+    `Chrome browser agent: ${join(agentDir, "agents", "chrome-browser-agent.md")}`,
+  );
+  console.log(`Browser Chrome MCP config: ${pipiMcpPath}`);
   if (codexExecutable) console.log(`Codex CLI: ${codexExecutable}`);
   else
     console.warn(

@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "browser-chrome-control": {
+      "command": "browser-chrome-control-mcp",
+      "args": [],
+      "lifecycle": "lazy"
+    },
+    "browser-chrome-headed": {
+      "command": "browser-chrome-mcp",
+      "args": ["headed"],
+      "lifecycle": "lazy",
+      "env": {
+        "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS": "1"
+      }
+    },
+    "browser-chrome-headless": {
+      "command": "browser-chrome-mcp",
+      "args": ["headless"],
+      "lifecycle": "lazy",
+      "idleTimeout": 1,
+      "env": {
+        "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS": "1"
+      }
+    }
+  }
+}

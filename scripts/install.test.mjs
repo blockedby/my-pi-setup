@@ -20,6 +20,29 @@ const installScript = join(repositoryRoot, "scripts", "install.mjs");
 const uninstallScript = join(repositoryRoot, "scripts", "uninstall.mjs");
 const mcpAdapterPackage = "npm:pi-mcp-adapter@2.15.0";
 const legacyMcpAdapterPackage = "npm:pi-mcp-adapter";
+const piSubagentsPackage = "npm:pi-subagents@0.37.0";
+const legacyPiSubagentsPackage = "npm:pi-subagents";
+const browserSkillSource = join(
+  repositoryRoot,
+  "vendor",
+  "pi-agent-setup",
+  "skills",
+  "browser-chrome",
+);
+const taskPackageSkillSource = join(
+  repositoryRoot,
+  "vendor",
+  "pi-agent-setup",
+  "skills",
+  "aad-task-package",
+);
+const browserAgentSource = join(
+  repositoryRoot,
+  "vendor",
+  "pi-agent-setup",
+  "agents",
+  "chrome-browser-agent.md",
+);
 
 const createFixture = async () => {
   const home = await mkdtemp(join(tmpdir(), "pipi-install-"));
@@ -78,6 +101,31 @@ const install = (fixture, extraArgs = []) =>
 
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 
+const expectedBrowserMcpServers = (home) => {
+  const skillDir = join(home, ".pipi", "agent", "skills", "browser-chrome");
+  const commonEnv = { CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1" };
+  return {
+    "browser-chrome-control": {
+      command: join(skillDir, "scripts", "control-mcp.sh"),
+      args: [],
+      lifecycle: "lazy",
+    },
+    "browser-chrome-headed": {
+      command: join(skillDir, "scripts", "mcp.sh"),
+      args: ["headed"],
+      lifecycle: "lazy",
+      env: commonEnv,
+    },
+    "browser-chrome-headless": {
+      command: join(skillDir, "scripts", "mcp.sh"),
+      args: ["headless"],
+      lifecycle: "lazy",
+      idleTimeout: 1,
+      env: commonEnv,
+    },
+  };
+};
+
 test("clean install creates an isolated launcher and is idempotent", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
@@ -100,10 +148,9 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     join(regularAgentDir, "auth.json"),
     '{"secret":"must-not-copy"}\n',
   );
-  writeFileSync(
-    join(regularAgentDir, "mcp.json"),
-    '{"mcpServers":{"private":{"env":{"API_KEY":"must-not-copy"}}}}\n',
-  );
+  const regularMcp =
+    '{"mcpServers":{"private":{"env":{"API_KEY":"must-not-copy"}}}}\n';
+  writeFileSync(join(regularAgentDir, "mcp.json"), regularMcp);
 
   const first = install(fixture);
   assert.equal(first.status, 0, first.stderr);
@@ -127,11 +174,45 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   assert.deepEqual(settings.packages, [
     repositoryRoot,
     mcpAdapterPackage,
+    piSubagentsPackage,
     fixture.codexTools,
   ]);
+
+  const pipiAgentDir = join(fixture.home, ".pipi", "agent");
+  const installedBrowserSkill = join(pipiAgentDir, "skills", "browser-chrome");
+  const installedTaskPackageSkill = join(
+    pipiAgentDir,
+    "skills",
+    "aad-task-package",
+  );
+  const installedBrowserAgent = join(
+    pipiAgentDir,
+    "agents",
+    "chrome-browser-agent.md",
+  );
+  const pipiMcpPath = join(pipiAgentDir, "mcp.json");
   assert.equal(
-    existsSync(join(fixture.home, ".pipi", "agent", "mcp.json")),
-    false,
+    readFileSync(join(installedBrowserSkill, "SKILL.md"), "utf8"),
+    readFileSync(join(browserSkillSource, "SKILL.md"), "utf8"),
+  );
+  assert.equal(
+    readFileSync(join(installedTaskPackageSkill, "SKILL.md"), "utf8"),
+    readFileSync(join(taskPackageSkillSource, "SKILL.md"), "utf8"),
+  );
+  assert.equal(
+    readFileSync(installedBrowserAgent, "utf8"),
+    readFileSync(browserAgentSource, "utf8"),
+  );
+  assert.equal(
+    lstatSync(join(installedBrowserSkill, "scripts", "mcp.sh")).mode & 0o111,
+    0o100,
+  );
+  assert.deepEqual(readJson(pipiMcpPath), {
+    mcpServers: expectedBrowserMcpServers(fixture.home),
+  });
+  assert.equal(
+    readFileSync(join(regularAgentDir, "mcp.json"), "utf8"),
+    regularMcp,
   );
 
   const probe = execFileSync(
@@ -151,11 +232,19 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
 
   const firstLauncher = readFileSync(launcherPath, "utf8");
   const firstSettings = readFileSync(settingsPath, "utf8");
+  const firstMcp = readFileSync(pipiMcpPath, "utf8");
+  const firstAgent = readFileSync(installedBrowserAgent, "utf8");
   const second = install(fixture);
   assert.equal(second.status, 0, second.stderr);
   assert.equal(readFileSync(launcherPath, "utf8"), firstLauncher);
   assert.equal(readFileSync(settingsPath, "utf8"), firstSettings);
+  assert.equal(readFileSync(pipiMcpPath, "utf8"), firstMcp);
+  assert.equal(readFileSync(installedBrowserAgent, "utf8"), firstAgent);
   assert.equal(readFileSync(regularSettingsPath, "utf8"), regularSettings);
+  assert.equal(
+    readFileSync(join(regularAgentDir, "mcp.json"), "utf8"),
+    regularMcp,
+  );
 });
 
 test("default Pi resolution ignores npm's repository-local binary shim", async (t) => {
@@ -193,8 +282,15 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   const settingsPath = join(pipiAgentDir, "settings.json");
   writeFileSync(
     settingsPath,
-    `${JSON.stringify({ quietStartup: true, theme: "old-theme", packages: ["existing-package", repositoryRoot, { source: legacyMcpAdapterPackage, extensions: ["index.ts"] }] }, null, 2)}\n`,
+    `${JSON.stringify({ quietStartup: true, theme: "old-theme", packages: ["existing-package", repositoryRoot, { source: legacyMcpAdapterPackage, extensions: ["index.ts"] }, { source: legacyPiSubagentsPackage, skills: [] }] }, null, 2)}\n`,
   );
+  writeFileSync(
+    join(pipiAgentDir, "mcp.json"),
+    `${JSON.stringify({ mcpServers: { existing: { command: "existing-command" } } }, null, 2)}\n`,
+  );
+  const staleSkillDir = join(pipiAgentDir, "skills", "browser-chrome");
+  mkdirSync(staleSkillDir, { recursive: true });
+  writeFileSync(join(staleSkillDir, "stale.txt"), "remove me\n");
 
   const result = install(fixture);
   assert.equal(result.status, 0, result.stderr);
@@ -205,9 +301,17 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
       "existing-package",
       repositoryRoot,
       { source: mcpAdapterPackage, extensions: ["index.ts"] },
+      { source: piSubagentsPackage, skills: [] },
       fixture.codexTools,
     ],
   });
+  assert.deepEqual(readJson(join(pipiAgentDir, "mcp.json")), {
+    mcpServers: {
+      existing: { command: "existing-command" },
+      ...expectedBrowserMcpServers(fixture.home),
+    },
+  });
+  assert.equal(existsSync(join(staleSkillDir, "stale.txt")), false);
 });
 
 test("install refuses a missing Pi executable before writing files", async (t) => {
