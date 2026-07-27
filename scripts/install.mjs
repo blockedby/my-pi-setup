@@ -14,10 +14,16 @@ import {
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { installDependencies } from "./install-dependencies.mjs";
+import {
+  ensureIsolatedNpmPackage,
+  installDependencies,
+} from "./install-dependencies.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const managedLauncherMarker = "# Managed by pipi-alias installer.";
+const mcpAdapterVersion = "2.15.0";
+const mcpAdapterPackage = `npm:pi-mcp-adapter@${mcpAdapterVersion}`;
+const mcpAdapterPackagePrefix = "npm:pi-mcp-adapter";
 const modelDefaults = [
   "defaultProvider",
   "defaultModel",
@@ -119,6 +125,29 @@ const addPackage = (packages, path) => {
     packages.push(path);
 };
 
+const pinMcpAdapterPackage = (packages) => {
+  const matchingIndexes = packages.flatMap((entry, index) => {
+    const source = packageSource(entry);
+    return source === mcpAdapterPackagePrefix ||
+      source?.startsWith(`${mcpAdapterPackagePrefix}@`)
+      ? [index]
+      : [];
+  });
+  if (matchingIndexes.length === 0) {
+    packages.push(mcpAdapterPackage);
+    return;
+  }
+
+  const firstIndex = matchingIndexes[0];
+  const firstEntry = packages[firstIndex];
+  packages[firstIndex] =
+    typeof firstEntry === "string"
+      ? mcpAdapterPackage
+      : { ...firstEntry, source: mcpAdapterPackage };
+  for (const index of matchingIndexes.slice(1).reverse())
+    packages.splice(index, 1);
+};
+
 const writeJson = (path, value) => {
   const temporaryPath = `${path}.${process.pid}.tmp`;
   writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
@@ -189,6 +218,7 @@ const install = () => {
     ? [...pipiSettings.packages]
     : [];
   addPackage(packages, repositoryRoot);
+  pinMcpAdapterPackage(packages);
 
   const codexManifestPath = join(options.codexTools, "package.json");
   if (existsSync(codexManifestPath)) {
@@ -220,6 +250,14 @@ const install = () => {
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
   mkdirSync(binDir, { recursive: true });
+  if (!options.skipDependencies) {
+    ensureIsolatedNpmPackage({
+      prefix: join(agentDir, "npm"),
+      packageName: "pi-mcp-adapter",
+      packageSpec: `pi-mcp-adapter@${mcpAdapterVersion}`,
+      expectedVersion: mcpAdapterVersion,
+    });
+  }
   writeJson(pipiSettingsPath, nextSettings);
 
   if (options.shareAuth && !existsSync(pipiAuthPath)) {

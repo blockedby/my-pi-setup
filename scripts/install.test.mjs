@@ -18,6 +18,8 @@ import test from "node:test";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const installScript = join(repositoryRoot, "scripts", "install.mjs");
 const uninstallScript = join(repositoryRoot, "scripts", "uninstall.mjs");
+const mcpAdapterPackage = "npm:pi-mcp-adapter@2.15.0";
+const legacyMcpAdapterPackage = "npm:pi-mcp-adapter";
 
 const createFixture = async () => {
   const home = await mkdtemp(join(tmpdir(), "pipi-install-"));
@@ -98,6 +100,10 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     join(regularAgentDir, "auth.json"),
     '{"secret":"must-not-copy"}\n',
   );
+  writeFileSync(
+    join(regularAgentDir, "mcp.json"),
+    '{"mcpServers":{"private":{"env":{"API_KEY":"must-not-copy"}}}}\n',
+  );
 
   const first = install(fixture);
   assert.equal(first.status, 0, first.stderr);
@@ -118,7 +124,15 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   assert.equal(settings.defaultModel, "model-test");
   assert.equal(settings.defaultThinkingLevel, "high");
   assert.equal(settings.theme, "github-dark-default");
-  assert.deepEqual(settings.packages, [repositoryRoot, fixture.codexTools]);
+  assert.deepEqual(settings.packages, [
+    repositoryRoot,
+    mcpAdapterPackage,
+    fixture.codexTools,
+  ]);
+  assert.equal(
+    existsSync(join(fixture.home, ".pipi", "agent", "mcp.json")),
+    false,
+  );
 
   const probe = execFileSync(
     launcherPath,
@@ -179,7 +193,7 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   const settingsPath = join(pipiAgentDir, "settings.json");
   writeFileSync(
     settingsPath,
-    `${JSON.stringify({ quietStartup: true, theme: "old-theme", packages: ["existing-package", repositoryRoot] }, null, 2)}\n`,
+    `${JSON.stringify({ quietStartup: true, theme: "old-theme", packages: ["existing-package", repositoryRoot, { source: legacyMcpAdapterPackage, extensions: ["index.ts"] }] }, null, 2)}\n`,
   );
 
   const result = install(fixture);
@@ -187,7 +201,12 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   assert.deepEqual(readJson(settingsPath), {
     quietStartup: true,
     theme: "github-dark-default",
-    packages: ["existing-package", repositoryRoot, fixture.codexTools],
+    packages: [
+      "existing-package",
+      repositoryRoot,
+      { source: mcpAdapterPackage, extensions: ["index.ts"] },
+      fixture.codexTools,
+    ],
   });
 });
 

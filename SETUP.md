@@ -8,6 +8,7 @@ Pipi is a side-by-side launcher for the existing Pi CLI. It does not replace `pi
 - an existing `pi` executable in `PATH`
 - `codex` in `PATH` for Codex subagents and Codex-backed tools
 - optional sibling checkout `../pi-codex` (`pi-codex-tools`)
+- npm access for the initial isolated `pi-mcp-adapter` install
 
 The file-search extension uses system `fd`/`fdfind` and `rg` when available. If either is missing, it can download its supported fallback binary into `~/.pipi/agent/bin` at first Pipi startup.
 
@@ -25,7 +26,7 @@ The installer reproducibly installs root and extension dependencies from their l
 - `~/.pipi/agent/settings.json` — Pipi-only settings
 - `~/.pipi/sessions` — Pipi-only session storage
 
-It loads this checkout as a local Pi package and adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package. It also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings and package entries are preserved.
+It loads this checkout as a local Pi package, adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package, and registers `npm:pi-mcp-adapter@2.15.0`. The MCP adapter is installed under `~/.pipi/agent/npm` so an older global package cannot shadow it. The installer also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings and package entries are preserved.
 
 Add `~/.local/bin` to `PATH` if necessary, then verify the launcher:
 
@@ -33,7 +34,7 @@ Add `~/.local/bin` to `PATH` if necessary, then verify the launcher:
 pipi --version
 ```
 
-Re-running the installer is safe and idempotent. For an already prepared development checkout, `--skip-dependencies` skips the lockfile installs:
+Re-running the installer is safe and idempotent. For an already prepared development checkout with the isolated MCP adapter already present, `--skip-dependencies` skips all dependency installs:
 
 ```sh
 npm run install:pipi -- --skip-dependencies
@@ -44,6 +45,19 @@ Custom executable and package locations are supported:
 ```sh
 npm run install:pipi -- --pi /path/to/pi --codex-tools /path/to/pi-codex
 ```
+
+## MCP adapter
+
+Pipi uses the same adapter version observed in regular Pi, but installs its own package copy:
+
+```text
+npm:pi-mcp-adapter@2.15.0
+~/.pipi/agent/npm/node_modules/pi-mcp-adapter
+```
+
+Open Pipi and use `/mcp` or `/mcp setup`. Other useful commands include `/mcp tools`, `/mcp reconnect`, and `/mcp-auth <server>`.
+
+The installer deliberately does not copy or link `~/.pi/agent/mcp.json` because that file can contain server credentials or secret-bearing environment fields. Standard shared configs such as `~/.config/mcp/mcp.json` and project `.mcp.json` files remain discoverable. Use `/mcp setup` to create or adopt an isolated Pipi configuration.
 
 ## Isolation and authentication
 
@@ -84,7 +98,8 @@ The uninstaller refuses to remove a `pipi` launcher that lacks its managed-file 
 npm run test:installer
 npm run check
 npm run format:check
-npm test
 ```
 
-Installer tests use temporary home directories and fake `pi`/`codex` executables; they never write to the real user configuration.
+Installer tests use temporary home directories and fake `pi`/`codex` executables; they never write to the real user configuration. Run the broad `npm test` command only when live backend calls are explicitly authorized: upstream tests can detect installed Claude/Codex CLIs and invoke them.
+
+See [docs/pipi-setup-record.md](docs/pipi-setup-record.md) for the complete local change record and pending steps.
