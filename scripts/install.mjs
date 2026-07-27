@@ -72,7 +72,8 @@ const parseArgs = (args) => {
   return options;
 };
 
-const findExecutable = (command) => {
+const findExecutable = (command, excludedDirectories = []) => {
+  const excluded = new Set(excludedDirectories.map((path) => resolve(path)));
   const candidates = command.includes("/")
     ? [isAbsolute(command) ? command : resolve(command)]
     : (process.env.PATH ?? "")
@@ -82,6 +83,7 @@ const findExecutable = (command) => {
 
   for (const candidate of candidates) {
     try {
+      if (excluded.has(resolve(dirname(candidate)))) continue;
       accessSync(candidate, constants.X_OK);
       return resolve(candidate);
     } catch {
@@ -152,7 +154,10 @@ const validateAuthShare = (regularAuthPath, pipiAuthPath) => {
 const install = () => {
   const options = parseArgs(process.argv.slice(2));
   const home = process.env.HOME || homedir();
-  const piExecutable = findExecutable(options.pi ?? "pi");
+  const piExecutable = findExecutable(
+    options.pi ?? "pi",
+    options.pi ? [] : [join(repositoryRoot, "node_modules", ".bin")],
+  );
   if (!piExecutable)
     throw new Error(
       `Pi executable is not executable or was not found: ${options.pi ?? "pi"}`,

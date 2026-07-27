@@ -26,7 +26,7 @@ const createFixture = async () => {
   mkdirSync(fakeBin, { recursive: true });
   mkdirSync(codexTools, { recursive: true });
 
-  const piPath = join(fakeBin, "pi.cjs");
+  const piPath = join(fakeBin, "pi");
   writeFileSync(
     piPath,
     `#!/usr/bin/env node
@@ -142,6 +142,32 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   assert.equal(readFileSync(launcherPath, "utf8"), firstLauncher);
   assert.equal(readFileSync(settingsPath, "utf8"), firstSettings);
   assert.equal(readFileSync(regularSettingsPath, "utf8"), regularSettings);
+});
+
+test("default Pi resolution ignores npm's repository-local binary shim", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const result = spawnSync(
+    process.execPath,
+    [installScript, "--skip-dependencies", "--codex-tools", fixture.codexTools],
+    {
+      cwd: repositoryRoot,
+      env: {
+        ...fixture.env,
+        PATH: `${join(repositoryRoot, "node_modules", ".bin")}:${fixture.env.PATH}`,
+      },
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const launcher = readFileSync(
+    join(fixture.home, ".local", "bin", "pipi"),
+    "utf8",
+  );
+  assert.match(launcher, new RegExp(`exec '${fixture.piPath}'`));
+  assert.equal(launcher.includes(join(repositoryRoot, "node_modules")), false);
 });
 
 test("existing Pipi settings retain unrelated values and packages", async (t) => {
