@@ -27,6 +27,7 @@ Included resources:
 | ---------------------- | ------------------------------------- |
 | `subagents`            | Delegate work to child models         |
 | `background-terminals` | Run and monitor background commands   |
+| `code-review`          | Review changes for actionable defects |
 | `browser-chrome`       | Select and control a safe Chrome mode |
 | `codex-tools`          | Search, fetch, patch, and Codex tasks |
 
