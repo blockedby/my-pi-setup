@@ -243,6 +243,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     sessionContext = ctx;
     if (ctx.hasUI) ui = ctx.ui;
+    // Keep the upstream implementation, but hide its blocking tool from agents.
+    pi.setActiveTools(pi.getActiveTools().filter((n) => n !== "subagent_wait"));
   });
 
   pi.on("agent_settled", flushResults);
