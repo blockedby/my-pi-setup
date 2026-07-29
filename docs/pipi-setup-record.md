@@ -7,7 +7,7 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Item                                    | Location / value                                         |
 | --------------------------------------- | -------------------------------------------------------- |
 | Source checkout                         | `/home/kcnc/code/tools/pipi-alias`                       |
-| Source branch                           | `feat/evidence-driven-reviewer-subrepo`                  |
+| Source branch                           | `main`                                                   |
 | Launcher                                | `/home/kcnc/.local/bin/pipi`                             |
 | Pi executable used                      | `/home/kcnc/.local/bin/pi`                               |
 | Pipi settings                           | `/home/kcnc/.pipi/agent/settings.json`                   |
@@ -170,6 +170,15 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Built the child Python wheel in `/tmp`, installed it into a clean virtual environment, and validated request/result/routing behavior through the installed `evidence-review` entry point.
 - No live model, authenticated browser, production location, or regular Pi setting was used. The temporary clones and logs remain available for inspection and can be deleted as one directory.
 
+### 14. PR merge and local Pipi refresh
+
+- Merged pull request #3 into `origin/main` as merge commit `581c344b643b039cd517d3663944e335a227b70e` and removed the remote feature branch.
+- Fast-forwarded the local `main`, synchronized `.gitmodules`, and initialized the reviewer child at gitlink commit `81053d6a05f2160341582d2eacf30cbc9f2c3bd5`.
+- Re-verified the exact clean gitlink, 19 installer/submodule tests, 51 child tests, TypeScript, Prettier, and both review-result examples from merged `main`.
+- Re-ran `npm run install:pipi -- --skip-dependencies` against the real isolated local setup.
+- Verified `pipi --version` reports `0.82.1`, the three expected package sources remain registered, the canonical package skill exists under the reviewer submodule, and no duplicate host `skills/code-review` path exists.
+- Preserved separate Pipi auth and did not invoke a live model or browser.
+
 ## Current package sources
 
 The installer keeps these package sources in Pipi settings:
@@ -216,6 +225,7 @@ Pipi now has its own three browser Chrome MCP servers. Use `browser-chrome-contr
 10. Require every user-requested Pipi operation to be logged and push this work to `main` — logging policy added to `AGENTS.md`; repository validation and push evidence are recorded below.
 11. Add the evidence-driven reviewer as a subrepo, make its skill integration canonical, check related scripts, add maintenance rules, and prepare a pull request; after clarification, convert it to a true Git submodule visible on GitHub — implemented on `feat/evidence-driven-reviewer-subrepo`; merge remains pending user review.
 12. Create a disposable installation under `/tmp` and check the install/uninstall scripts — completed at `/tmp/pipi-submodule-install-check` with uninitialized, recursive, skip-dependency, full-dependency, idempotence, launcher, uninstall, purge, and child Python-package checks.
+13. Merge pull request #3 and update the real local Pipi setup — merged as `581c344`, synchronized local `main` and the pinned submodule, re-ran checks, refreshed Pipi with `--skip-dependencies`, and verified version/package/skill isolation.
 
 ## Pending steps explicitly connected to user requests
 
