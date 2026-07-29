@@ -29,6 +29,7 @@ const mcpAdapterPackage = `npm:pi-mcp-adapter@${mcpAdapterVersion}`;
 const mcpAdapterPackagePrefix = "npm:pi-mcp-adapter";
 const removedPiSubagentsPackagePrefix = "npm:pi-subagents";
 const browserAssetsRoot = join(repositoryRoot, "vendor", "pi-agent-setup");
+const submoduleConfigPath = join(repositoryRoot, "config", "submodules.json");
 const modelDefaults = [
   "defaultProvider",
   "defaultModel",
@@ -199,6 +200,44 @@ const removePiSubagentsAssets = (agentDir) => {
   }
 };
 
+const validateReviewerAssets = () => {
+  let reviewer;
+  try {
+    const config = JSON.parse(readFileSync(submoduleConfigPath, "utf8"));
+    reviewer = config.submodules?.["gpt5.6-reviewer"];
+  } catch (error) {
+    throw new Error(
+      `Cannot read reviewer submodule config: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (
+    !reviewer ||
+    typeof reviewer.path !== "string" ||
+    !Array.isArray(reviewer.requiredFiles) ||
+    reviewer.requiredFiles.length === 0 ||
+    reviewer.requiredFiles.some((path) => typeof path !== "string" || !path)
+  ) {
+    throw new Error(
+      `Invalid reviewer submodule config: ${submoduleConfigPath}`,
+    );
+  }
+
+  const reviewerAssetsRoot = join(repositoryRoot, reviewer.path);
+  if (!existsSync(join(reviewerAssetsRoot, ".git"))) {
+    throw new Error(
+      `Reviewer submodule is not initialized: ${reviewerAssetsRoot}; run git submodule update --init --recursive`,
+    );
+  }
+  for (const relativePath of reviewer.requiredFiles) {
+    const path = join(reviewerAssetsRoot, relativePath);
+    if (!existsSync(path))
+      throw new Error(
+        `Missing reviewer submodule asset: ${path}; run git submodule update --init --recursive`,
+      );
+  }
+  return join(reviewerAssetsRoot, "skills", "code-review");
+};
+
 const installBrowserChromeAssets = (agentDir) => {
   const browserSkillDir = join(agentDir, "skills", "browser-chrome");
   installAssetDirectory(
@@ -343,6 +382,7 @@ const install = () => {
   }
 
   if (options.shareAuth) validateAuthShare(regularAuthPath, pipiAuthPath);
+  const reviewerSkillDir = validateReviewerAssets();
   if (!options.skipDependencies) installDependencies();
 
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
@@ -373,6 +413,7 @@ const install = () => {
   console.log(`Pipi settings: ${pipiSettingsPath}`);
   console.log(`Pipi sessions: ${sessionDir}`);
   console.log(`Browser Chrome skill: ${browserSkillDir}`);
+  console.log(`Evidence-driven code-review skill: ${reviewerSkillDir}`);
   console.log(`Browser Chrome MCP config: ${pipiMcpPath}`);
   if (codexExecutable) console.log(`Codex CLI: ${codexExecutable}`);
   else

@@ -28,6 +28,13 @@ const browserSkillSource = join(
   "skills",
   "browser-chrome",
 );
+const reviewerSubmodule = join(repositoryRoot, "vendor", "gpt5.6-reviewer");
+const reviewerSkillSource = join(
+  reviewerSubmodule,
+  "skills",
+  "code-review",
+  "SKILL.md",
+);
 const createFixture = async () => {
   const home = await mkdtemp(join(tmpdir(), "pipi-install-"));
   const fakeBin = join(home, "fake-bin");
@@ -140,6 +147,10 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   const first = install(fixture);
   assert.equal(first.status, 0, first.stderr);
   assert.match(first.stdout, /Codex CLI:/);
+  assert.match(
+    first.stdout,
+    new RegExp(`Evidence-driven code-review skill: ${reviewerSubmodule}`),
+  );
 
   const launcherPath = join(fixture.home, ".local", "bin", "pipi");
   const settingsPath = join(fixture.home, ".pipi", "agent", "settings.json");
@@ -222,6 +233,37 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     readFileSync(join(regularAgentDir, "mcp.json"), "utf8"),
     regularMcp,
   );
+});
+
+test("package loads the canonical submodule code-review skill once", () => {
+  const manifest = readJson(join(repositoryRoot, "package.json"));
+  const submodules = readJson(
+    join(repositoryRoot, "config", "submodules.json"),
+  );
+  const reviewer = submodules.submodules["gpt5.6-reviewer"];
+
+  assert.equal(existsSync(reviewerSkillSource), true);
+  assert.match(
+    readFileSync(reviewerSkillSource, "utf8"),
+    /^---\nname: code-review\n/,
+  );
+  assert.equal(
+    existsSync(join(repositoryRoot, "skills", "code-review")),
+    false,
+  );
+  assert.equal(
+    manifest.pi.skills.filter(
+      (path) => path === "./vendor/gpt5.6-reviewer/skills",
+    ).length,
+    1,
+  );
+  assert.equal(reviewer.path, "vendor/gpt5.6-reviewer");
+  assert.equal(
+    reviewer.url,
+    "https://github.com/blockedby/gpt5.6-reviewer.git",
+  );
+  assert.equal(reviewer.branch, "main");
+  assert.equal(reviewer.piSkillPath, "./vendor/gpt5.6-reviewer/skills");
 });
 
 test("default Pi resolution ignores npm's repository-local binary shim", async (t) => {
@@ -312,6 +354,95 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   assert.equal(existsSync(removedAgent), false);
   for (const path of [...removedPackages, ...removedBins]) {
     assert.equal(existsSync(path), false);
+  }
+});
+
+test("install rejects an uninitialized reviewer submodule before writing Pipi state", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const cloneRoot = join(fixture.home, "pipi-alias-uninitialized");
+  execFileSync(
+    "git",
+    ["clone", "-q", "--no-hardlinks", repositoryRoot, cloneRoot],
+    { encoding: "utf8" },
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(cloneRoot, "scripts", "install.mjs"),
+      "--skip-dependencies",
+      "--pi",
+      fixture.piPath,
+      "--codex-tools",
+      fixture.codexTools,
+    ],
+    { cwd: cloneRoot, env: fixture.env, encoding: "utf8" },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Reviewer submodule is not initialized/);
+  assert.match(result.stderr, /git submodule update --init --recursive/);
+  assert.equal(existsSync(join(fixture.home, ".pipi")), false);
+  assert.equal(existsSync(join(fixture.home, ".local", "bin", "pipi")), false);
+});
+
+test("install rejects every configured missing reviewer asset before writing Pipi state", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const cloneRoot = join(fixture.home, "pipi-alias-clone");
+  execFileSync(
+    "git",
+    ["clone", "-q", "--no-hardlinks", repositoryRoot, cloneRoot],
+    { encoding: "utf8" },
+  );
+  execFileSync("git", [
+    "-C",
+    cloneRoot,
+    "config",
+    "submodule.vendor/gpt5.6-reviewer.url",
+    reviewerSubmodule,
+  ]);
+  execFileSync("git", [
+    "-C",
+    cloneRoot,
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "update",
+    "--init",
+    "--recursive",
+  ]);
+  const submodules = readJson(join(cloneRoot, "config", "submodules.json"));
+  const reviewer = submodules.submodules["gpt5.6-reviewer"];
+  for (const relativePath of reviewer.requiredFiles) {
+    const assetPath = join(cloneRoot, reviewer.path, relativePath);
+    const original = readFileSync(assetPath);
+    await rm(assetPath);
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(cloneRoot, "scripts", "install.mjs"),
+        "--skip-dependencies",
+        "--pi",
+        fixture.piPath,
+        "--codex-tools",
+        fixture.codexTools,
+      ],
+      { cwd: cloneRoot, env: fixture.env, encoding: "utf8" },
+    );
+
+    assert.notEqual(result.status, 0, relativePath);
+    assert.match(result.stderr, /Missing reviewer submodule asset:/);
+    assert.equal(result.stderr.includes(relativePath), true, relativePath);
+    assert.equal(existsSync(join(fixture.home, ".pipi")), false);
+    assert.equal(
+      existsSync(join(fixture.home, ".local", "bin", "pipi")),
+      false,
+    );
+    writeFileSync(assetPath, original);
   }
 });
 
@@ -411,7 +542,9 @@ test("removed web provider is absent from tracked source and manifests", () => {
 
   const matchingContents = trackedFiles.filter((path) => {
     if (path === "assets/pi-setup.jpeg") return false;
-    return readFileSync(join(repositoryRoot, path), "utf8")
+    const absolutePath = join(repositoryRoot, path);
+    if (!lstatSync(absolutePath).isFile()) return false;
+    return readFileSync(absolutePath, "utf8")
       .toLowerCase()
       .includes(removedProvider);
   });

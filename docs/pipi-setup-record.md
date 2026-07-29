@@ -7,7 +7,7 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Item                                    | Location / value                                         |
 | --------------------------------------- | -------------------------------------------------------- |
 | Source checkout                         | `/home/kcnc/code/tools/pipi-alias`                       |
-| Source branch                           | `feat/pipi-alias`                                        |
+| Source branch                           | `feat/evidence-driven-reviewer-subrepo`                  |
 | Launcher                                | `/home/kcnc/.local/bin/pipi`                             |
 | Pi executable used                      | `/home/kcnc/.local/bin/pi`                               |
 | Pipi settings                           | `/home/kcnc/.pipi/agent/settings.json`                   |
@@ -19,6 +19,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | MCP adapter                             | `npm:pi-mcp-adapter@2.15.0`                              |
 | Isolated MCP package files              | `/home/kcnc/.pipi/agent/npm/node_modules/pi-mcp-adapter` |
 | Browser Chrome skill                    | `/home/kcnc/.pipi/agent/skills/browser-chrome`           |
+| Evidence-driven reviewer submodule      | `vendor/gpt5.6-reviewer` at `81053d6`                    |
+| Canonical code-review skill             | `vendor/gpt5.6-reviewer/skills/code-review`              |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
 | Pi version at initial acceptance        | `0.82.1`                                                 |
@@ -33,6 +35,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Pipi auth is separate by default. No auth secret bytes were copied.
 - Pipi's MCP adapter is isolated under `~/.pipi/agent/npm`.
 - The browser skill and MCP commands are Pipi-owned copies under `~/.pipi/agent`.
+- The canonical code-review skill is loaded directly from the initialized, commit-pinned reviewer submodule; no duplicate host copy is loaded.
+- The installer never fetches or advances the submodule, and its optional Python CLI is not installed or executed by Pipi setup.
 - The optional `pi-subagents` named-agent extension is not installed.
 - Regular Pi's `mcp.json` was not copied or linked because it contains environment fields that may hold secrets.
 - The removed web-search provider is not installed, configured, or required.
@@ -143,6 +147,29 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Verified the composed Sol, Terra, and Luna context windows with `pipi --list-models`.
 - Published the validated configuration and documentation as commit `15ece42` from local `main` to `origin/main`; this follow-up records the successful push result.
 
+### 12. Evidence-driven reviewer submodule and canonical skill
+
+- Added `https://github.com/blockedby/gpt5.6-reviewer.git` as a real Git submodule at `vendor/gpt5.6-reviewer`, with the parent gitlink pinned to commit `81053d6a05f2160341582d2eacf30cbc9f2c3bd5` and `.gitmodules` tracking `main` for explicit maintainer updates.
+- Replaced the older host `skills/code-review` copy with the submodule's canonical `skills/code-review` package path, preventing Pi skill-name collisions.
+- Added durable initialize/update/no-direct-edit rules to `AGENTS.md` and machine-readable integration requirements in `config/submodules.json`.
+- Added `scripts/check-submodules.mjs`, `npm run check:submodules`, initialized/clean gitlink coverage, installer preflight coverage, and user/setup documentation.
+- Kept the Python contract CLI available in the pinned child but did not install or execute it as part of Pipi setup.
+- Re-ran the isolated Pipi installer with `--skip-dependencies`; it validated and reported the canonical submodule skill while preserving the existing package list and isolated runtime paths.
+- Verified 19 installer/submodule tests, 51 child reviewer tests on the default Python, TypeScript, Prettier, submodule integrity, both reviewer example results, and 8 existing browser-control tests. No live model or authenticated browser check was run.
+- The earlier subtree implementation was independently reviewed and remediated before the user clarified that GitHub must display a true submodule. A fresh review of the final submodule composition found three integration/documentation blockers; all were remediated with retained tests and closure returned `READY`.
+- Updated pull request #3 from `feat/evidence-driven-reviewer-subrepo`; merge remains a separate user decision.
+
+### 13. Disposable `/tmp` installation acceptance
+
+- Created `/tmp/pipi-submodule-install-check` with separate uninitialized and recursive clones, fake `pi`/`codex` executables, isolated HOME directories, logs, and package fixtures.
+- Confirmed the uninitialized clone exits 1 with the documented `git submodule update --init --recursive` instruction and creates no Pipi state or launcher.
+- Confirmed the recursive clone resolves `vendor/gpt5.6-reviewer` exactly to gitlink commit `81053d6a05f2160341582d2eacf30cbc9f2c3bd5` with a clean child worktree.
+- Ran `check:submodules` and all 19 installer/submodule tests from the fresh clone.
+- Verified skip-dependency installation, byte-stable idempotent reinstall, isolated launcher environment/argument forwarding, non-purge uninstall preservation, and purge removal.
+- Ran the full dependency installer in the temporary clone, verified isolated `pi-mcp-adapter` 2.15.0, three expected package entries, separate auth, launcher operation, and complete purge.
+- Built the child Python wheel in `/tmp`, installed it into a clean virtual environment, and validated request/result/routing behavior through the installed `evidence-review` entry point.
+- No live model, authenticated browser, production location, or regular Pi setting was used. The temporary clones and logs remain available for inspection and can be deleted as one directory.
+
 ## Current package sources
 
 The installer keeps these package sources in Pipi settings:
@@ -153,7 +180,7 @@ npm:pi-mcp-adapter@2.15.0
 /home/kcnc/code/tools/pi-codex
 ```
 
-Unrelated user-added Pipi packages are preserved.
+Unrelated user-added Pipi packages are preserved. The reviewer is a pinned Git submodule used by the creator setup package, not a separate Pipi settings package.
 
 ## How to use MCP in Pipi
 
@@ -187,14 +214,17 @@ Pipi now has its own three browser Chrome MCP servers. Use `browser-chrome-contr
 8. Remove the unrequested `pi-subagents` extension and keep only the browser skill plus MCP — completed; the named-agent file and its agent-only skill dependency were also removed and this correction was logged.
 9. Configure and durably record custom GPT-5.6 context windows — completed with Sol at 500K and Terra/Luna at 300K in both the Pipi runtime config and `config/pipi-model-overrides.json`.
 10. Require every user-requested Pipi operation to be logged and push this work to `main` — logging policy added to `AGENTS.md`; repository validation and push evidence are recorded below.
+11. Add the evidence-driven reviewer as a subrepo, make its skill integration canonical, check related scripts, add maintenance rules, and prepare a pull request; after clarification, convert it to a true Git submodule visible on GitHub — implemented on `feat/evidence-driven-reviewer-subrepo`; merge remains pending user review.
+12. Create a disposable installation under `/tmp` and check the install/uninstall scripts — completed at `/tmp/pipi-submodule-install-check` with uninitialized, recursive, skip-dependency, full-dependency, idempotence, launcher, uninstall, purge, and child Python-package checks.
 
 ## Pending steps explicitly connected to user requests
 
 1. **Authenticate Pipi for model use.** Run `pipi`, then `/login`, unless auth sharing is explicitly requested. The default remains separate.
-2. **Reload after this installation.** Start a new Pipi session or run `/reload` so the browser skill/MCP configuration is refreshed and the removed extension is unloaded.
+2. **Reload after this installation.** Start a new Pipi session or run `/reload` so the browser skill/MCP configuration and canonical evidence-driven code-review skill are refreshed.
 3. **Choose browser mode safely.** Use disposable headless mode by default. Use headed persistent mode only when a future requested task needs the current browser login/profile.
 4. **Choose any additional MCP servers.** Browser MCP is configured. Use `/mcp setup` only for other servers; importing regular Pi's secret-bearing config requires a separate explicit decision.
 5. **Keep this record current.** `AGENTS.md` now requires every user-requested Pipi operation to append the request, action, affected paths or values, verification, and pending steps here without secrets.
+6. **Remove disposable acceptance files when no longer needed.** `/tmp/pipi-submodule-install-check` contains only temporary clones, fake executables, isolated homes, logs, a wheel, and a virtual environment created for this test.
 
 ## Discussed ideas that are not requested implementation
 
@@ -209,6 +239,7 @@ Use targeted checks that do not call paid models:
 
 ```sh
 cd /home/kcnc/code/tools/pipi-alias
+npm run check:submodules
 npm run test:installer
 npm run check
 npm run format:check
@@ -226,4 +257,7 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Do not modify regular Pi settings as part of Pipi installation.
 - Do not push or publish without explicit permission.
 - Prefer pinned, isolated dependencies when global package resolution could select the wrong version.
+- Do not edit `vendor/gpt5.6-reviewer` directly; initialize it with `git submodule update --init --recursive`, and update it only by reviewing a child commit and committing the changed parent gitlink.
+- Keep `.gitmodules` and `config/submodules.json` synchronized; installers must never fetch or advance the child automatically.
+- Do not restore a duplicate host `skills/code-review`; load the canonical submodule skill through `package.json`.
 - Record future completed and pending work in this file.

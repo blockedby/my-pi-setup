@@ -1,0 +1,22 @@
+{
+  "submodules": {
+    "gpt5.6-reviewer": {
+      "path": "vendor/gpt5.6-reviewer",
+      "gitmodulesName": "vendor/gpt5.6-reviewer",
+      "url": "https://github.com/blockedby/gpt5.6-reviewer.git",
+      "branch": "main",
+      "requiredFiles": [
+        "AGENTS.md",
+        "agents/code-reviewer.md",
+        "skills/code-review/SKILL.md",
+        "skills/code-review/verifier-prompt.md",
+        "schemas/finding.schema.json",
+        "schemas/review-request.schema.json",
+        "schemas/review-result.schema.json",
+        "scripts/review_policy.py"
+      ],
+      "piSkillPath": "./vendor/gpt5.6-reviewer/skills",
+      "replacesHostPaths": ["skills/code-review"]
+    }
+  }
+}
