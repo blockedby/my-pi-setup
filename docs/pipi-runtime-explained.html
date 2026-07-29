@@ -1,0 +1,918 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A visual explanation of how the Pipi launcher, Pi runtime, isolated profile, and in-process subagents fit together."
+    />
+    <link rel="icon" href="data:," />
+    <title>How Pipi Runs Pi Agents</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #111;
+        --paper: #fff;
+        --muted: #5a5a5a;
+        --soft: #f1f1f1;
+        --line: #111;
+        --measure: 74rem;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--paper);
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 1rem;
+        line-height: 1.6;
+      }
+
+      a {
+        color: inherit;
+        text-decoration-thickness: 2px;
+        text-underline-offset: 0.18em;
+      }
+
+      a:hover {
+        text-decoration-style: double;
+      }
+
+      a:focus-visible {
+        outline: 3px solid var(--ink);
+        outline-offset: 4px;
+      }
+
+      code,
+      pre,
+      .mono,
+      .eyebrow,
+      .node-label,
+      .tag {
+        font-family: "Courier New", Courier, monospace;
+      }
+
+      code {
+        padding: 0.1em 0.32em;
+        border: 1px solid var(--line);
+        background: var(--soft);
+        overflow-wrap: anywhere;
+      }
+
+      pre {
+        margin: 0;
+        padding: 1.25rem;
+        border: 2px solid var(--line);
+        background: var(--soft);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .page {
+        width: min(calc(100% - 2rem), var(--measure));
+        margin-inline: auto;
+      }
+
+      header {
+        padding: clamp(3.5rem, 9vw, 7rem) 0 3rem;
+        border-bottom: 4px solid var(--line);
+      }
+
+      .eyebrow {
+        margin: 0 0 1rem;
+        font-size: 0.8rem;
+        font-weight: 700;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3,
+      p,
+      figure {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 10ch;
+        margin-bottom: 1.5rem;
+        font-size: clamp(3.2rem, 10vw, 7.8rem);
+        line-height: 0.88;
+        letter-spacing: -0.065em;
+      }
+
+      h2 {
+        max-width: 20ch;
+        margin-bottom: 1.5rem;
+        font-size: clamp(2rem, 5vw, 4rem);
+        line-height: 1;
+        letter-spacing: -0.045em;
+      }
+
+      h3 {
+        font-size: 1.15rem;
+        line-height: 1.25;
+      }
+
+      .lead {
+        max-width: 46rem;
+        margin-bottom: 0;
+        font-size: clamp(1.15rem, 2.2vw, 1.55rem);
+        line-height: 1.45;
+      }
+
+      main section {
+        padding: clamp(3.5rem, 8vw, 6.5rem) 0;
+        border-bottom: 2px solid var(--line);
+      }
+
+      .section-number {
+        display: inline-grid;
+        width: 2.2rem;
+        height: 2.2rem;
+        margin-bottom: 1.3rem;
+        place-items: center;
+        border: 2px solid var(--line);
+        border-radius: 50%;
+        font-family: "Courier New", Courier, monospace;
+        font-weight: 700;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+        gap: clamp(2rem, 7vw, 6rem);
+        align-items: start;
+      }
+
+      .key-word {
+        margin: 0;
+        font-size: clamp(3.8rem, 8vw, 7.2rem);
+        font-weight: 800;
+        line-height: 0.82;
+        letter-spacing: -0.08em;
+        text-transform: uppercase;
+        overflow-wrap: anywhere;
+      }
+
+      .definition {
+        padding: clamp(1.5rem, 4vw, 2.5rem);
+        border: 3px solid var(--line);
+        box-shadow: 0.65rem 0.65rem 0 var(--ink);
+      }
+
+      .definition p:last-child {
+        margin-bottom: 0;
+      }
+
+      .important {
+        font-size: 1.25rem;
+        font-weight: 700;
+      }
+
+      .diagram {
+        margin: 2.5rem 0 0;
+        padding: clamp(1rem, 3vw, 2rem);
+        border: 3px solid var(--line);
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns:
+          minmax(10rem, 0.9fr) 3.25rem minmax(12rem, 1fr) 3.25rem
+          minmax(13rem, 1.1fr);
+        gap: 0.8rem;
+        align-items: stretch;
+      }
+
+      .node {
+        min-width: 0;
+        padding: 1.35rem;
+        border: 2px solid var(--line);
+        background: var(--paper);
+      }
+
+      .node.dark {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      .node.soft {
+        background: var(--soft);
+      }
+
+      .node-label {
+        display: block;
+        margin-bottom: 0.45rem;
+        font-size: 0.73rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .node strong {
+        display: block;
+        font-size: 1.3rem;
+        line-height: 1.2;
+      }
+
+      .node p {
+        margin: 0.65rem 0 0;
+        font-size: 0.92rem;
+      }
+
+      .arrow {
+        display: grid;
+        place-items: center;
+        text-align: center;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 2rem;
+        font-weight: 700;
+      }
+
+      figcaption {
+        margin-top: 1rem;
+        font-size: 0.94rem;
+      }
+
+      .profile-box {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1rem;
+        margin-top: 1.25rem;
+      }
+
+      .profile-box div {
+        min-width: 0;
+        padding: 1rem;
+        border: 2px solid var(--line);
+      }
+
+      .profile-box strong {
+        display: block;
+        margin-bottom: 0.35rem;
+      }
+
+      .profile-box span {
+        color: var(--muted);
+        font-family: "Courier New", Courier, monospace;
+        overflow-wrap: anywhere;
+      }
+
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        margin: 2.5rem 0 0;
+        padding: 0;
+        border: 2px solid var(--line);
+        list-style: none;
+        counter-reset: step;
+      }
+
+      .steps li {
+        min-width: 0;
+        padding: 1.5rem;
+        counter-increment: step;
+      }
+
+      .steps li + li {
+        border-left: 2px solid var(--line);
+      }
+
+      .steps li::before {
+        content: "0" counter(step);
+        display: block;
+        margin-bottom: 2rem;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 1.8rem;
+        font-weight: 700;
+      }
+
+      .steps strong {
+        display: block;
+        margin-bottom: 0.55rem;
+      }
+
+      .wrong-right {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1.5rem;
+        margin-top: 2.5rem;
+      }
+
+      .case {
+        padding: 1.5rem;
+        border: 3px solid var(--line);
+      }
+
+      .case.wrong {
+        background: repeating-linear-gradient(
+          -45deg,
+          #fff,
+          #fff 8px,
+          #e5e5e5 8px,
+          #e5e5e5 10px
+        );
+      }
+
+      .tag {
+        display: inline-block;
+        margin-bottom: 1rem;
+        padding: 0.2rem 0.55rem;
+        border: 2px solid var(--line);
+        background: var(--paper);
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .comparison {
+        width: 100%;
+        margin-top: 2.5rem;
+        border-collapse: collapse;
+      }
+
+      .comparison th,
+      .comparison td {
+        padding: 1rem;
+        border: 2px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .comparison th {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      .state {
+        font-family: "Courier New", Courier, monospace;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .planning {
+        margin-top: 2rem;
+        padding: 1.5rem;
+        border-left: 0.65rem solid var(--line);
+        background: var(--soft);
+      }
+
+      .source-links {
+        display: grid;
+        gap: 0.75rem;
+        margin: 1.5rem 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .source-links a {
+        display: block;
+        padding: 1rem;
+        border: 2px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+
+      .source-links a:hover {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      footer {
+        padding: 2.5rem 0 4rem;
+        font-size: 0.9rem;
+      }
+
+      @media (max-width: 840px) {
+        .split,
+        .wrong-right {
+          grid-template-columns: 1fr;
+        }
+
+        .key-word {
+          font-size: clamp(3.2rem, 18vw, 5.4rem);
+        }
+
+        .flow {
+          grid-template-columns: 1fr;
+        }
+
+        .arrow {
+          min-height: 3rem;
+          transform: rotate(90deg);
+        }
+
+        .steps {
+          grid-template-columns: 1fr;
+        }
+
+        .steps li + li {
+          border-top: 2px solid var(--line);
+          border-left: 0;
+        }
+
+        .steps li::before {
+          margin-bottom: 1rem;
+        }
+      }
+
+      @media (max-width: 620px) {
+        .profile-box {
+          grid-template-columns: 1fr;
+        }
+
+        .comparison thead {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          padding: 0;
+          margin: -1px;
+          overflow: hidden;
+          clip: rect(0, 0, 0, 0);
+          white-space: nowrap;
+          border: 0;
+        }
+
+        .comparison,
+        .comparison tbody,
+        .comparison tr,
+        .comparison td {
+          display: block;
+          width: 100%;
+        }
+
+        .comparison tr {
+          border: 2px solid var(--line);
+        }
+
+        .comparison tr + tr {
+          margin-top: 1rem;
+        }
+
+        .comparison td {
+          display: grid;
+          grid-template-columns: minmax(7rem, 0.75fr) minmax(0, 1fr);
+          gap: 1rem;
+          border: 0;
+        }
+
+        .comparison td + td {
+          border-top: 1px solid var(--line);
+        }
+
+        .comparison td::before {
+          content: attr(data-label);
+          font-family: "Courier New", Courier, monospace;
+          font-size: 0.75rem;
+          font-weight: 700;
+          text-transform: uppercase;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+
+      @media print {
+        body {
+          font-size: 10pt;
+        }
+
+        header,
+        main section {
+          padding: 1.5rem 0;
+        }
+
+        .definition {
+          box-shadow: none;
+        }
+
+        a {
+          text-decoration: none;
+        }
+
+        a::after {
+          content: " (" attr(href) ")";
+          font-size: 0.75em;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="page">
+        <p class="eyebrow">Pipi runtime / visual architecture guide</p>
+        <h1>One launch. One process. Many agents.</h1>
+        <p class="lead">
+          You type <code>pipi</code>, but Pipi does not replace the Pi engine.
+          It starts Pi with an isolated profile. Pi subagents then run inside
+          that same configured process.
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <section aria-labelledby="definition-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">1</span>
+          <div class="split">
+            <p class="key-word" aria-hidden="true">Pipi</p>
+            <div class="definition">
+              <h2 id="definition-title">What is Pipi?</h2>
+              <p class="important">
+                Pipi is an isolated launcher and configuration profile for Pi.
+              </p>
+              <p>
+                The <code>pipi</code> command first chooses Pipi-owned settings
+                and session folders. It then starts the existing Pi executable.
+                The engine is Pi; the environment and resources belong to Pipi.
+              </p>
+              <p>
+                This is similar to opening the same application with a separate
+                user profile. The application stays the same, but its settings,
+                tools, authentication, and history can be different.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="launch-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">2</span>
+          <h2 id="launch-title">The launch path</h2>
+          <p class="lead">
+            The executable path changes only once, at the outer edge. After
+            startup, Pipi uses Pi's in-process SDK instead of launching more
+            command-line programs.
+          </p>
+
+          <figure class="diagram" aria-labelledby="launch-caption">
+            <div class="flow">
+              <div class="node dark">
+                <span class="node-label">User command</span>
+                <strong><code>pipi</code></strong>
+                <p>The entry point you run in the terminal.</p>
+              </div>
+
+              <div
+                class="arrow"
+                aria-label="The Pipi launcher sets the isolated environment"
+              >
+                →
+              </div>
+
+              <div class="node soft">
+                <span class="node-label">Profile boundary</span>
+                <strong>Pipi environment</strong>
+                <p>
+                  Selects <code>~/.pipi/agent</code> and
+                  <code>~/.pipi/sessions</code>.
+                </p>
+              </div>
+
+              <div
+                class="arrow"
+                aria-label="The configured environment starts the Pi runtime"
+              >
+                →
+              </div>
+
+              <div class="node">
+                <span class="node-label">Runtime</span>
+                <strong>Pi executable</strong>
+                <p>
+                  Loads Pipi's package, tools, model settings, authentication,
+                  and session storage.
+                </p>
+              </div>
+            </div>
+            <figcaption id="launch-caption">
+              Arrow meaning: each step prepares and starts the next step. Pipi
+              is the launcher and profile; Pi is the runtime it starts.
+            </figcaption>
+          </figure>
+
+          <div class="profile-box" aria-label="Pipi isolation variables">
+            <div>
+              <strong>Settings and resources</strong>
+              <span>PI_CODING_AGENT_DIR=~/.pipi/agent</span>
+            </div>
+            <div>
+              <strong>Conversation sessions</strong>
+              <span>PI_CODING_AGENT_SESSION_DIR=~/.pipi/sessions</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="child-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">3</span>
+          <h2 id="child-title">Where a Pi child runs</h2>
+          <p class="lead">
+            A Pi child is not a new terminal process. The parent creates a fresh
+            agent session inside the already running Pipi process.
+          </p>
+
+          <figure class="diagram" aria-labelledby="child-caption">
+            <div class="flow">
+              <div class="node dark">
+                <span class="node-label">Configured process</span>
+                <strong>Main Pipi session</strong>
+                <p>
+                  Owns the user conversation, orchestration, and interactive
+                  TUI.
+                </p>
+              </div>
+
+              <div
+                class="arrow"
+                aria-label="The parent calls createAgentSession in memory"
+              >
+                →
+              </div>
+
+              <div class="node soft">
+                <span class="node-label">SDK operation</span>
+                <strong><code>createAgentSession()</code></strong>
+                <p>
+                  Creates a separate context and transcript without starting a
+                  second Pipi command.
+                </p>
+              </div>
+
+              <div
+                class="arrow"
+                aria-label="The SDK operation creates a child Pi session"
+              >
+                →
+              </div>
+
+              <div class="node">
+                <span class="node-label">In-process worker</span>
+                <strong>Pi child session</strong>
+                <p>
+                  Uses the Pipi agent directory, model registry, settings,
+                  trusted resources, and session storage.
+                </p>
+              </div>
+            </div>
+            <figcaption id="child-caption">
+              The child has a separate agent context, but it remains inside the
+              same operating-system process and Pipi profile.
+            </figcaption>
+          </figure>
+
+          <div class="planning">
+            <strong>Important language rule:</strong> in architecture notes,
+            “Pi backend” names the SDK implementation. It does not mean the
+            child silently switches back to the regular <code>~/.pi</code>
+            profile. When the root was launched with <code>pipi</code>, the
+            backend resolves Pipi's active agent directory.
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="steps-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">4</span>
+          <h2 id="steps-title">One nested task, step by step</h2>
+          <ol class="steps">
+            <li>
+              <strong>You start Pipi.</strong>
+              The launcher selects isolated settings and starts Pi once.
+            </li>
+            <li>
+              <strong>The parent spawns a child.</strong>
+              The shared manager reserves capacity and requests an in-process
+              Pi session.
+            </li>
+            <li>
+              <strong>The child inherits the profile.</strong>
+              Its resource loader reads the active Pipi agent directory, not a
+              second command's defaults.
+            </li>
+            <li>
+              <strong>The result returns in memory.</strong>
+              The manager updates the shared tree and the existing TUI remains
+              in control.
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section aria-labelledby="choice-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">5</span>
+          <h2 id="choice-title">The right boundary</h2>
+          <p class="lead">
+            “Use Pipi” should mean “inherit Pipi's profile,” not “start another
+            Pipi program for every child.”
+          </p>
+
+          <div class="wrong-right">
+            <article class="case">
+              <span class="tag">Recommended</span>
+              <h3>One Pipi process</h3>
+              <pre aria-label="Recommended in-process structure">pipi
+└── Pi runtime + Pipi profile
+    ├── main session
+    ├── child session
+    └── nested child session</pre>
+              <p>
+                One manager can enforce depth and concurrency. One TUI can show
+                the complete tree. Parent shutdown can clean up every child.
+              </p>
+            </article>
+
+            <article class="case wrong">
+              <span class="tag">Avoid</span>
+              <h3>A Pipi process per child</h3>
+              <pre aria-label="Incorrect subprocess structure">pipi
+├── exec pipi for child A
+└── exec pipi for child B</pre>
+              <p>
+                Each process would have its own manager, limits, lifecycle, and
+                screen state. The root TUI could not reliably navigate or
+                cancel the full tree.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="comparison-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">6</span>
+          <h2 id="comparison-title">What is shared, and what is separate?</h2>
+          <table class="comparison">
+            <thead>
+              <tr>
+                <th scope="col">Part</th>
+                <th scope="col">Main and Pi children</th>
+                <th scope="col">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td data-label="Part">Operating-system process</td>
+                <td data-label="Main and children">
+                  <span class="state">Shared</span>
+                </td>
+                <td data-label="Reason">Children use the in-process SDK.</td>
+              </tr>
+              <tr>
+                <td data-label="Part">Pipi agent directory</td>
+                <td data-label="Main and children">
+                  <span class="state">Shared</span>
+                </td>
+                <td data-label="Reason">
+                  The resource loader resolves the active Pipi profile.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Part">Manager and concurrency budget</td>
+                <td data-label="Main and children">
+                  <span class="state">Shared — planned</span>
+                </td>
+                <td data-label="Reason">
+                  Safe nesting needs one tree-wide capacity limit.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Part">Conversation context</td>
+                <td data-label="Main and children">
+                  <span class="state">Separate</span>
+                </td>
+                <td data-label="Reason">
+                  Each child receives its own bounded task and transcript.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Part">Session file</td>
+                <td data-label="Main and children">
+                  <span class="state">Separate</span>
+                </td>
+                <td data-label="Reason">
+                  A child can be inspected without mixing its transcript into
+                  the parent's session file.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Part">Interactive TUI</td>
+                <td data-label="Main and children">
+                  <span class="state">Owned by main</span>
+                </td>
+                <td data-label="Reason">
+                  Children are headless; the root TUI presents and navigates
+                  their state.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="current-planned-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">7</span>
+          <h2 id="current-planned-title">Current behavior versus the plan</h2>
+          <div class="split">
+            <div>
+              <h3>Already true</h3>
+              <ul>
+                <li>The <code>pipi</code> launcher selects isolated folders.</li>
+                <li>The launcher executes the existing Pi runtime.</li>
+                <li>Pi subagents use <code>createAgentSession()</code>.</li>
+                <li>
+                  Child resource loading calls <code>getAgentDir()</code>, which
+                  resolves the active Pipi directory.
+                </li>
+                <li>The main blocking wait tool is hidden from agents.</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Planned in issue #1</h3>
+              <ul>
+                <li>Nested descendants use the same root manager.</li>
+                <li>One concurrency limit covers the complete tree.</li>
+                <li>Results move to the immediate parent without waiting.</li>
+                <li>Nested policy initially permits only the Pi backend.</li>
+                <li>The TUI shows parent, child, and sibling relationships.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="planning">
+            No extra child installation command is required for this plan. The
+            setup step remains <code>npm run install:pipi</code>, followed by
+            launching the root session with <code>pipi</code>.
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="sources-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">8</span>
+          <h2 id="sources-title">See the evidence</h2>
+          <p>
+            These project files show the launcher boundary, isolated setup,
+            current in-process Pi backend, and the planned nested architecture.
+          </p>
+          <ul class="source-links">
+            <li>
+              <a href="../scripts/install.mjs">
+                scripts/install.mjs — creates the Pipi launcher and exports the
+                isolated directories
+              </a>
+            </li>
+            <li>
+              <a href="../SETUP.md">
+                SETUP.md — documents installation, isolation, and the existing
+                Pi executable requirement
+              </a>
+            </li>
+            <li>
+              <a href="../extensions/subagents/src/backends/pi.ts">
+                pi.ts — creates child resources and in-process agent sessions
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/blockedby/my-pi-setup/issues/1"
+              >
+                GitHub issue #1 — detailed plan for safe nested subagents and a
+                tree-aware TUI
+              </a>
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="page">
+        <p class="mono">
+          RUN PIPI ONCE → INHERIT THE PIPI PROFILE → CREATE PI SESSIONS IN
+          PROCESS
+        </p>
+        <p>
+          Static black-and-white guide. No JavaScript or external visual assets.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
