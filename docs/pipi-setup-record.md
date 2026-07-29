@@ -141,7 +141,7 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Verified TypeScript with `npm run check`, repository formatting with `npm run format:check`, changed-file formatting with Prettier, and whitespace with `git diff --check`.
 - Verified `config/pipi-model-overrides.json` exactly matches `/home/kcnc/.pipi/agent/models.json`.
 - Verified the composed Sol, Terra, and Luna context windows with `pipi --list-models`.
-- Publication target for this operation is the checked-out `main` branch at `origin/main`.
+- Published the validated configuration and documentation as commit `15ece42` from local `main` to `origin/main`; this follow-up records the successful push result.
 
 ## Current package sources
 
