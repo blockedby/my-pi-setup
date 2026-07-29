@@ -12,6 +12,7 @@ Included resources:
 - deterministic Codex-backed search/fetch/task tools when sibling `../pi-codex` is present
 - isolated MCP support through `pi-mcp-adapter` 2.15.0, matching the extension version observed in regular Pi
 - the `browser-chrome` skill and control/headed/headless Chrome DevTools MCP servers from `pi-agent-setup`
+- the canonical evidence-driven `code-review` skill from the pinned `gpt5.6-reviewer` submodule
 
 ## Agents
 
@@ -27,9 +28,11 @@ Included resources:
 | ---------------------- | ------------------------------------- |
 | `subagents`            | Delegate work to child models         |
 | `background-terminals` | Run and monitor background commands   |
-| `code-review`          | Review changes for actionable defects |
+| `code-review`          | Evidence-driven initial and closure review |
 | `browser-chrome`       | Select and control a safe Chrome mode |
 | `codex-tools`          | Search, fetch, patch, and Codex tasks |
+
+The code-review policy is loaded directly from the initialized `vendor/gpt5.6-reviewer/skills` submodule, so Pipi has one canonical copy and no colliding host skill. The pinned source also includes the reviewer role, verifier prompt, schemas, examples, and optional dependency-free Python contract CLI; the Pipi installer does not fetch, advance, execute, or globally install that CLI.
 
 No extra web-search service key or environment file is required. Pipi does not copy regular Pi's secret-bearing MCP configuration. See [SETUP.md](SETUP.md) for installation, isolation, MCP setup, auth, and uninstall instructions.
 

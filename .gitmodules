@@ -1,0 +1,4 @@
+[submodule "vendor/gpt5.6-reviewer"]
+	path = vendor/gpt5.6-reviewer
+	url = https://github.com/blockedby/gpt5.6-reviewer.git
+	branch = main

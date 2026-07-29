@@ -29,6 +29,8 @@ const mcpAdapterPackage = `npm:pi-mcp-adapter@${mcpAdapterVersion}`;
 const mcpAdapterPackagePrefix = "npm:pi-mcp-adapter";
 const removedPiSubagentsPackagePrefix = "npm:pi-subagents";
 const browserAssetsRoot = join(repositoryRoot, "vendor", "pi-agent-setup");
+const reviewerAssetsRoot = join(repositoryRoot, "vendor", "gpt5.6-reviewer");
+const reviewerSkillDir = join(reviewerAssetsRoot, "skills", "code-review");
 const modelDefaults = [
   "defaultProvider",
   "defaultModel",
@@ -199,6 +201,27 @@ const removePiSubagentsAssets = (agentDir) => {
   }
 };
 
+const validateReviewerAssets = () => {
+  if (!existsSync(join(reviewerAssetsRoot, ".git"))) {
+    throw new Error(
+      `Reviewer submodule is not initialized: ${reviewerAssetsRoot}; run git submodule update --init --recursive`,
+    );
+  }
+  for (const relativePath of [
+    "agents/code-reviewer.md",
+    "skills/code-review/SKILL.md",
+    "skills/code-review/verifier-prompt.md",
+    "schemas/finding.schema.json",
+    "schemas/review-result.schema.json",
+  ]) {
+    const path = join(reviewerAssetsRoot, relativePath);
+    if (!existsSync(path))
+      throw new Error(
+        `Missing reviewer submodule asset: ${path}; run git submodule update --init --recursive`,
+      );
+  }
+};
+
 const installBrowserChromeAssets = (agentDir) => {
   const browserSkillDir = join(agentDir, "skills", "browser-chrome");
   installAssetDirectory(
@@ -343,6 +366,7 @@ const install = () => {
   }
 
   if (options.shareAuth) validateAuthShare(regularAuthPath, pipiAuthPath);
+  validateReviewerAssets();
   if (!options.skipDependencies) installDependencies();
 
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
@@ -373,6 +397,7 @@ const install = () => {
   console.log(`Pipi settings: ${pipiSettingsPath}`);
   console.log(`Pipi sessions: ${sessionDir}`);
   console.log(`Browser Chrome skill: ${browserSkillDir}`);
+  console.log(`Evidence-driven code-review skill: ${reviewerSkillDir}`);
   console.log(`Browser Chrome MCP config: ${pipiMcpPath}`);
   if (codexExecutable) console.log(`Codex CLI: ${codexExecutable}`);
   else

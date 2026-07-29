@@ -19,7 +19,8 @@
       "./extensions"
     ],
     "skills": [
-      "./skills"
+      "./skills",
+      "./vendor/gpt5.6-reviewer/skills"
     ],
     "themes": [
       "./themes"
@@ -27,11 +28,12 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"scripts/**/*.mjs\" \"*.json\"",
-    "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"scripts/**/*.mjs\" \"*.json\"",
+    "check:submodules": "node scripts/check-submodules.mjs",
+    "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"scripts/**/*.mjs\" \"config/*.json\" \"*.json\"",
+    "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"scripts/**/*.mjs\" \"config/*.json\" \"*.json\"",
     "install:dependencies": "node scripts/install-dependencies.mjs",
     "install:pipi": "node scripts/install.mjs",
-    "test:installer": "node --test scripts/install.test.mjs",
+    "test:installer": "node --test scripts/check-submodules.test.mjs scripts/install.test.mjs",
     "test": "npm run test:installer && node --test --experimental-strip-types extensions/*/*.test.ts && npm --prefix extensions/file-search test",
     "uninstall:pipi": "node scripts/uninstall.mjs"
   }
