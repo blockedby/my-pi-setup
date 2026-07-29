@@ -42,6 +42,7 @@ const createFixture = async () => {
 const { execFileSync } = require("node:child_process");
 const codex = execFileSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).trim();
 process.stdout.write(JSON.stringify({
+  pipiProfile: process.env.PIPI_PROFILE,
   agentDir: process.env.PI_CODING_AGENT_DIR,
   sessionDir: process.env.PI_CODING_AGENT_SESSION_DIR,
   codex,
@@ -201,6 +202,7 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     },
   );
   assert.deepEqual(JSON.parse(probe), {
+    pipiProfile: "1",
     agentDir: join(fixture.home, ".pipi", "agent"),
     sessionDir: join(fixture.home, ".pipi", "sessions"),
     codex: fixture.codexPath,

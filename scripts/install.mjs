@@ -365,7 +365,7 @@ const install = () => {
     symlinkSync(regularAuthPath, pipiAuthPath);
   }
 
-  const launcher = `#!/bin/sh\n${managedLauncherMarker}\nexport PI_CODING_AGENT_DIR=${shellQuote(agentDir)}\nexport PI_CODING_AGENT_SESSION_DIR=${shellQuote(sessionDir)}\nexec ${shellQuote(piExecutable)} "$@"\n`;
+  const launcher = `#!/bin/sh\n${managedLauncherMarker}\nexport PIPI_PROFILE=1\nexport PI_CODING_AGENT_DIR=${shellQuote(agentDir)}\nexport PI_CODING_AGENT_SESSION_DIR=${shellQuote(sessionDir)}\nexec ${shellQuote(piExecutable)} "$@"\n`;
   writeFileSync(launcherPath, launcher, { mode: 0o755 });
   chmodSync(launcherPath, 0o755);
 

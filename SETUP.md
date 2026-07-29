@@ -85,12 +85,15 @@ Restart Pipi or use `/reload` after installation so the browser skill and MCP co
 
 ## Isolation and authentication
 
-The launcher exports both isolation variables before executing Pi:
+The launcher exports a persistent profile marker and both isolation variables before executing Pi:
 
 ```text
+PIPI_PROFILE=1
 PI_CODING_AGENT_DIR=~/.pipi/agent
 PI_CODING_AGENT_SESSION_DIR=~/.pipi/sessions
 ```
+
+In-process Pi child sessions inherit this environment, so they load Pipi's settings and resources without starting another `pipi` process.
 
 Pipi does not copy or share `~/.pi/agent/auth.json` by default. Authenticate Pipi independently, or explicitly opt in to sharing regular Pi auth through a symlink:
 
