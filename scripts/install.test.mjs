@@ -387,7 +387,7 @@ test("install rejects an uninitialized reviewer submodule before writing Pipi st
   assert.equal(existsSync(join(fixture.home, ".local", "bin", "pipi")), false);
 });
 
-test("install rejects a missing reviewer schema before writing Pipi state", async (t) => {
+test("install rejects every configured missing reviewer asset before writing Pipi state", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
 
@@ -414,35 +414,36 @@ test("install rejects a missing reviewer schema before writing Pipi state", asyn
     "--init",
     "--recursive",
   ]);
-  const missingSchema = join(
-    cloneRoot,
-    "vendor",
-    "gpt5.6-reviewer",
-    "schemas",
-    "finding.schema.json",
-  );
-  await rm(missingSchema);
+  const submodules = readJson(join(cloneRoot, "config", "submodules.json"));
+  const reviewer = submodules.submodules["gpt5.6-reviewer"];
+  for (const relativePath of reviewer.requiredFiles) {
+    const assetPath = join(cloneRoot, reviewer.path, relativePath);
+    const original = readFileSync(assetPath);
+    await rm(assetPath);
 
-  const result = spawnSync(
-    process.execPath,
-    [
-      join(cloneRoot, "scripts", "install.mjs"),
-      "--skip-dependencies",
-      "--pi",
-      fixture.piPath,
-      "--codex-tools",
-      fixture.codexTools,
-    ],
-    { cwd: cloneRoot, env: fixture.env, encoding: "utf8" },
-  );
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(cloneRoot, "scripts", "install.mjs"),
+        "--skip-dependencies",
+        "--pi",
+        fixture.piPath,
+        "--codex-tools",
+        fixture.codexTools,
+      ],
+      { cwd: cloneRoot, env: fixture.env, encoding: "utf8" },
+    );
 
-  assert.notEqual(result.status, 0);
-  assert.match(
-    result.stderr,
-    /Missing reviewer submodule asset:.*finding\.schema\.json/,
-  );
-  assert.equal(existsSync(join(fixture.home, ".pipi")), false);
-  assert.equal(existsSync(join(fixture.home, ".local", "bin", "pipi")), false);
+    assert.notEqual(result.status, 0, relativePath);
+    assert.match(result.stderr, /Missing reviewer submodule asset:/);
+    assert.equal(result.stderr.includes(relativePath), true, relativePath);
+    assert.equal(existsSync(join(fixture.home, ".pipi")), false);
+    assert.equal(
+      existsSync(join(fixture.home, ".local", "bin", "pipi")),
+      false,
+    );
+    writeFileSync(assetPath, original);
+  }
 });
 
 test("install refuses a missing Pi executable before writing files", async (t) => {

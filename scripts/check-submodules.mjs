@@ -92,8 +92,13 @@ for (const [name, submodule] of entries) {
     }
   }
 
-  if (!configuredSkills.includes(submodule.piSkillPath)) {
-    fail(`package.json must load ${submodule.piSkillPath}`);
+  const skillPathCount = configuredSkills.filter(
+    (path) => path === submodule.piSkillPath,
+  ).length;
+  if (skillPathCount !== 1) {
+    fail(
+      `package.json must load ${submodule.piSkillPath} exactly once; found ${skillPathCount}`,
+    );
   }
   for (const hostPath of submodule.replacesHostPaths ?? []) {
     if (existsSync(join(repositoryRoot, hostPath))) {

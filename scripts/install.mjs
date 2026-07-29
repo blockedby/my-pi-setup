@@ -29,8 +29,7 @@ const mcpAdapterPackage = `npm:pi-mcp-adapter@${mcpAdapterVersion}`;
 const mcpAdapterPackagePrefix = "npm:pi-mcp-adapter";
 const removedPiSubagentsPackagePrefix = "npm:pi-subagents";
 const browserAssetsRoot = join(repositoryRoot, "vendor", "pi-agent-setup");
-const reviewerAssetsRoot = join(repositoryRoot, "vendor", "gpt5.6-reviewer");
-const reviewerSkillDir = join(reviewerAssetsRoot, "skills", "code-review");
+const submoduleConfigPath = join(repositoryRoot, "config", "submodules.json");
 const modelDefaults = [
   "defaultProvider",
   "defaultModel",
@@ -202,24 +201,41 @@ const removePiSubagentsAssets = (agentDir) => {
 };
 
 const validateReviewerAssets = () => {
+  let reviewer;
+  try {
+    const config = JSON.parse(readFileSync(submoduleConfigPath, "utf8"));
+    reviewer = config.submodules?.["gpt5.6-reviewer"];
+  } catch (error) {
+    throw new Error(
+      `Cannot read reviewer submodule config: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (
+    !reviewer ||
+    typeof reviewer.path !== "string" ||
+    !Array.isArray(reviewer.requiredFiles) ||
+    reviewer.requiredFiles.length === 0 ||
+    reviewer.requiredFiles.some((path) => typeof path !== "string" || !path)
+  ) {
+    throw new Error(
+      `Invalid reviewer submodule config: ${submoduleConfigPath}`,
+    );
+  }
+
+  const reviewerAssetsRoot = join(repositoryRoot, reviewer.path);
   if (!existsSync(join(reviewerAssetsRoot, ".git"))) {
     throw new Error(
       `Reviewer submodule is not initialized: ${reviewerAssetsRoot}; run git submodule update --init --recursive`,
     );
   }
-  for (const relativePath of [
-    "agents/code-reviewer.md",
-    "skills/code-review/SKILL.md",
-    "skills/code-review/verifier-prompt.md",
-    "schemas/finding.schema.json",
-    "schemas/review-result.schema.json",
-  ]) {
+  for (const relativePath of reviewer.requiredFiles) {
     const path = join(reviewerAssetsRoot, relativePath);
     if (!existsSync(path))
       throw new Error(
         `Missing reviewer submodule asset: ${path}; run git submodule update --init --recursive`,
       );
   }
+  return join(reviewerAssetsRoot, "skills", "code-review");
 };
 
 const installBrowserChromeAssets = (agentDir) => {
@@ -366,7 +382,7 @@ const install = () => {
   }
 
   if (options.shareAuth) validateAuthShare(regularAuthPath, pipiAuthPath);
-  validateReviewerAssets();
+  const reviewerSkillDir = validateReviewerAssets();
   if (!options.skipDependencies) installDependencies();
 
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });

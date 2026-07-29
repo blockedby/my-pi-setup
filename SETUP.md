@@ -57,7 +57,13 @@ vendor/gpt5.6-reviewer/skills/code-review
 
 The pinned submodule also contains the independent reviewer role, verifier prompt, JSON contracts, examples, and optional Python CLI. Pipi does not duplicate the skill under the host `skills/` directory and does not fetch or advance the submodule or install or execute the Python CLI during setup.
 
-After cloning this repository, initialize the reviewer source before installation:
+For a fresh checkout, clone recursively:
+
+```sh
+git clone --recurse-submodules https://github.com/blockedby/my-pi-setup.git
+```
+
+For an existing checkout, initialize the reviewer source before installation:
 
 ```sh
 git submodule update --init --recursive

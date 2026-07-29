@@ -160,6 +160,17 @@ test("submodule checker rejects a missing manifest skill path", async (t) => {
   assert.match(result.stderr, /package.json must load/);
 });
 
+test("submodule checker rejects a duplicate manifest skill path", async (t) => {
+  const { root } = await withFixture(t);
+  const packagePath = join(root, "package.json");
+  const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
+  manifest.pi.skills.push("./vendor/reviewer/skills");
+  writeJson(packagePath, manifest);
+  const result = runChecker(root);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /exactly once; found 2/);
+});
+
 test("submodule checker rejects a duplicate host skill", async (t) => {
   const { root } = await withFixture(t);
   mkdirSync(join(root, "skills", "code-review"), { recursive: true });
