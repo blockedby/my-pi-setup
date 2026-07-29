@@ -11,6 +11,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Launcher                                | `/home/kcnc/.local/bin/pipi`                             |
 | Pi executable used                      | `/home/kcnc/.local/bin/pi`                               |
 | Pipi settings                           | `/home/kcnc/.pipi/agent/settings.json`                   |
+| Pipi model overrides                    | `/home/kcnc/.pipi/agent/models.json`                     |
+| Tracked model-override record           | `config/pipi-model-overrides.json`                       |
 | Pipi sessions                           | `/home/kcnc/.pipi/sessions`                              |
 | Creator setup package                   | `/home/kcnc/code/tools/pipi-alias`                       |
 | Codex tools package                     | `/home/kcnc/code/tools/pi-codex`                         |
@@ -121,6 +123,26 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Verified the headless smoke probe cleaned up its temporary Chrome process and did not use an authenticated profile.
 - The first implementation also added `pi-subagents`, `chrome-browser-agent.md`, and its `aad-task-package` dependency. The user clarified that only the browser skill and MCP should remain, so those three named-agent resources plus the extension's orphaned isolated npm dependencies/binaries were removed from source, installer registration, and installed Pipi state.
 
+### 10. GPT-5.6 context-window overrides
+
+- Added Pipi-only model overrides at `/home/kcnc/.pipi/agent/models.json`.
+- Set `openai-codex/gpt-5.6-sol` to a 500,000-token context window.
+- Set `openai-codex/gpt-5.6-terra` and `openai-codex/gpt-5.6-luna` to 300,000 tokens each.
+- Preserved the built-in 128,000-token maximum output for all three models.
+- Added the source-controlled record `config/pipi-model-overrides.json`; it mirrors the runtime file without credentials.
+- Extended `AGENTS.md` so future context-window changes keep the tracked and runtime copies synchronized.
+- Verified the composed values with `pipi --list-models`.
+
+### 11. Durable operation logging and main publication
+
+- Updated root `AGENTS.md` to require a log entry after every user-requested Pipi operation.
+- Each entry must record the request, action, affected paths or values, verification, and pending steps without secrets.
+- Updated `docs/gpt-context-window-report.html` to reflect the configured 500K / 300K / 300K values.
+- Verified TypeScript with `npm run check`, repository formatting with `npm run format:check`, changed-file formatting with Prettier, and whitespace with `git diff --check`.
+- Verified `config/pipi-model-overrides.json` exactly matches `/home/kcnc/.pipi/agent/models.json`.
+- Verified the composed Sol, Terra, and Luna context windows with `pipi --list-models`.
+- Publication target for this operation is the checked-out `main` branch at `origin/main`.
+
 ## Current package sources
 
 The installer keeps these package sources in Pipi settings:
@@ -163,6 +185,8 @@ Pipi now has its own three browser Chrome MCP servers. Use `browser-chrome-contr
 6. Add the browser Chrome resources from `pi-agent-setup` and log the work — completed and recorded in section 9.
 7. Add short README tables explaining the installed agents and skills — completed in `README.md`.
 8. Remove the unrequested `pi-subagents` extension and keep only the browser skill plus MCP — completed; the named-agent file and its agent-only skill dependency were also removed and this correction was logged.
+9. Configure and durably record custom GPT-5.6 context windows — completed with Sol at 500K and Terra/Luna at 300K in both the Pipi runtime config and `config/pipi-model-overrides.json`.
+10. Require every user-requested Pipi operation to be logged and push this work to `main` — logging policy added to `AGENTS.md`; repository validation and push evidence are recorded below.
 
 ## Pending steps explicitly connected to user requests
 
@@ -170,7 +194,7 @@ Pipi now has its own three browser Chrome MCP servers. Use `browser-chrome-contr
 2. **Reload after this installation.** Start a new Pipi session or run `/reload` so the browser skill/MCP configuration is refreshed and the removed extension is unloaded.
 3. **Choose browser mode safely.** Use disposable headless mode by default. Use headed persistent mode only when a future requested task needs the current browser login/profile.
 4. **Choose any additional MCP servers.** Browser MCP is configured. Use `/mcp setup` only for other servers; importing regular Pi's secret-bearing config requires a separate explicit decision.
-5. **Keep this record current.** Append future requested Pipi changes, their evidence, and any remaining action here.
+5. **Keep this record current.** `AGENTS.md` now requires every user-requested Pipi operation to append the request, action, affected paths or values, verification, and pending steps here without secrets.
 
 ## Discussed ideas that are not requested implementation
 

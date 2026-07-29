@@ -1,3 +1,6 @@
 - run check/format/lint commands when your done making a change. if they don't exist, suggest making them for the project you're in
 - avoid explicit return types unless absolutely needed
 - `as any` should be an absolute last resort. always use real type safety. lean on type inference instead of manually writing new types over and over again
+- after every user-requested Pipi operation, append a durable entry to `docs/pipi-setup-record.md`; record the request, action, affected paths or values, verification performed, and any pending step
+- keep Pipi's GPT context-window overrides recorded in `config/pipi-model-overrides.json`; when those values change, sync the runtime copy at `~/.pipi/agent/models.json` and update `docs/pipi-setup-record.md`
+- never put secrets in the operation log or repository; do not commit authentication data or copy anything from `~/.pipi/agent/auth.json`

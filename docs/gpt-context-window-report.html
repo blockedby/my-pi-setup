@@ -1,0 +1,845 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="An evidence-based report on where Pipi sets GPT context windows, the active value, and the largest truthful GPT-5.6 setting."
+    />
+    <link rel="icon" href="data:," />
+    <title>GPT Context Windows in Pipi — Configuration Report</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #111;
+        --paper: #fff;
+        --muted: #555;
+        --soft: #f1f1f1;
+        --line: #111;
+        --measure: 74rem;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--paper);
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 1rem;
+        line-height: 1.6;
+      }
+
+      a {
+        color: inherit;
+        text-decoration-thickness: 2px;
+        text-underline-offset: 0.18em;
+      }
+
+      a:hover {
+        text-decoration-style: double;
+      }
+
+      a:focus-visible {
+        outline: 3px solid var(--ink);
+        outline-offset: 4px;
+      }
+
+      code,
+      pre,
+      .mono,
+      .eyebrow,
+      .label {
+        font-family: "Courier New", Courier, monospace;
+      }
+
+      code {
+        padding: 0.1em 0.32em;
+        border: 1px solid var(--line);
+        background: var(--soft);
+        overflow-wrap: anywhere;
+      }
+
+      pre {
+        margin: 1rem 0 0;
+        padding: 1.25rem;
+        border: 2px solid var(--line);
+        color: var(--paper);
+        background: var(--ink);
+        font-size: 0.88rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      pre code {
+        padding: 0;
+        border: 0;
+        color: inherit;
+        background: transparent;
+      }
+
+      .page {
+        width: min(calc(100% - 2rem), var(--measure));
+        margin-inline: auto;
+      }
+
+      header {
+        padding: clamp(3.5rem, 9vw, 7rem) 0 3rem;
+        border-bottom: 4px solid var(--line);
+      }
+
+      .eyebrow {
+        margin: 0 0 1rem;
+        font-size: 0.8rem;
+        font-weight: 700;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 11ch;
+        margin-bottom: 1.5rem;
+        font-size: clamp(3rem, 9vw, 7rem);
+        line-height: 0.9;
+        letter-spacing: -0.065em;
+      }
+
+      h2 {
+        max-width: 18ch;
+        margin-bottom: 1.5rem;
+        font-size: clamp(2rem, 5vw, 4rem);
+        line-height: 1;
+        letter-spacing: -0.045em;
+      }
+
+      h3 {
+        margin-bottom: 0.65rem;
+        font-size: 1.15rem;
+        line-height: 1.25;
+      }
+
+      .lead {
+        max-width: 48rem;
+        margin-bottom: 0;
+        font-size: clamp(1.15rem, 2.2vw, 1.55rem);
+        line-height: 1.45;
+      }
+
+      main section {
+        padding: clamp(3.5rem, 8vw, 6.5rem) 0;
+        border-bottom: 2px solid var(--line);
+      }
+
+      .section-number {
+        display: inline-grid;
+        width: 2.2rem;
+        height: 2.2rem;
+        margin-bottom: 1.3rem;
+        place-items: center;
+        border: 2px solid var(--line);
+        border-radius: 50%;
+        font-family: "Courier New", Courier, monospace;
+        font-weight: 700;
+      }
+
+      .answer {
+        display: grid;
+        grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+        gap: clamp(2rem, 7vw, 6rem);
+        align-items: start;
+      }
+
+      .answer-word {
+        margin: 0;
+        font-size: clamp(3.8rem, 8vw, 7rem);
+        font-weight: 800;
+        line-height: 0.82;
+        letter-spacing: -0.08em;
+        text-transform: uppercase;
+      }
+
+      .definition {
+        padding: clamp(1.5rem, 4vw, 2.5rem);
+        border: 3px solid var(--line);
+        box-shadow: 0.6rem 0.6rem 0 var(--ink);
+      }
+
+      .definition p:last-child {
+        margin-bottom: 0;
+      }
+
+      .important {
+        font-size: 1.3rem;
+        font-weight: 700;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        margin-top: 2.5rem;
+        border: 2px solid var(--line);
+      }
+
+      .metric {
+        min-width: 0;
+        padding: 1.5rem;
+      }
+
+      .metric + .metric {
+        border-left: 2px solid var(--line);
+      }
+
+      .metric strong {
+        display: block;
+        font-size: clamp(2rem, 4vw, 3.7rem);
+        line-height: 1;
+        letter-spacing: -0.06em;
+      }
+
+      .label {
+        display: block;
+        margin-bottom: 0.7rem;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .metric p {
+        margin: 0.8rem 0 0;
+        color: var(--muted);
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns:
+          minmax(12rem, 1fr) 4rem minmax(12rem, 1fr)
+          4rem minmax(12rem, 1fr);
+        gap: 1rem;
+        margin-top: 2.5rem;
+        align-items: stretch;
+      }
+
+      .node {
+        padding: 1.4rem;
+        border: 2px solid var(--line);
+      }
+
+      .node.dark {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      .node p {
+        margin-bottom: 0;
+        font-size: 0.94rem;
+      }
+
+      .arrow {
+        display: grid;
+        place-items: center;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 2rem;
+        font-weight: 700;
+      }
+
+      .note {
+        margin-top: 2rem;
+        padding: 1rem 1.25rem;
+        border-left: 0.5rem solid var(--line);
+        background: var(--soft);
+      }
+
+      .comparison {
+        width: 100%;
+        margin-top: 2.5rem;
+        border-collapse: collapse;
+      }
+
+      .comparison th,
+      .comparison td {
+        padding: 1rem;
+        border: 2px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .comparison th {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        margin: 2.5rem 0 0;
+        padding: 0;
+        border: 2px solid var(--line);
+        list-style: none;
+        counter-reset: step;
+      }
+
+      .steps li {
+        min-width: 0;
+        padding: 1.5rem;
+        counter-increment: step;
+      }
+
+      .steps li + li {
+        border-left: 2px solid var(--line);
+      }
+
+      .steps li::before {
+        content: "0" counter(step);
+        display: block;
+        margin-bottom: 2rem;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 1.8rem;
+        font-weight: 700;
+      }
+
+      .steps strong {
+        display: block;
+        margin-bottom: 0.55rem;
+      }
+
+      .source-links {
+        display: grid;
+        gap: 0.75rem;
+        margin: 1.5rem 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .source-links a,
+      .local-source {
+        display: block;
+        padding: 1rem;
+        border: 2px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+
+      .source-links a:hover {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      .local-sources {
+        display: grid;
+        gap: 0.75rem;
+        margin-top: 1.5rem;
+      }
+
+      .local-source p {
+        margin: 0.45rem 0 0;
+        color: var(--muted);
+      }
+
+      footer {
+        padding: 2.5rem 0 4rem;
+        font-size: 0.9rem;
+      }
+
+      @media (max-width: 820px) {
+        .answer,
+        .metrics,
+        .flow,
+        .steps {
+          grid-template-columns: 1fr;
+        }
+
+        .metric + .metric,
+        .steps li + li {
+          border-top: 2px solid var(--line);
+          border-left: 0;
+        }
+
+        .arrow {
+          min-height: 2rem;
+          transform: rotate(90deg);
+        }
+
+        .comparison thead {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          padding: 0;
+          margin: -1px;
+          overflow: hidden;
+          clip: rect(0, 0, 0, 0);
+          white-space: nowrap;
+          border: 0;
+        }
+
+        .comparison,
+        .comparison tbody,
+        .comparison tr,
+        .comparison td {
+          display: block;
+          width: 100%;
+        }
+
+        .comparison tr {
+          border: 2px solid var(--line);
+        }
+
+        .comparison tr + tr {
+          margin-top: 1rem;
+        }
+
+        .comparison td {
+          display: grid;
+          grid-template-columns: minmax(7.5rem, 0.8fr) minmax(0, 1fr);
+          gap: 1rem;
+          border: 0;
+        }
+
+        .comparison td + td {
+          border-top: 1px solid var(--line);
+        }
+
+        .comparison td::before {
+          content: attr(data-label);
+          font-family: "Courier New", Courier, monospace;
+          font-size: 0.78rem;
+          font-weight: 700;
+          text-transform: uppercase;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+
+      @media print {
+        body {
+          font-size: 10pt;
+        }
+
+        header,
+        main section {
+          padding: 1.5rem 0;
+        }
+
+        .definition {
+          box-shadow: none;
+        }
+
+        a {
+          text-decoration: none;
+        }
+
+        a[href^="http"]::after {
+          content: " (" attr(href) ")";
+          font-size: 0.75em;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="page">
+        <p class="eyebrow">Pipi / configuration report / Pi 0.82.1</p>
+        <h1>GPT context windows</h1>
+        <p class="lead">
+          Where Pipi gets the number, what this session is using, and why
+          <strong>1,050,000 tokens</strong> is the largest truthful GPT-5.6
+          setting—even though Pi's JSON parser does not impose a useful upper
+          bound.
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <section aria-labelledby="answer-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">1</span>
+          <div class="answer">
+            <p class="answer-word" aria-hidden="true">Answer</p>
+            <div class="definition">
+              <h2 id="answer-title">
+                Set it in Pipi's <code>models.json</code>
+              </h2>
+              <p class="important">
+                For this installation, the user-controlled file is
+                <code>/home/kcnc/.pipi/agent/models.json</code>.
+              </p>
+              <p>
+                The file now contains Pipi's GPT-5.6 overrides. Pipi redirects
+                Pi's normal configuration directory by exporting
+                <code>PI_CODING_AGENT_DIR=/home/kcnc/.pipi/agent</code>.
+                Therefore the similarly named
+                <code>/home/kcnc/.pi/agent/models.json</code> belongs to
+                ordinary <code>pi</code>, not <code>pipi</code>.
+              </p>
+            </div>
+          </div>
+
+          <div class="metrics" aria-label="Current and maximum token values">
+            <div class="metric">
+              <span class="label">Active model</span>
+              <strong>GPT-5.6 Sol</strong>
+              <p><code>openai-codex/gpt-5.6-sol</code></p>
+            </div>
+            <div class="metric">
+              <span class="label">Configured Sol context</span>
+              <strong>500,000</strong>
+              <p>
+                Terra and Luna are configured for 300,000; all three were
+                confirmed with <code>pipi --list-models</code>.
+              </p>
+            </div>
+            <div class="metric">
+              <span class="label">GPT-5.6 model limit</span>
+              <strong>1,050,000</strong>
+              <p>Official context capacity for Sol, Terra, and Luna.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="layers-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">2</span>
+          <h2 id="layers-title">Three layers produce one number</h2>
+          <p class="lead">
+            The footer does not invent the context size. It reads the active
+            model metadata after built-in data and user overrides have been
+            composed.
+          </p>
+
+          <div
+            class="flow"
+            role="img"
+            aria-label="Built-in model metadata is modified by the Pipi models.json override and then used by the active session"
+          >
+            <div class="node dark">
+              <span class="label">Layer 1 / shipped data</span>
+              <h3>Built-in catalog</h3>
+              <p>
+                Pi 0.82.1 ships GPT-5.6 Sol, Terra, and Luna as 272K context and
+                128K maximum output.
+              </p>
+            </div>
+            <div class="arrow" aria-hidden="true">→</div>
+            <div class="node">
+              <span class="label">Layer 2 / your control</span>
+              <h3>Pipi <code>models.json</code></h3>
+              <p>
+                A matching <code>modelOverrides</code> entry replaces
+                <code>contextWindow</code> while preserving the model's other
+                metadata.
+              </p>
+            </div>
+            <div class="arrow" aria-hidden="true">→</div>
+            <div class="node">
+              <span class="label">Layer 3 / runtime</span>
+              <h3>Session behavior</h3>
+              <p>
+                The resulting value drives the footer gauge, output-token
+                clamping, overflow checks, and automatic compaction threshold.
+              </p>
+            </div>
+          </div>
+
+          <aside class="note">
+            <strong
+              >Do not edit the model store or installed package data.</strong
+            >
+            <code>~/.pipi/agent/models-store.json</code> is generated catalog
+            state, and files under <code>~/.local/lib/node_modules/…</code> are
+            replaced by updates. Use <code>models.json</code> as the durable
+            override layer.
+          </aside>
+        </div>
+      </section>
+
+      <section aria-labelledby="maximum-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">3</span>
+          <h2 id="maximum-title">“Maximum” has two meanings</h2>
+
+          <table class="comparison">
+            <thead>
+              <tr>
+                <th scope="col">Limit</th>
+                <th scope="col">What was discovered</th>
+                <th scope="col">What to set</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td data-label="Limit"><strong>Pi configuration</strong></td>
+                <td data-label="Discovery">
+                  <code>contextWindow</code> is parsed as a JSON number. The
+                  implementation has no model-capability upper-bound check. A
+                  temporary configuration test confirmed that a 1,050,000
+                  override is composed for
+                  <code>openai-codex/gpt-5.6-sol</code> and displayed as 1.1M.
+                </td>
+                <td data-label="Set">
+                  <strong
+                    >Do not treat parser acceptance as model support.</strong
+                  >
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Limit"><strong>GPT-5.6 capability</strong></td>
+                <td data-label="Discovery">
+                  OpenAI documents a 1,050,000-token context window and a
+                  separate 128,000-token maximum output for Sol, Terra, and
+                  Luna.
+                </td>
+                <td data-label="Set">
+                  <strong>1,050,000 context; leave output at 128,000.</strong>
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Limit">
+                  <strong>Current Pipi default</strong>
+                </td>
+                <td data-label="Discovery">
+                  Pi ships 272,000 context for all three GPT-5.6 models. This
+                  Pipi profile now overrides Sol to 500,000 and Terra/Luna to
+                  300,000. Pi's documentation says the shorter built-in default
+                  keeps requests in OpenAI's short-context pricing tier.
+                </td>
+                <td data-label="Set">
+                  <strong>Use the configured 500K / 300K / 300K values.</strong>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <aside class="note">
+            <strong
+              >The 272K boundary is economic, not the GPT-5.6 architecture
+              limit.</strong
+            >
+            OpenAI says requests above 272K input tokens are billed at 2× input
+            and 1.5× output rates for the full request. Raising Pi's metadata
+            does not reserve tokens or force the upstream service to accept
+            them.
+          </aside>
+        </div>
+      </section>
+
+      <section aria-labelledby="configuration-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">4</span>
+          <h2 id="configuration-title">The configuration to use</h2>
+          <p class="lead">
+            Choose the provider block that matches how the model is
+            authenticated. This Pipi session uses the ChatGPT/Codex provider,
+            while Pi's documented long-context example targets direct OpenAI API
+            access.
+          </p>
+
+          <h3>Current Pipi provider: <code>openai-codex</code></h3>
+          <pre><code>{
+  "providers": {
+    "openai-codex": {
+      "modelOverrides": {
+        "gpt-5.6-sol": {
+          "contextWindow": 1050000
+        }
+      }
+    }
+  }
+}</code></pre>
+          <p class="note">
+            This override is proven to change Pi's local model metadata.
+            However, the installed Pi documentation only explicitly promises the
+            1.05M opt-in for <em>direct OpenAI</em>. A ChatGPT/Codex
+            subscription backend may enforce its own limit. If it does, Pi will
+            eventually receive an overflow instead of gaining extra upstream
+            capacity.
+          </p>
+
+          <h3>Documented route: direct OpenAI API</h3>
+          <pre><code>{
+  "providers": {
+    "openai": {
+      "modelOverrides": {
+        "gpt-5.6-sol": {
+          "contextWindow": 1050000
+        }
+      }
+    }
+  }
+}</code></pre>
+
+          <p class="note">
+            Add equivalent entries for <code>gpt-5.6-terra</code> and
+            <code>gpt-5.6-luna</code> only if those models are used. There is no
+            reason to override <code>maxTokens</code>: the built-in value
+            already matches OpenAI's 128K maximum output.
+          </p>
+        </div>
+      </section>
+
+      <section aria-labelledby="effects-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">5</span>
+          <h2 id="effects-title">What changes after the override</h2>
+          <ol class="steps">
+            <li>
+              <strong>Pi waits longer to compact.</strong>
+              Automatic compaction triggers when estimated context exceeds
+              <code>contextWindow − reserveTokens</code>. An inflated value can
+              therefore cause avoidable upstream overflow errors.
+            </li>
+            <li>
+              <strong>The footer reports the larger capacity.</strong>
+              Context percentage is calculated against the composed model value,
+              so 1,050,000 appears as approximately <code>1.1M</code> in
+              <code>--list-models</code>.
+            </li>
+            <li>
+              <strong>Pricing metadata survives.</strong>
+              A <code>modelOverrides</code> change to context alone preserves
+              the built-in long-context pricing tier. Requests above 272K input
+              use that tier for usage estimates.
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section aria-labelledby="verify-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">6</span>
+          <h2 id="verify-title">Apply and verify</h2>
+          <p class="lead">
+            The smallest safe workflow is to create the override, reload model
+            data, and inspect the composed result.
+          </p>
+
+          <pre><code># 1. Create or edit the Pipi-specific file
+$EDITOR /home/kcnc/.pipi/agent/models.json
+
+# 2. In Pipi, open /model so models.json is reloaded,
+#    then reselect gpt-5.6-sol if needed.
+
+# 3. Verify from the shell
+pipi --list-models | grep 'gpt-5.6-sol'</code></pre>
+
+          <p class="note">
+            Expected local result after the 1.05M override: the context column
+            reads <code>1.1M</code> and the max-output column remains
+            <code>128K</code>. If real requests fail before that size, lower the
+            override to the limit actually supported by the selected provider.
+          </p>
+        </div>
+      </section>
+
+      <section aria-labelledby="evidence-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">7</span>
+          <h2 id="evidence-title">Evidence</h2>
+          <p class="lead">
+            Claims in this report were checked against the running environment,
+            installed Pi 0.82.1 code and documentation, and OpenAI's model
+            pages.
+          </p>
+
+          <h3>Local evidence</h3>
+          <div class="local-sources">
+            <div class="local-source">
+              <code>/home/kcnc/.local/bin/pipi</code>
+              <p>
+                Exports the Pipi-specific configuration and session directories
+                before launching Pi.
+              </p>
+            </div>
+            <div class="local-source">
+              <code>/home/kcnc/.pipi/agent/settings.json</code>
+              <p>
+                Selects <code>openai-codex/gpt-5.6-sol</code> as the default
+                model.
+              </p>
+            </div>
+            <div class="local-source">
+              <code>/home/kcnc/.pipi/agent/models-store.json</code>
+              <p>
+                Stores the 272,000-token built-in catalog entries before the
+                user override is composed; max output remains 128,000.
+              </p>
+            </div>
+            <div class="local-source">
+              <code>…/pi-coding-agent/docs/models.md</code>
+              <p>
+                Defines <code>modelOverrides</code> and documents the 1.05M
+                direct-OpenAI opt-in.
+              </p>
+            </div>
+            <div class="local-source">
+              <code>…/pi-coding-agent/dist/core/provider-composer.js</code>
+              <p>
+                Shows that override values replace model metadata and preserve
+                fields that were not overridden.
+              </p>
+            </div>
+            <div class="local-source">
+              <code>…/pi-coding-agent/dist/core/compaction/compaction.js</code>
+              <p>
+                Shows the compaction threshold calculation based on
+                <code>contextWindow</code>.
+              </p>
+            </div>
+          </div>
+
+          <h3>OpenAI sources</h3>
+          <ul class="source-links">
+            <li>
+              <a
+                href="https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+                >GPT-5.6 Sol — 1,050,000 context, 128,000 max output</a
+              >
+            </li>
+            <li>
+              <a
+                href="https://developers.openai.com/api/docs/models/gpt-5.6-terra"
+                >GPT-5.6 Terra — 1,050,000 context, 128,000 max output</a
+              >
+            </li>
+            <li>
+              <a
+                href="https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+                >GPT-5.6 Luna — 1,050,000 context, 128,000 max output</a
+              >
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="page">
+        <p>
+          <strong>Conclusion:</strong> use
+          <code>/home/kcnc/.pipi/agent/models.json</code>; 1,050,000 is the
+          GPT-5.6 capability ceiling; 272,000 remains the conservative Pipi
+          default. Report generated from the local installation and official
+          model documentation.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
