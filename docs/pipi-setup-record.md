@@ -155,8 +155,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Added `scripts/check-submodules.mjs`, `npm run check:submodules`, initialized/clean gitlink coverage, installer preflight coverage, and user/setup documentation.
 - Kept the Python contract CLI available in the pinned child but did not install or execute it as part of Pipi setup.
 - Re-ran the isolated Pipi installer with `--skip-dependencies`; it validated and reported the canonical submodule skill while preserving the existing package list and isolated runtime paths.
-- Verified 18 installer/submodule tests, 51 child reviewer tests on the default Python, TypeScript, Prettier, submodule integrity, both reviewer example results, and 8 existing browser-control tests. No live model or authenticated browser check was run.
-- The earlier subtree implementation was independently reviewed and remediated before the user clarified that GitHub must display a true submodule. The final submodule composition receives a separate review before PR handoff.
+- Verified 19 installer/submodule tests, 51 child reviewer tests on the default Python, TypeScript, Prettier, submodule integrity, both reviewer example results, and 8 existing browser-control tests. No live model or authenticated browser check was run.
+- The earlier subtree implementation was independently reviewed and remediated before the user clarified that GitHub must display a true submodule. A fresh review of the final submodule composition found three integration/documentation blockers; all were remediated with retained tests and closure returned `READY`.
 - Updated pull request #3 from `feat/evidence-driven-reviewer-subrepo`; merge remains a separate user decision.
 
 ## Current package sources
