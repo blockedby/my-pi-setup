@@ -179,6 +179,13 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Verified `pipi --version` reports `0.82.1`, the three expected package sources remain registered, the canonical package skill exists under the reviewer submodule, and no duplicate host `skills/code-review` path exists.
 - Preserved separate Pipi auth and did not invoke a live model or browser.
 
+### 15. Post-merge repository review
+
+- Ran the pinned independent reviewer role from `vendor/gpt5.6-reviewer` over the complete reviewer-submodule integration, using base `38736f93a2b0d4bef2ad9ff2a187258f76c4c4f4` and head `a830629295002a388ef2149b06427dcef3368648`.
+- The reviewer returned `READY` with no findings.
+- It verified the exact gitlink, child HEAD/origin/cleanliness, required assets, manifest uniqueness, duplicate absence, installer/submodule tests, TypeScript, formatting, child reviewer tests, example validators, and browser-control unit tests.
+- The review was read-only and did not merge, push, advance the child, invoke live models, or use browser automation.
+
 ## Current package sources
 
 The installer keeps these package sources in Pipi settings:
@@ -226,6 +233,7 @@ Pipi now has its own three browser Chrome MCP servers. Use `browser-chrome-contr
 11. Add the evidence-driven reviewer as a subrepo, make its skill integration canonical, check related scripts, add maintenance rules, and prepare a pull request; after clarification, convert it to a true Git submodule visible on GitHub — implemented on `feat/evidence-driven-reviewer-subrepo`; merge remains pending user review.
 12. Create a disposable installation under `/tmp` and check the install/uninstall scripts — completed at `/tmp/pipi-submodule-install-check` with uninitialized, recursive, skip-dependency, full-dependency, idempotence, launcher, uninstall, purge, and child Python-package checks.
 13. Merge pull request #3 and update the real local Pipi setup — merged as `581c344`, synchronized local `main` and the pinned submodule, re-ran checks, refreshed Pipi with `--skip-dependencies`, and verified version/package/skill isolation.
+14. Run the review agent over the updated repository — completed read-only against base `38736f9` and head `a830629`; verdict `READY`, no findings.
 
 ## Pending steps explicitly connected to user requests
 
