@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A simple explanation of how Pipi subagents work and what removing tools means."
+    />
+    <title>How Pipi Subagents Work</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #111;
+        --paper: #fff;
+        --muted: #555;
+        --soft: #f1f1f1;
+        --line: #111;
+        --measure: 72rem;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--paper);
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 1rem;
+        line-height: 1.6;
+      }
+
+      a {
+        color: inherit;
+        text-decoration-thickness: 2px;
+        text-underline-offset: 0.18em;
+      }
+
+      a:hover {
+        text-decoration-style: double;
+      }
+
+      a:focus-visible,
+      summary:focus-visible {
+        outline: 3px solid var(--ink);
+        outline-offset: 4px;
+      }
+
+      code,
+      .mono,
+      .eyebrow,
+      .node-label {
+        font-family: "Courier New", Courier, monospace;
+      }
+
+      code {
+        padding: 0.1em 0.32em;
+        border: 1px solid var(--line);
+        background: var(--soft);
+        overflow-wrap: anywhere;
+      }
+
+      .page {
+        width: min(calc(100% - 2rem), var(--measure));
+        margin-inline: auto;
+      }
+
+      header {
+        padding: clamp(3.5rem, 9vw, 7rem) 0 3rem;
+        border-bottom: 4px solid var(--line);
+      }
+
+      .eyebrow {
+        margin: 0 0 1rem;
+        font-size: 0.8rem;
+        font-weight: 700;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 12ch;
+        margin-bottom: 1.5rem;
+        font-size: clamp(3rem, 10vw, 7.8rem);
+        line-height: 0.9;
+        letter-spacing: -0.065em;
+      }
+
+      h2 {
+        max-width: 18ch;
+        margin-bottom: 1.5rem;
+        font-size: clamp(2rem, 5vw, 4rem);
+        line-height: 1;
+        letter-spacing: -0.045em;
+      }
+
+      h3 {
+        font-size: 1.15rem;
+        line-height: 1.25;
+      }
+
+      .lead {
+        max-width: 44rem;
+        margin-bottom: 0;
+        font-size: clamp(1.15rem, 2.2vw, 1.55rem);
+        line-height: 1.45;
+      }
+
+      main section {
+        padding: clamp(3.5rem, 8vw, 6.5rem) 0;
+        border-bottom: 2px solid var(--line);
+      }
+
+      .section-number {
+        display: inline-grid;
+        width: 2.2rem;
+        height: 2.2rem;
+        margin-bottom: 1.3rem;
+        place-items: center;
+        border: 2px solid var(--line);
+        border-radius: 50%;
+        font-family: "Courier New", Courier, monospace;
+        font-weight: 700;
+      }
+
+      .answer {
+        display: grid;
+        grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+        gap: clamp(2rem, 7vw, 6rem);
+        align-items: start;
+      }
+
+      .answer-word {
+        margin: 0;
+        font-size: clamp(3.8rem, 7.5vw, 7rem);
+        font-weight: 800;
+        line-height: 0.82;
+        letter-spacing: -0.08em;
+        text-transform: uppercase;
+      }
+
+      .definition {
+        padding: clamp(1.5rem, 4vw, 2.5rem);
+        border: 3px solid var(--line);
+        box-shadow: 0.6rem 0.6rem 0 var(--ink);
+      }
+
+      .definition p:last-child {
+        margin-bottom: 0;
+      }
+
+      .important {
+        font-size: 1.25rem;
+        font-weight: 700;
+      }
+
+      .diagram {
+        margin-top: 2.5rem;
+        padding: clamp(1rem, 3vw, 2rem);
+        border: 3px solid var(--line);
+        overflow-x: auto;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: minmax(10rem, 1fr) 4rem minmax(16rem, 2fr);
+        gap: 1rem;
+        min-width: 42rem;
+        align-items: center;
+      }
+
+      .node {
+        position: relative;
+        padding: 1.4rem;
+        border: 2px solid var(--line);
+        background: var(--paper);
+      }
+
+      .node.dark {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      .node-label {
+        display: block;
+        margin-bottom: 0.45rem;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .node strong {
+        display: block;
+        font-size: 1.35rem;
+        line-height: 1.2;
+      }
+
+      .node p {
+        margin: 0.65rem 0 0;
+        font-size: 0.92rem;
+      }
+
+      .arrow {
+        text-align: center;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 2.6rem;
+        font-weight: 700;
+      }
+
+      .children {
+        display: grid;
+        gap: 0.8rem;
+      }
+
+      .return-line {
+        grid-column: 1 / -1;
+        padding-top: 0.6rem;
+        border-top: 2px dashed var(--line);
+        text-align: center;
+        font-family: "Courier New", Courier, monospace;
+        font-weight: 700;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem 1.5rem;
+        margin: 1.4rem 0 0;
+        padding: 0;
+        list-style: none;
+        font-size: 0.9rem;
+      }
+
+      .legend li::before {
+        content: "■";
+        margin-right: 0.5rem;
+      }
+
+      .filter-grid {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        gap: clamp(1rem, 3vw, 2.5rem);
+        align-items: stretch;
+        margin-top: 2.5rem;
+      }
+
+      .tool-box {
+        padding: 1.5rem;
+        border: 2px solid var(--line);
+      }
+
+      .tool-box h3 {
+        padding-bottom: 0.8rem;
+        border-bottom: 2px solid var(--line);
+      }
+
+      .tool-list {
+        display: grid;
+        gap: 0.5rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 0.92rem;
+      }
+
+      .tool-list li {
+        padding: 0.45rem 0.55rem;
+        border: 1px solid var(--line);
+      }
+
+      .tool-list .removed {
+        color: var(--muted);
+        background: repeating-linear-gradient(
+          -45deg,
+          #fff,
+          #fff 5px,
+          #ddd 5px,
+          #ddd 6px
+        );
+        text-decoration: line-through 2px;
+      }
+
+      .filter-arrow {
+        align-self: center;
+        text-align: center;
+        font-family: "Courier New", Courier, monospace;
+        font-weight: 700;
+        writing-mode: vertical-rl;
+      }
+
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        margin: 2.5rem 0 0;
+        padding: 0;
+        border: 2px solid var(--line);
+        list-style: none;
+        counter-reset: step;
+      }
+
+      .steps li {
+        min-width: 0;
+        padding: 1.5rem;
+        counter-increment: step;
+      }
+
+      .steps li + li {
+        border-left: 2px solid var(--line);
+      }
+
+      .steps li::before {
+        content: "0" counter(step);
+        display: block;
+        margin-bottom: 2.5rem;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 1.8rem;
+        font-weight: 700;
+      }
+
+      .steps strong {
+        display: block;
+        margin-bottom: 0.55rem;
+      }
+
+      .comparison {
+        width: 100%;
+        margin-top: 2.5rem;
+        border-collapse: collapse;
+      }
+
+      .comparison th,
+      .comparison td {
+        padding: 1rem;
+        border: 2px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .comparison th {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      .yes,
+      .no {
+        font-family: "Courier New", Courier, monospace;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .source-links {
+        display: grid;
+        gap: 0.75rem;
+        margin: 1.5rem 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .source-links a {
+        display: block;
+        padding: 1rem;
+        border: 2px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+
+      .source-links a:hover {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      footer {
+        padding: 2.5rem 0 4rem;
+        font-size: 0.9rem;
+      }
+
+      @media (max-width: 760px) {
+        .answer,
+        .filter-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .answer-word {
+          font-size: clamp(3.2rem, 18vw, 5rem);
+        }
+
+        .diagram {
+          overflow-x: visible;
+        }
+
+        .flow {
+          min-width: 0;
+          grid-template-columns: 1fr;
+        }
+
+        .flow > .arrow {
+          transform: rotate(90deg);
+        }
+        .return-line {
+          grid-column: 1;
+        }
+
+        .filter-arrow {
+          writing-mode: horizontal-tb;
+          transform: rotate(90deg);
+        }
+
+        .steps {
+          grid-template-columns: 1fr;
+        }
+        .steps li + li {
+          border-top: 2px solid var(--line);
+          border-left: 0;
+        }
+
+        .steps li::before {
+          margin-bottom: 1rem;
+        }
+
+        .comparison thead {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          padding: 0;
+          margin: -1px;
+          overflow: hidden;
+          clip: rect(0, 0, 0, 0);
+          white-space: nowrap;
+          border: 0;
+        }
+
+        .comparison,
+        .comparison tbody,
+        .comparison tr,
+        .comparison td {
+          display: block;
+          width: 100%;
+        }
+
+        .comparison tr {
+          border: 2px solid var(--line);
+        }
+
+        .comparison tr + tr {
+          margin-top: 1rem;
+        }
+
+        .comparison td {
+          display: grid;
+          grid-template-columns: minmax(7.5rem, 0.8fr) minmax(0, 1fr);
+          gap: 1rem;
+          border: 0;
+        }
+
+        .comparison td + td {
+          border-top: 1px solid var(--line);
+        }
+        .comparison td::before {
+          font-family: "Courier New", Courier, monospace;
+          font-size: 0.78rem;
+          font-weight: 700;
+          text-transform: uppercase;
+        }
+        .comparison td:nth-child(1)::before {
+          content: "Action";
+        }
+        .comparison td:nth-child(2)::before {
+          content: "Main Pipi";
+        }
+        .comparison td:nth-child(3)::before {
+          content: "Child subagent";
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+
+      @media print {
+        body {
+          font-size: 10pt;
+        }
+        header,
+        main section {
+          padding: 1.5rem 0;
+        }
+        .definition {
+          box-shadow: none;
+        }
+        .diagram {
+          overflow: visible;
+        }
+        a {
+          text-decoration: none;
+        }
+        a::after {
+          content: " (" attr(href) ")";
+          font-size: 0.75em;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="page">
+        <p class="eyebrow">Pipi architecture / simple guide</p>
+        <h1>How subagents work</h1>
+        <p class="lead">
+          The main Pipi agent can start small worker agents. Each worker
+          receives a task and a limited set of tools. This page explains the
+          system in clear, B2-level English.
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <section aria-labelledby="meaning-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">1</span>
+          <div class="answer">
+            <div>
+              <p class="answer-word" aria-hidden="true">Remove</p>
+            </div>
+            <div class="definition">
+              <h2 id="meaning-title">What does “removes” mean?</h2>
+              <p class="important">
+                It means “does not give this tool to the child agent.”
+              </p>
+              <p>
+                Pipi makes a list of tools before it starts a child. It takes
+                some tool names out of that list. The child cannot see or use
+                those tools.
+              </p>
+              <p>
+                The tool files are <strong>not deleted</strong>. The main Pipi
+                agent can still use them. Only the child’s tool list is smaller.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="graph-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">2</span>
+          <h2 id="graph-title">The agent graph</h2>
+          <p class="lead">
+            The system has one coordinator and several leaf workers. A leaf
+            worker finishes its own task, but it does not create another worker.
+          </p>
+
+          <figure class="diagram" aria-labelledby="graph-caption">
+            <div class="flow">
+              <div class="node dark">
+                <span class="node-label">Coordinator</span>
+                <strong>Main Pipi</strong>
+                <p>
+                  Sees the conversation, chooses tasks, and manages workers.
+                </p>
+              </div>
+
+              <div class="arrow" aria-hidden="true">→</div>
+
+              <div class="children">
+                <div class="node">
+                  <span class="node-label">Leaf worker A</span>
+                  <strong>Pi subagent</strong>
+                  <p>Uses a fresh Pi session and normal coding tools.</p>
+                </div>
+                <div class="node">
+                  <span class="node-label">Leaf worker B</span>
+                  <strong>Claude subagent</strong>
+                  <p>
+                    Runs in Claude Code. Native Agent and Task tools are
+                    disabled.
+                  </p>
+                </div>
+                <div class="node">
+                  <span class="node-label">Leaf worker C</span>
+                  <strong>Codex subagent</strong>
+                  <p>Runs in a separate Codex thread with the task prompt.</p>
+                </div>
+              </div>
+
+              <div class="return-line">
+                ← final result returns to Main Pipi ←
+              </div>
+            </div>
+            <figcaption id="graph-caption">
+              Main Pipi can run up to four workers at the same time. Every
+              worker is a leaf: there is no worker-to-worker branch.
+            </figcaption>
+          </figure>
+
+          <ul class="legend" aria-label="Diagram legend">
+            <li>Dark box: coordinator</li>
+            <li>White box: worker</li>
+            <li>Arrow: task or result</li>
+          </ul>
+        </div>
+      </section>
+
+      <section aria-labelledby="filter-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">3</span>
+          <h2 id="filter-title">The tool filter</h2>
+          <p class="lead">
+            Think about a key ring. The main agent has every key. Before a
+            worker starts, Pipi removes the keys that could create or manage
+            more agents.
+          </p>
+
+          <div class="filter-grid">
+            <div class="tool-box">
+              <h3>Before the filter</h3>
+              <ul class="tool-list">
+                <li>read / write files</li>
+                <li>run shell commands</li>
+                <li>search code</li>
+                <li>subagent_spawn</li>
+                <li>subagent_wait</li>
+                <li>workflow</li>
+                <li>ask_user</li>
+              </ul>
+            </div>
+
+            <div
+              class="filter-arrow"
+              aria-label="Then Pipi filters the tool list"
+            >
+              FILTER →
+            </div>
+
+            <div class="tool-box">
+              <h3>Child’s tool list</h3>
+              <ul class="tool-list">
+                <li>read / write files</li>
+                <li>run shell commands</li>
+                <li>search code</li>
+                <li class="removed">subagent_spawn</li>
+                <li class="removed">subagent_wait</li>
+                <li class="removed">workflow</li>
+                <li class="removed">ask_user</li>
+              </ul>
+            </div>
+          </div>
+
+          <p class="important" style="margin-top: 2rem">
+            The crossed-out tools still exist in Pipi. They are simply
+            unavailable inside the child session.
+          </p>
+        </div>
+      </section>
+
+      <section aria-labelledby="sequence-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">4</span>
+          <h2 id="sequence-title">One task, step by step</h2>
+          <ol class="steps">
+            <li>
+              <strong>Main Pipi writes a prompt.</strong>
+              It gives the worker all information needed for one task.
+            </li>
+            <li>
+              <strong>Pipi chooses a harness.</strong>
+              The worker can use Pi, Claude, or Codex.
+            </li>
+            <li>
+              <strong>The worker acts alone.</strong>
+              It uses allowed tools, but it cannot start more workers or ask you
+              a question.
+            </li>
+            <li>
+              <strong>The result comes back.</strong>
+              Main Pipi reads the result and decides the next action.
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section aria-labelledby="access-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">5</span>
+          <h2 id="access-title">Who can do what?</h2>
+          <div style="overflow-x: auto">
+            <table class="comparison">
+              <thead>
+                <tr>
+                  <th scope="col">Action</th>
+                  <th scope="col">Main Pipi</th>
+                  <th scope="col">Child subagent</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>See the full user conversation</td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="no">No</span> — it sees its task prompt</td>
+                </tr>
+                <tr>
+                  <td>Use normal coding tools</td>
+                  <td><span class="yes">Yes</span></td>
+                  <td>
+                    <span class="yes">Yes</span>, according to its harness
+                  </td>
+                </tr>
+                <tr>
+                  <td>Start another subagent</td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="no">No</span></td>
+                </tr>
+                <tr>
+                  <td>Run a multi-agent workflow</td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="no">No</span></td>
+                </tr>
+                <tr>
+                  <td>Ask the user directly</td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="no">No</span></td>
+                </tr>
+                <tr>
+                  <td>Return a result to the coordinator</td>
+                  <td>Receives it</td>
+                  <td><span class="yes">Yes</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="why-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">6</span>
+          <h2 id="why-title">Why block nested agents?</h2>
+          <div class="answer">
+            <p class="lead">
+              A flat graph is easier to control. The main Pipi agent always
+              knows how many workers exist and which task belongs to each
+              worker.
+            </p>
+            <div>
+              <h3>It prevents three problems</h3>
+              <ol>
+                <li>
+                  <strong>Runaway growth:</strong> one worker cannot create many
+                  more workers.
+                </li>
+                <li>
+                  <strong>Lost context:</strong> every task and result returns
+                  through one coordinator.
+                </li>
+                <li>
+                  <strong>Unclear cost:</strong> the system keeps a fixed limit
+                  of four active workers.
+                </li>
+              </ol>
+              <p>
+                Nested agents are technically possible, but they need extra
+                rules for depth, cost, permissions, and cancellation. This setup
+                chooses the safer, simpler graph.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="source-title">
+        <div class="page">
+          <span class="section-number" aria-hidden="true">7</span>
+          <h2 id="source-title">See the source</h2>
+          <p>
+            The filtering rule and the model-facing explanation are available on
+            GitHub:
+          </p>
+          <ul class="source-links">
+            <li>
+              <a
+                href="https://github.com/davis7dotsh/my-pi-setup/blob/main/extensions/shared/child-session.ts"
+              >
+                child-session.ts — the list of tools removed from child sessions
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/davis7dotsh/my-pi-setup/blob/main/extensions/subagents/src/prompt.ts"
+              >
+                prompt.ts — the explanation given to the main Pipi agent
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/davis7dotsh/my-pi-setup/tree/main/extensions/subagents"
+              >
+                subagents/ — the complete extension
+              </a>
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="page">
+        <p class="mono">MAIN PIPI → LEAF WORKERS → RESULTS → MAIN PIPI</p>
+        <p>
+          Static black-and-white guide. No JavaScript and no external assets.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -1,10 +1,11 @@
 {
+  "name": "pipi-alias-setup",
+  "private": true,
   "dependencies": {
     "@earendil-works/pi-ai": "^0.82.0",
     "@earendil-works/pi-coding-agent": "^0.82.0",
     "@earendil-works/pi-tui": "^0.82.0",
     "acorn": "^8.17.0",
-    "firecrawl": "^4.30.0",
     "typebox": "^1.3.6"
   },
   "devDependencies": {
@@ -13,10 +14,25 @@
     "typescript": "^7.0.2"
   },
   "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "themes": [
+      "./themes"
+    ]
+  },
   "scripts": {
     "check": "tsc --noEmit",
-    "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"*.json\"",
-    "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"*.json\"",
-    "test": "node --test --experimental-strip-types extensions/*/*.test.ts && npm --prefix extensions/file-search test"
+    "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"scripts/**/*.mjs\" \"*.json\"",
+    "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"scripts/**/*.mjs\" \"*.json\"",
+    "install:dependencies": "node scripts/install-dependencies.mjs",
+    "install:pipi": "node scripts/install.mjs",
+    "test:installer": "node --test scripts/install.test.mjs",
+    "test": "npm run test:installer && node --test --experimental-strip-types extensions/*/*.test.ts && npm --prefix extensions/file-search test",
+    "uninstall:pipi": "node scripts/uninstall.mjs"
   }
 }
