@@ -186,6 +186,14 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - It verified the exact gitlink, child HEAD/origin/cleanliness, required assets, manifest uniqueness, duplicate absence, installer/submodule tests, TypeScript, formatting, child reviewer tests, example validators, and browser-control unit tests.
 - The review was read-only and did not merge, push, advance the child, invoke live models, or use browser automation.
 
+### 16. General skills installed into Pipi
+
+- After `pi-agent-setup` pull request #24 was merged, installed its `general` skill set into the isolated Pipi agent directory with the ownership-safe skill installer.
+- Installed exactly nine general skills under `$HOME/.pipi/agent/skills`: `backend-quality`, `browser-chrome`, `completion-verification`, `devops-quality`, `explanatory-html-pages`, `frontend-quality`, `git-branching`, `modern-skill-revising`, and `visual-composition`.
+- Replaced the pre-existing `browser-chrome` and `explanatory-html-pages` copies only after verifying they matched the merged sources; unrelated Pipi skills and settings were preserved.
+- Verified the ownership manifest records all nine skills under `general`, records no AAD skills, and each installed skill contains `SKILL.md`. No live model or browser session was invoked.
+- A new Pipi session or `/reload` is still needed for an already-running session to discover the installed skills.
+
 ## Current package sources
 
 The installer keeps these package sources in Pipi settings:
@@ -234,11 +242,12 @@ Pipi now has its own three browser Chrome MCP servers. Use `browser-chrome-contr
 12. Create a disposable installation under `/tmp` and check the install/uninstall scripts — completed at `/tmp/pipi-submodule-install-check` with uninitialized, recursive, skip-dependency, full-dependency, idempotence, launcher, uninstall, purge, and child Python-package checks.
 13. Merge pull request #3 and update the real local Pipi setup — merged as `581c344`, synchronized local `main` and the pinned submodule, re-ran checks, refreshed Pipi with `--skip-dependencies`, and verified version/package/skill isolation.
 14. Run the review agent over the updated repository — completed read-only against base `38736f9` and head `a830629`; verdict `READY`, no findings.
+15. Merge `pi-agent-setup` pull request #24, then install only its general skills into Pipi — completed with nine general skills, exact ownership tracking, no AAD skills, and no changes to regular Pi.
 
 ## Pending steps explicitly connected to user requests
 
 1. **Authenticate Pipi for model use.** Run `pipi`, then `/login`, unless auth sharing is explicitly requested. The default remains separate.
-2. **Reload after this installation.** Start a new Pipi session or run `/reload` so the browser skill/MCP configuration and canonical evidence-driven code-review skill are refreshed.
+2. **Reload after this installation.** Start a new Pipi session or run `/reload` so the nine general skills, browser MCP configuration, and canonical evidence-driven code-review skill are refreshed.
 3. **Choose browser mode safely.** Use disposable headless mode by default. Use headed persistent mode only when a future requested task needs the current browser login/profile.
 4. **Choose any additional MCP servers.** Browser MCP is configured. Use `/mcp setup` only for other servers; importing regular Pi's secret-bearing config requires a separate explicit decision.
 5. **Keep this record current.** `AGENTS.md` now requires every user-requested Pipi operation to append the request, action, affected paths or values, verification, and pending steps here without secrets.
