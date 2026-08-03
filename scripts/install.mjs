@@ -23,6 +23,20 @@ import {
 } from "./install-dependencies.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const runtimeManifest = JSON.parse(
+  readFileSync(join(repositoryRoot, "package.json"), "utf8"),
+);
+const runtimePiSpec =
+  runtimeManifest.dependencies?.["@earendil-works/pi-coding-agent"];
+const runtimePiVersion =
+  typeof runtimePiSpec === "string"
+    ? runtimePiSpec.match(/^\^?(\d+\.\d+\.\d+)$/)?.[1]
+    : undefined;
+if (!runtimePiVersion)
+  throw new Error(
+    "package.json must declare @earendil-works/pi-coding-agent with an exact semver or caret range.",
+  );
+const runtimePiPackage = `@earendil-works/pi-coding-agent@${runtimePiVersion}`;
 const managedLauncherMarker = "# Managed by pipi-alias installer.";
 const mcpAdapterVersion = "2.15.0";
 const mcpAdapterPackage = `npm:pi-mcp-adapter@${mcpAdapterVersion}`;
@@ -39,7 +53,7 @@ const modelDefaults = [
 const usage = `Usage: node scripts/install.mjs [options]
 
 Options:
-  --pi PATH             Pi executable to launch (default: pi from PATH)
+  --pi PATH             Pi executable override (default: isolated version from package.json)
   --codex-tools PATH    Local pi-codex-tools package (default: ../pi-codex)
   --bin-dir PATH        Launcher directory (default: ~/.local/bin)
   --share-auth          Symlink regular Pi auth into Pipi (opt-in)
@@ -310,13 +324,12 @@ const validateAuthShare = (regularAuthPath, pipiAuthPath) => {
 const install = () => {
   const options = parseArgs(process.argv.slice(2));
   const home = process.env.HOME || homedir();
-  const piExecutable = findExecutable(
-    options.pi ?? "pi",
-    options.pi ? [] : [join(repositoryRoot, "node_modules", ".bin")],
-  );
-  if (!piExecutable)
+  const externalPiExecutable = options.pi
+    ? findExecutable(options.pi)
+    : undefined;
+  if (options.pi && !externalPiExecutable)
     throw new Error(
-      `Pi executable is not executable or was not found: ${options.pi ?? "pi"}`,
+      `Pi executable is not executable or was not found: ${options.pi}`,
     );
 
   const codexExecutable = findExecutable("codex");
@@ -389,13 +402,38 @@ const install = () => {
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
   mkdirSync(binDir, { recursive: true });
   removePiSubagentsAssets(agentDir);
+  const isolatedNpmPrefix = join(agentDir, "npm");
   if (!options.skipDependencies) {
     ensureIsolatedNpmPackage({
-      prefix: join(agentDir, "npm"),
+      prefix: isolatedNpmPrefix,
+      packageName: "@earendil-works/pi-coding-agent",
+      packageSpec: runtimePiPackage,
+      expectedVersion: runtimePiVersion,
+    });
+    ensureIsolatedNpmPackage({
+      prefix: isolatedNpmPrefix,
       packageName: "pi-mcp-adapter",
       packageSpec: `pi-mcp-adapter@${mcpAdapterVersion}`,
       expectedVersion: mcpAdapterVersion,
     });
+  }
+  const isolatedPiExecutable = join(
+    isolatedNpmPrefix,
+    "node_modules",
+    ".bin",
+    "pi",
+  );
+  const piExecutable =
+    externalPiExecutable ??
+    (!options.skipDependencies || existsSync(isolatedPiExecutable)
+      ? isolatedPiExecutable
+      : findExecutable("pi", [join(repositoryRoot, "node_modules", ".bin")]));
+  if (!piExecutable)
+    throw new Error("Pi executable is not executable or was not found: pi");
+  try {
+    accessSync(piExecutable, constants.X_OK);
+  } catch {
+    throw new Error(`Pi executable is not executable: ${piExecutable}`);
   }
   const browserSkillDir = installBrowserChromeAssets(agentDir);
   installBrowserChromeMcp(pipiMcpPath, browserSkillDir);
@@ -409,6 +447,7 @@ const install = () => {
   writeFileSync(launcherPath, launcher, { mode: 0o755 });
   chmodSync(launcherPath, 0o755);
 
+  console.log(`Pipi runtime: ${runtimePiPackage}`);
   console.log(`Installed Pipi launcher: ${launcherPath}`);
   console.log(`Pipi settings: ${pipiSettingsPath}`);
   console.log(`Pipi sessions: ${sessionDir}`);
