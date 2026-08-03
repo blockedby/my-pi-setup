@@ -34,6 +34,7 @@ import type {
   TranscriptPart,
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
+import { resolvePiModel } from "../policy.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -49,7 +50,12 @@ const CHILD_EXCLUDED_TOOL_NAMES = [
   "ask_user",
 ] as const;
 
-// --- Model + effort resolution -----------------------------------------------
+export function appendProfileSystemPrompt(
+  base: ReadonlyArray<string>,
+  profileSystemPrompt: string | undefined,
+) {
+  return profileSystemPrompt ? [...base, profileSystemPrompt] : [...base];
+}
 
 type ThinkingLevel = NonNullable<
   NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"]
@@ -61,46 +67,25 @@ type ThinkingLevel = NonNullable<
  * then must be unambiguous across providers. No hint inherits the parent
  * model; with nothing to inherit, the SDK default applies.
  */
-function resolvePiModel(
-  registry: ModelRegistry,
-  hint: string | undefined,
-  inherited: { provider: string; id: string } | undefined,
-): Model<any> | undefined {
-  if (!hint) {
-    if (!inherited) return undefined;
-    return registry.find(inherited.provider, inherited.id) ?? undefined;
-  }
-  const slash = hint.indexOf("/");
-  if (slash > 0) {
-    const provider = hint.slice(0, slash);
-    const id = hint.slice(slash + 1);
-    const found = registry.find(provider, id);
-    if (found) return found;
-    throw new Error(`Unknown model "${hint}".`);
-  }
-  if (inherited) {
-    const found = registry.find(inherited.provider, hint);
-    if (found) return found;
-  }
-  const matches = registry.getAll().filter((m) => m.id === hint);
-  if (matches.length === 1) return matches[0];
-  if (matches.length > 1) {
-    throw new Error(
-      `Model "${hint}" exists in multiple providers (${matches.map((m) => m.provider).join(", ")}). Use "provider/${hint}".`,
-    );
-  }
-  throw new Error(`Unknown model "${hint}".`);
-}
-
 // --- Child session helpers (ported from v1 shared/child-session.ts) -----------
 
 /** Load normal global/package resources and trust-gated project resources. */
-async function createChildResources(cwd: string, projectTrusted: boolean) {
+async function createChildResources(
+  cwd: string,
+  projectTrusted: boolean,
+  profileSystemPrompt?: string,
+) {
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir, {
     projectTrusted,
   });
-  const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    appendSystemPromptOverride: (base) =>
+      appendProfileSystemPrompt(base, profileSystemPrompt),
+  });
   await loader.reload();
   return { loader, settingsManager };
 }
@@ -272,6 +257,7 @@ const makePiSession = (
 
     const model = yield* Effect.try({
       try: () =>
+        task.resolvedPiModel ??
         resolvePiModel(registry, task.model, task.parent.inheritedModel),
       catch: (error) => new SpawnError({ message: boundedError(error) }),
     });
@@ -284,6 +270,7 @@ const makePiSession = (
         const { loader, settingsManager } = await createChildResources(
           task.cwd,
           task.parent.projectTrusted,
+          task.profileSystemPrompt,
         );
         const { session } = await createAgentSession({
           cwd: task.cwd,

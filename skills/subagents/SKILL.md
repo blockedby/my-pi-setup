@@ -13,7 +13,7 @@ Each subagent is headless, has its own context window, cannot see the parent con
 **Prompt nicknames:** “pi”, “pi agent”, “pi subagent”
 **Best default:** Use when the user does not request another harness. It inherits the parent model and thinking level when `model` or `reasoning_effort` is omitted.
 
-Do not use models from the Anthropic provider even if one appears in the model list.
+Do not use models from the Anthropic provider even if one appears in the model list. For broad routine independent exploration, use the `luna-explore` profile; for deeper audits and verification, use `terra-audit`. Keep edits, integration, and final acceptance with the Sol/main agent.
 
 Pi can use any model shown by `pi --list-models`. Prefer `provider/model-id`; a bare model id only works when unambiguous. Common picks in this environment:
 
@@ -22,6 +22,7 @@ Pi can use any model shown by `pi --list-models`. Prefer `provider/model-id`; a 
 | inherited parent model (default) | inherited          |
 | `openai-codex/gpt-5.6-sol`       | `high`             |
 | `openai-codex/gpt-5.6-terra`     | `high`             |
+| `openai-codex/gpt-5.6-luna`      | `high`             |
 | `opencode/claude-fable-5`        | `medium`           |
 
 **Thinking budgets:** `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. These map directly to pi thinking levels.
@@ -58,7 +59,7 @@ Requires the Codex CLI to be installed and authenticated.
 
 ## Spawn and Manage
 
-Call `subagent_spawn` with a complete `prompt`, short `name`, chosen `harness`, and optional `working_dir`, `model`, and `reasoning_effort`. At most four subagents run concurrently.
+Call `subagent_spawn` with a complete `prompt`, short `name`, and either an explicit `harness` or a profile. A profile call supplies only `profile`, `prompt`, and `name` (plus optional `working_dir`); `luna-explore` fixes Pi/Luna/high reasoning and `terra-audit` fixes Pi/Terra/high reasoning. Profile children retain the normal child tools, with only recursive orchestration and user-interaction tools excluded, and receive strong read-only system guidance. Explicit profile conflicts are rejected. Direct Pi quotas are Sol=4, Terra=8, Luna=16; Claude and Codex share an aggregate cap of 4.
 
 - `subagent_check({ id })`: inspect progress once when it is useful; never poll.
 - `subagent_list()`: inspect all runs once when their status is useful; never poll.

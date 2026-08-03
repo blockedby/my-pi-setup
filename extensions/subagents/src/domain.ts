@@ -7,8 +7,10 @@
  * normalized `SubagentEvent` union.
  */
 
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Data } from "effect";
+import type { SubagentProfile } from "./policy.ts";
 
 export const BACKEND_NAMES = ["pi", "claude", "codex"] as const;
 export type BackendName = (typeof BACKEND_NAMES)[number];
@@ -36,6 +38,8 @@ export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 export type SubagentStatus = "running" | "done" | "error";
 
 /** Parent-session context resolved by the tool layer and passed opaquely. */
+export type SubagentModelRegistry = Pick<ModelRegistry, "find" | "getAll">;
+
 export interface ParentContext {
   readonly parentCwd: string;
   readonly projectTrusted: boolean;
@@ -43,7 +47,7 @@ export interface ParentContext {
   readonly inheritedModel?: { readonly provider: string; readonly id: string };
   readonly inheritedThinkingLevel?: string;
   /** Parent model registry; required by the pi backend to resolve models. */
-  readonly modelRegistry?: ModelRegistry;
+  readonly modelRegistry?: SubagentModelRegistry;
 }
 
 export interface SpawnTask {
@@ -60,6 +64,9 @@ export interface SpawnTask {
   readonly model?: string;
   /** Shared effort scale; each backend maps it to its native equivalent. */
   readonly reasoningEffort?: ReasoningEffort;
+  readonly profile?: SubagentProfile;
+  readonly profileSystemPrompt?: string;
+  readonly resolvedPiModel?: Model<Api>;
   readonly parent: ParentContext;
 }
 

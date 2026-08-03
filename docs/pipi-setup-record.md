@@ -130,7 +130,7 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 ### 10. GPT-5.6 context-window overrides
 
 - Added Pipi-only model overrides at `/home/kcnc/.pipi/agent/models.json`.
-- Set `openai-codex/gpt-5.6-sol` to a 500,000-token context window.
+- Initially set `openai-codex/gpt-5.6-sol` to a 500,000-token context window; section 17 records the later correction to 350,000 tokens.
 - Set `openai-codex/gpt-5.6-terra` and `openai-codex/gpt-5.6-luna` to 300,000 tokens each.
 - Preserved the built-in 128,000-token maximum output for all three models.
 - Added the source-controlled record `config/pipi-model-overrides.json`; it mirrors the runtime file without credentials.
@@ -194,6 +194,99 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Verified the ownership manifest records all nine skills under `general`, records no AAD skills, and each installed skill contains `SKILL.md`. No live model or browser session was invoked.
 - A new Pipi session or `/reload` is still needed for an already-running session to discover the installed skills.
 
+### 17. Corrected Sol context window
+
+- The user reported that 500,000 tokens was too high for `openai-codex/gpt-5.6-sol` in Pipi and requested the observed 350,000-token limit instead.
+- Changed Sol from 500,000 to 350,000 tokens while leaving Terra and Luna at 300,000 tokens and preserving the built-in maximum-output metadata.
+- Updated the tracked installation record at `config/pipi-model-overrides.json`, synchronized the live Pipi file at `/home/kcnc/.pipi/agent/models.json`, and revised `docs/gpt-context-window-report.html` to show the current 350K / 300K / 300K values.
+- Verified both JSON files parse, match byte-for-byte, and compose through `pipi --list-models` as Sol 350K and Terra/Luna 300K. Verified repository TypeScript, formatting, and whitespace checks.
+- Pending: reload Pipi or reselect Sol through `/model` so the already-running root session refreshes its model metadata; future sessions will read the new value automatically.
+
+### 18. Researched Luna/Terra subagent routing
+
+- The user asked whether Pipi can delegate more routine tool calls, repository exploration, and audit work to Luna and Terra, and requested a brief options summary before implementation.
+- Read the installed Pi extension documentation, upstream subagent example, and Pipi's subagent/workflow model-selection and child-tool policy. Launched read-only Luna and Terra Codex subagents against this repository; Luna completed its audit and Terra was cancelled after its source findings were confirmed independently.
+- Confirmed the existing `subagent_spawn` tool already accepts explicit `model` selection for Pi and Codex harnesses, and workflows accept per-agent `model`, `provider`, and `effort`. Pi children keep normal tools but remain leaf workers without subagent, workflow, or ask-user tools; the shared concurrency cap is four.
+- Verified `pipi --list-models` exposes `openai-codex/gpt-5.6-luna` and `openai-codex/gpt-5.6-terra`, each with the configured 300K context window. No routing implementation or runtime configuration was changed; affected repository path is only this operation record.
+- Pending: choose between prompt-level routing guidance, fixed read-only Luna/Terra agent presets, or a deterministic routing extension with task profiles and tool restrictions before implementation.
+
+### 19. Began sequential review of Luna/Terra routing options
+
+- The user requested reviewing each proposed Luna/Terra delegation option in order, beginning with prompt-level routing guidance.
+- Assessed the prompt-only option against `extensions/subagents/src/prompt.ts`, `skills/subagents/SKILL.md`, and the existing Pi child model/tool behavior. No routing implementation or runtime configuration was changed; affected repository path is only this operation record.
+- The proposed policy uses Luna for bounded read-only exploration that benefits from multiple tool calls, Terra for deeper audits and evidence verification, and keeps Sol responsible for edits, integration, user interaction, and final acceptance checks. It avoids delegating trivial single-file lookups because subagent startup adds latency and cost.
+- Pending: the user should accept, revise, or reject prompt-level routing before the review proceeds to fixed named presets.
+
+### 20. Confirmed current subagent concurrency limits
+
+- The user rejected the proposed soft recommendation of two research agents and asked for the current hard cap, noting a desired capacity of up to 30 concurrent agents.
+- Confirmed `extensions/subagents/src/manager.ts` currently enforces `MAX_RUNNING = 4` across Pi, Claude, and Codex subagents, while retaining up to 64 tracked entries. The same four-way concurrency limit is documented in the subagent tool prompt and skill and asserted by manager tests.
+- Confirmed the workflow subsystem separately caps simultaneous workflow children at four and allows at most 32 total agent calls per workflow run.
+- No concurrency implementation or runtime configuration was changed; affected repository path is only this operation record. Pending: decide whether a future 30-agent limit should apply only to direct background subagents or also to workflow fan-out, and preferably make the limit configurable rather than replacing one hard-coded value with another.
+
+### 21. Proposed model-specific concurrency budgets
+
+- The user specified desired simultaneous limits of four Sol agents, eight Terra agents, and sixteen Luna agents.
+- Assessed the change as a model-aware quota system rather than a single replacement for `MAX_RUNNING`. The safest design canonicalizes requested/inherited model identities before reserving a slot, counts both running and in-progress spawn reservations to prevent races, and keeps explicit fallback and total limits for omitted or unrelated models.
+- No concurrency implementation or runtime configuration was changed; affected repository path is only this operation record.
+- Pending: decide whether the 4/8/16 quotas are shared globally across direct subagents and workflow children or maintained separately by each subsystem. A shared quota requires a common coordinator because the current subagent and workflow runtimes enforce concurrency independently.
+
+### 22. Reviewed quota topology for automatic model-selected delegation
+
+- The user explained that workflows are currently unused and prefers the main agent to choose delegation automatically, then asked for the technically best design based on the code topology.
+- Inspected the independent direct-subagent and workflow execution paths and ran a read-only Terra Pi subagent audit. Both analyses found that direct subagents are coordinated by `SubagentManager`, while workflows create their own child sessions through a separate `RunController` and are intentionally gated behind explicit workflow or `ultracode` requests.
+- Recommended implementing automatic routing and the 4 Sol / 8 Terra / 16 Luna quotas in direct Pi subagents first, preserving the manager's synchronous reservation behavior for spawn and restart races. Workflow should retain its current separate limit until it is actually adopted; a shared coordinator can be extracted later instead of coupling two currently independent systems prematurely.
+- No routing, quota, workflow, or runtime configuration was changed; affected repository path is only this operation record. Pending: accept or revise this architectural direction before implementation or before continuing to the fixed-preset option.
+
+### 23. Reviewed fixed Luna/Terra profiles
+
+- After retaining the direct-subagent quota design, the user asked to continue to the next option: named capability profiles for routine exploration and audit work.
+- Confirmed Pi's SDK supports an explicit active-tool allowlist together with the existing child-tool denylist. Assessed adding optional profiles to the current `subagent_spawn` path rather than restoring the previously removed `pi-subagents` named-agent extension.
+- The proposed `luna-explore` profile fixes the Pi harness, Luna model, evidence-oriented system guidance, and a strict read-only tool allowlist. The proposed `terra-audit` profile fixes the Pi harness and Terra model; strict read-only mode would omit `bash`, while allowing `bash` would make non-mutation a prompt policy rather than a technical guarantee.
+- No profile, routing, quota, or runtime configuration was changed; affected repository path is only this operation record. Pending: choose whether profiles are selected through one optional `subagent_spawn.profile` field or exposed as separate tools, then decide whether Terra audit receives `bash`.
+
+### 24. Chose profile selection with prompt-only read-only behavior
+
+- The user selected a `profile` field on the existing `subagent_spawn` tool instead of separate Luna/Terra tools.
+- The user also chose to keep each Pi child's normal tool set and enforce read-only exploration/audit behavior through profile system guidance rather than a technical tool allowlist. This preserves the ability to delegate multi-step tool chains, shell-based inspection, and routine checks to cheaper models.
+- The resulting profile design fixes harness and model selection, adds role-specific system guidance, and uses the existing child exclusions only for recursive orchestration and user interaction. Quotas remain tied to each profile's canonical model; no profile, routing, quota, or runtime configuration was changed.
+- Affected repository path is only this operation record. Pending: choose profile defaults such as reasoning effort and finalize the exact Luna/Terra role prompts before implementation.
+
+### 25. Set both profile reasoning defaults to high
+
+- The user selected `high` reasoning effort as the default for both `luna-explore` and `terra-audit`.
+- The planned profiles therefore fix Pi harness, Luna or Terra model, high effort, full normal child tools, prompt-only read-only behavior, and the existing leaf-worker exclusions. Explicit per-call effort may remain an override if retained in the final schema.
+- No profile, routing, quota, or runtime configuration was changed; affected repository path is only this operation record. Pending: review the automatic host-router option, then consolidate the accepted design before implementation.
+
+### 26. Rejected a host-side automatic router
+
+- The user chose not to implement the third option: a host-side keyword or prompt-shape router that launches Luna/Terra before the main agent decides.
+- The accepted direction keeps semantic routing with the main agent through model-facing guidance, then uses the selected `subagent_spawn.profile` to fix the Pi harness, model, high effort, and role prompt. Model-aware manager quotas provide deterministic admission without host-side task classification.
+- No profile, routing, quota, or runtime configuration was changed; affected repository path is only this operation record. Pending: consolidate the accepted schema, prompts, quota behavior, tests, and installer/runtime synchronization into an implementation plan or begin implementation after explicit approval.
+
+### 27. Chose TypeScript as the policy source of truth
+
+- The user chose TypeScript constants instead of a separately installed JSON file for Luna/Terra profiles and the 4/8/16 model quotas.
+- The planned implementation should centralize profile definitions and quota values in one typed policy module consumed by tool schema/guidance, admission logic, and tests, rather than duplicating literals across the extension.
+- No profile, routing, quota, or runtime configuration was changed; affected repository path is only this operation record. Pending: approve implementation or request the concrete patch plan first.
+
+### 28. Consolidated the Luna/Terra implementation plan
+
+- The user requested a single summary and overall implementation plan before any product-code changes.
+- Consolidated the accepted design: main-agent semantic routing; optional profiles on `subagent_spawn`; Pi/Luna and Pi/Terra profiles with high effort, full normal tools, and prompt-only read-only behavior; direct Pi model quotas of Sol 4, Terra 8, and Luna 16; a conservative aggregate limit for non-Pi backends; unchanged workflows; and no host-side keyword router.
+- Planned a typed policy module, canonical pre-admission Pi model resolution, immutable quota keys with race-safe reservation/restart behavior, profile system-prompt injection, focused manager/model/profile tests, documentation updates, complete repository checks, and evidence-driven closure review.
+- No profile, routing, quota, or runtime configuration was changed; affected repository path is only this operation record. Pending: review and approve the plan, then explicitly authorize implementation.
+
+### 29. Moved work into a feature worktree and implemented profiles
+
+- The user authorized implementation, requested moving all current changes into a worktree, and requested preparation of a final pull request.
+- Created `/home/kcnc/code/tools/pipi-alias/.worktrees/luna-terra-subagent-profiles` on `feat/luna-terra-subagent-profiles` from the current `origin/main`, carried the three existing local documentation commits and all uncommitted Pipi changes into it, verified the transferred patch byte-for-byte, and reset the primary `main` checkout to a clean `origin/main` state.
+- Added the typed policy source of truth under `extensions/subagents/src/policy.ts`, optional `luna-explore` and `terra-audit` profiles, profile conflict validation, main-agent routing guidance, profile system-prompt injection, canonical Pi model resolution, and direct quotas of Sol=4, Terra=8, and Luna=16. Claude and Codex retain one aggregate direct-session cap of 4; workflows remain unchanged.
+- Profile children retain their normal tools except the existing recursive-orchestration and ask-user exclusions. Read-only behavior is system guidance rather than a technical tool restriction, preserving multi-step tool chains for Luna and Terra.
+- Removed a temporary worktree `node_modules` symlink after confirming the existing `node_modules/` ignore rule treats a symlink as a file rather than a directory; dependencies were then installed normally inside the ignored worktree paths.
+- Local verification passed TypeScript, formatting, submodule validation, all 19 installer tests, all 22 file-search tests, and 129 deterministic non-live extension tests, including mixed 4/8/16 admission, inherited model quotas, failed-spawn reservation release, non-Pi aggregation, and immutable restart admission. Paid/live Claude and Codex backend tests were intentionally excluded.
+- The required independent initial review used the canonical vendored reviewer policy against base `e525aeb`; verdict `READY` with no findings. Pending: commit, push, PR creation, target-branch preparation, any required post-rebase verification, and final CI verification.
+
 ## Current package sources
 
 The installer keeps these package sources in Pipi settings:
@@ -243,6 +336,7 @@ Pipi now has its own three browser Chrome MCP servers. Use `browser-chrome-contr
 13. Merge pull request #3 and update the real local Pipi setup — merged as `581c344`, synchronized local `main` and the pinned submodule, re-ran checks, refreshed Pipi with `--skip-dependencies`, and verified version/package/skill isolation.
 14. Run the review agent over the updated repository — completed read-only against base `38736f9` and head `a830629`; verdict `READY`, no findings.
 15. Merge `pi-agent-setup` pull request #24, then install only its general skills into Pipi — completed with nine general skills, exact ownership tracking, no AAD skills, and no changes to regular Pi.
+16. Replace Sol's too-high 500K context override with the user-reported real 350K limit in both the tracked installation setup and live Pipi configuration — completed; Terra and Luna remain at 300K.
 
 ## Pending steps explicitly connected to user requests
 
@@ -252,6 +346,7 @@ Pipi now has its own three browser Chrome MCP servers. Use `browser-chrome-contr
 4. **Choose any additional MCP servers.** Browser MCP is configured. Use `/mcp setup` only for other servers; importing regular Pi's secret-bearing config requires a separate explicit decision.
 5. **Keep this record current.** `AGENTS.md` now requires every user-requested Pipi operation to append the request, action, affected paths or values, verification, and pending steps here without secrets.
 6. **Remove disposable acceptance files when no longer needed.** `/tmp/pipi-submodule-install-check` contains only temporary clones, fake executables, isolated homes, logs, a wheel, and a virtual environment created for this test.
+7. **Refresh the active Sol metadata.** Run `/reload` or reselect `openai-codex/gpt-5.6-sol` through `/model`; new Pipi sessions automatically read the 350K override.
 
 ## Discussed ideas that are not requested implementation
 

@@ -2,16 +2,16 @@
 
 /** Describes subagent_spawn, including harnesses and the fixed concurrency cap. */
 export const SUBAGENT_SPAWN_TOOL_DESCRIPTION =
-  "Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. You choose the harness it runs on: pi (in-process pi session, inherits this environment's tools and config), claude (Claude Code), or codex (Codex CLI). Fire-and-forget: this returns immediately with an id. When the subagent settles, its final output is automatically delivered as a follow-up message that triggers a new parent turn. Do not wait or poll for subagent completion. Children cannot orchestrate more agents/workflows or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Max 4 subagents can be running at once across all harnesses.";
+  "Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. Use profile luna-explore for broad routine independent multi-tool exploration, terra-audit for deeper audits and verification, and the Sol/main agent for edits, integration, and final acceptance. Profiles fix Pi, the exact model, high reasoning, and a read-only role prompt; omit conflicting harness/model/reasoning_effort values. Without a profile, choose an explicit harness and preserve its normal model inheritance. Fire-and-forget: this returns immediately with an id. When the subagent settles, its final output is automatically delivered as a follow-up message that triggers a new parent turn. Do not wait or poll for subagent completion. Children cannot orchestrate more agents/workflows or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Pi quotas are Sol 4, Terra 8, and Luna 16; Claude and Codex share an aggregate cap of 4.";
 
 /** Adds background subagent delegation to the parent model's available-tools prompt. */
 export const SUBAGENT_SPAWN_PROMPT_SNIPPET =
-  "Spawn a background subagent on a chosen harness (pi, Claude Code, or Codex; own context, normal tools) for a self-contained task";
+  "Spawn a background subagent on a chosen harness or Luna/Terra profile (own context, normal tools) for a self-contained task";
 
 /** Guides the parent model to delegate standalone tasks without blocking for results. */
 export const SUBAGENT_SPAWN_PROMPT_GUIDELINES = [
   "Use subagent_spawn to delegate self-contained tasks that can run in the background; give it a complete, standalone prompt.",
-  "Pick the subagent harness deliberately: pi unless you have a reason to prefer Claude Code or Codex (e.g. the user asked for one, or the task suits that harness).",
+  "Use profile luna-explore for broad/routine independent multi-tool exploration, terra-audit for deeper audits/verification, and keep edits, integration, and final acceptance with the Sol/main agent.",
   "After subagent_spawn, continue useful independent work. If none remains, end the current turn and leave the overall task pending. The subagent result will be delivered automatically and trigger a follow-up parent turn.",
   "Do not wait or poll for subagents. Do not use sleep, repeated subagent_check/subagent_list calls, or any other blocking command just to wait for completion.",
 ];
@@ -21,8 +21,10 @@ export const SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS = {
   prompt:
     "Task prompt for the subagent. Must be self-contained: include all needed context, file paths, and what to report back.",
   name: "Short human-readable name for this subagent, shown in listings and the UI",
+  profile:
+    'Optional capability profile: "luna-explore" or "terra-audit". With a profile, provide profile, prompt, and name; it fixes Pi, model, high reasoning, and read-only system guidance.',
   harness:
-    'Harness to run the subagent on: "pi" (in-process pi session; inherits this environment), "claude" (Claude Code), or "codex" (Codex CLI). Choose deliberately per task.',
+    'Harness to run the subagent on: "pi", "claude", or "codex". Required without a profile and conflicting with profiles.',
   workingDir:
     "Trusted working directory for the autonomous child (default: current working directory)",
   model:
