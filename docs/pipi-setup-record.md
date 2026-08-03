@@ -401,3 +401,19 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Local and `origin/main` now point to the merged guidance; the Pipi launcher remains `/home/kcnc/.local/bin/pipi`, settings remain `/home/kcnc/.pipi/agent/settings.json`, and package discovery still uses `/home/kcnc/code/tools/pipi-alias`, `/home/kcnc/code/tools/pi-codex`, and `npm:pi-mcp-adapter@2.15.0`.
 - **Verification:** Pull request #4 reports `MERGED`; local `main` is synchronized with `origin/main`; `pipi --version` reports `0.82.1`; `pipi list` reports all three expected package sources; source inspection confirms the automatic follow-up-turn and no-wait guidance; feature worktree and local feature branch removal were verified.
 - **Pending:** Reload this already-running Pipi session or start a new one before manually testing the updated model-facing guidance.
+
+## Operation entry: Luna/Terra profile live acceptance smoke tests
+
+- **Request:** After merging PR #5, test both new direct-subagent profiles against read-only repository inspection tasks.
+- **Action:** Started bounded non-interactive Pipi runs that called `subagent_spawn` once with `luna-explore` and once with `terra-audit`, without explicit harness, model, or reasoning-effort overrides. Temporary JSON event logs were inspected and then deleted.
+- **Affected paths or values:** `README.md` and `package.json` were inspection-only; this durable record is the only repository path changed by the smoke-test parent. The tested profiles were `luna-explore` and `terra-audit`.
+- **Verification:** Both JSON-mode runs exited 0. Their tool calls contained only the requested profile/name/prompt fields, and spawn results resolved to Pi with `openai-codex/gpt-5.6-luna` and `openai-codex/gpt-5.6-terra` respectively. Non-interactive print mode exits after the parent turn and therefore did not retain the background child long enough for automatic final-result delivery; deterministic tests cover child execution and delivery behavior.
+- **Pending:** After reloading an interactive Pipi session, optionally confirm end-to-end automatic final-result delivery for each profile in the TUI.
+
+## Operation entry: merged and verified Luna/Terra profiles
+
+- **Request:** Merge PR #5 and test the resulting Pipi setup.
+- **Action:** Squash-merged PR #5 as `7c951109f9aebac21321621d7174793871c4e4ae`, synchronized local `main`, removed the merged feature worktree and local branch, reinitialized the canonical reviewer submodule after worktree cleanup, and refreshed the isolated Pipi installation with `--skip-dependencies`.
+- **Affected paths or values:** `main` and `origin/main` point to the merged profile implementation; the remote feature branch is intentionally retained. Installed Pipi still uses `/home/kcnc/code/tools/pipi-alias`, and model metadata reports Sol 350K plus Terra/Luna 300K.
+- **Verification:** Post-merge TypeScript, formatting, submodule validation, 129 deterministic non-live extension tests, 19 installer tests, and 22 file-search tests passed. `pipi --version` reports 0.82.1, `pipi list` reports the three expected package sources, both live profile spawn checks resolved the expected models, and the primary checkout is synchronized with `origin/main`.
+- **Pending:** Reload this already-running Pipi session or start a new interactive session before TUI-level automatic result-delivery testing.
