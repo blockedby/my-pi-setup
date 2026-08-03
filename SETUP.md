@@ -1,14 +1,13 @@
 # Pipi setup
 
-Pipi is a side-by-side launcher for the existing Pi CLI. It does not replace `pi` or write to regular Pi's settings.
+Pipi is a side-by-side launcher with its own pinned Pi runtime. It does not replace `pi` or write to regular Pi's runtime, settings, or sessions.
 
 ## Requirements
 
 - Node.js and npm
-- an existing `pi` executable in `PATH`
 - `codex` in `PATH` for Codex subagents and Codex-backed tools
 - optional sibling checkout `../pi-codex` (`pi-codex-tools`)
-- npm access for the initial isolated `pi-mcp-adapter` install
+- npm access for the initial isolated Pi runtime and `pi-mcp-adapter` install
 - Google Chrome or Chromium plus `npx` for `chrome-devtools-mcp`
 
 The file-search extension uses system `fd`/`fdfind` and `rg` when available. If either is missing, it can download its supported fallback binary into `~/.pipi/agent/bin` at first Pipi startup.
@@ -23,11 +22,12 @@ npm run install:pipi
 
 The installer reproducibly installs root and extension dependencies from their lockfiles, then creates:
 
-- `~/.local/bin/pipi` — launcher for the resolved existing `pi` executable
+- `~/.local/bin/pipi` — launcher for the pinned Pipi-owned Pi runtime
+- `~/.pipi/agent/npm` — exact isolated Pi runtime and MCP adapter packages
 - `~/.pipi/agent/settings.json` — Pipi-only settings
 - `~/.pipi/sessions` — Pipi-only session storage
 
-It loads this checkout as a local Pi package, adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package, and registers pinned `pi-mcp-adapter`. The local package loads the canonical code-review skill directly from the initialized, commit-pinned `vendor/gpt5.6-reviewer` submodule. The adapter is installed under `~/.pipi/agent/npm` so an older global package cannot shadow it. The installer copies the vendored `pi-agent-setup` browser skill into Pipi-owned paths and removes the previously added `pi-subagents` extension, named browser agent, and agent-only skill dependency. It also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings, package entries, and MCP servers are preserved.
+It installs the Pi version pinned by this checkout and `pi-mcp-adapter` under `~/.pipi/agent/npm`, loads this checkout as a local Pi package, and adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package. The local package loads the canonical code-review skill directly from the initialized, commit-pinned `vendor/gpt5.6-reviewer` submodule. The installer copies the vendored `pi-agent-setup` browser skill into Pipi-owned paths and removes the previously added `pi-subagents` extension, named browser agent, and agent-only skill dependency. It also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings, package entries, and MCP servers are preserved.
 
 Add `~/.local/bin` to `PATH` if necessary, then verify the launcher:
 
@@ -35,7 +35,7 @@ Add `~/.local/bin` to `PATH` if necessary, then verify the launcher:
 pipi --version
 ```
 
-Re-running the installer is safe and idempotent. For an already prepared development checkout with the isolated MCP adapter already present, `--skip-dependencies` skips dependency installs while still refreshing the browser skill and MCP assets and removing the retired `pi-subagents` integration:
+Re-running the installer is safe and idempotent. For an already prepared development checkout where the isolated Pi runtime and MCP adapter are already present, `--skip-dependencies` preserves those packages while still refreshing the browser skill and MCP assets and removing the retired `pi-subagents` integration:
 
 ```sh
 npm run install:pipi -- --skip-dependencies
@@ -109,7 +109,7 @@ Restart Pipi or use `/reload` after installation so the browser skill and MCP co
 
 ## Isolation and authentication
 
-The launcher exports a persistent profile marker and both isolation variables before executing Pi:
+The launcher executes `~/.pipi/agent/npm/node_modules/.bin/pi` after exporting a persistent profile marker and both isolation variables:
 
 ```text
 PIPI_PROFILE=1
