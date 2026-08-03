@@ -1,6 +1,6 @@
 # Pipi: an isolated Pi setup
 
-Pipi installs the creator's Pi extensions, skills, workflows, and GitHub Dark Default theme beside an existing `pi` command. It keeps its settings and sessions under `~/.pipi` and uses the existing Pi executable rather than replacing it.
+Pipi installs the creator's Pi extensions, skills, workflows, GitHub Dark Default theme, and a pinned Pi runtime beside regular `pi`. It keeps its runtime, settings, and sessions under `~/.pipi` without replacing or modifying regular Pi.
 
 Included resources:
 

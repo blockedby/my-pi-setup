@@ -35,6 +35,8 @@ const reviewerSkillSource = join(
   "code-review",
   "SKILL.md",
 );
+const runtimePiPackage = "@earendil-works/pi-coding-agent";
+const runtimePiVersion = "0.83.0";
 const createFixture = async () => {
   const home = await mkdtemp(join(tmpdir(), "pipi-install-"));
   const fakeBin = join(home, "fake-bin");
@@ -62,6 +64,49 @@ process.stdout.write(JSON.stringify({
   const codexPath = join(fakeBin, "codex");
   writeFileSync(codexPath, "#!/bin/sh\nprintf 'codex-test\\n'\n");
   chmodSync(codexPath, 0o755);
+
+  const npmPath = join(fakeBin, "npm");
+  writeFileSync(
+    npmPath,
+    `#!/usr/bin/env node
+const { chmodSync, mkdirSync, rmSync, writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const args = process.argv.slice(2);
+if (args[0] === "install") {
+  const prefix = args[args.indexOf("--prefix") + 1];
+  const spec = args.at(-1);
+  if (args.includes("--no-save"))
+    rmSync(join(prefix, "node_modules"), { recursive: true, force: true });
+  const separator = spec.lastIndexOf("@");
+  const packageName = spec.slice(0, separator);
+  const version = spec.slice(separator + 1);
+  const manifestPath = join(prefix, "package.json");
+  const manifest = require("node:fs").existsSync(manifestPath)
+    ? JSON.parse(require("node:fs").readFileSync(manifestPath, "utf8"))
+    : { private: true, dependencies: {} };
+  manifest.dependencies[packageName] = args.includes("--save-exact")
+    ? version
+    : "^" + version;
+  mkdirSync(prefix, { recursive: true });
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+  if (spec.startsWith("@earendil-works/pi-coding-agent@")) {
+    const binDir = join(prefix, "node_modules", ".bin");
+    mkdirSync(join(prefix, "node_modules", "@earendil-works", "pi-coding-agent"), { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(prefix, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"), JSON.stringify({ version }));
+    const piPath = join(binDir, "pi");
+    writeFileSync(piPath, '#!/usr/bin/env node\\nprocess.stdout.write(JSON.stringify({ pipiProfile: process.env.PIPI_PROFILE, agentDir: process.env.PI_CODING_AGENT_DIR, args: process.argv.slice(2) }));\\n');
+    chmodSync(piPath, 0o755);
+  }
+  if (spec.startsWith("pi-mcp-adapter@")) {
+    const packageDir = join(prefix, "node_modules", "pi-mcp-adapter");
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(join(packageDir, "package.json"), JSON.stringify({ version: spec.slice(spec.lastIndexOf("@") + 1) }));
+  }
+}
+`,
+  );
+  chmodSync(npmPath, 0o755);
   writeFileSync(
     join(codexTools, "package.json"),
     JSON.stringify({ name: "pi-codex-tools" }),
@@ -235,6 +280,45 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   );
 });
 
+test("Pi 0.83 package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
+  const manifest = readJson(join(repositoryRoot, "package.json"));
+  const lockfile = readJson(join(repositoryRoot, "package-lock.json"));
+  const rootPackages = lockfile.packages;
+
+  for (const packageName of [
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-tui",
+  ]) {
+    assert.equal(manifest.dependencies[packageName], "^0.83.0");
+    assert.equal(
+      rootPackages[`node_modules/${packageName}`].version,
+      runtimePiVersion,
+    );
+  }
+  assert.equal(manifest.dependencies.typebox, "^1.3.7");
+  assert.equal(rootPackages["node_modules/typebox"].version, "1.3.7");
+
+  const codingAgent = rootPackages[`node_modules/${runtimePiPackage}`];
+  assert.deepEqual(
+    {
+      "@earendil-works/pi-agent-core":
+        codingAgent.dependencies["@earendil-works/pi-agent-core"],
+      "@earendil-works/pi-ai":
+        codingAgent.dependencies["@earendil-works/pi-ai"],
+      "@earendil-works/pi-tui":
+        codingAgent.dependencies["@earendil-works/pi-tui"],
+      typebox: codingAgent.dependencies.typebox,
+    },
+    {
+      "@earendil-works/pi-agent-core": "^0.83.0",
+      "@earendil-works/pi-ai": "^0.83.0",
+      "@earendil-works/pi-tui": "^0.83.0",
+      typebox: "1.3.7",
+    },
+  );
+});
+
 test("package loads the canonical submodule code-review skill once", () => {
   const manifest = readJson(join(repositoryRoot, "package.json"));
   const submodules = readJson(
@@ -266,7 +350,70 @@ test("package loads the canonical submodule code-review skill once", () => {
   assert.equal(reviewer.piSkillPath, "./vendor/gpt5.6-reviewer/skills");
 });
 
-test("default Pi resolution ignores npm's repository-local binary shim", async (t) => {
+test("default install uses Pipi-owned Pi runtime pinned by package.json", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const result = spawnSync(
+    process.execPath,
+    [installScript, "--codex-tools", fixture.codexTools],
+    { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const pipiNpm = join(fixture.home, ".pipi", "agent", "npm");
+  assert.equal(
+    readJson(
+      join(
+        pipiNpm,
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "package.json",
+      ),
+    ).version,
+    runtimePiVersion,
+  );
+  assert.equal(
+    readJson(join(pipiNpm, "node_modules", "pi-mcp-adapter", "package.json"))
+      .version,
+    "2.15.0",
+  );
+  assert.deepEqual(readJson(join(pipiNpm, "package.json")).dependencies, {
+    "@earendil-works/pi-coding-agent": runtimePiVersion,
+    "pi-mcp-adapter": "2.15.0",
+  });
+  const launcherPath = join(fixture.home, ".local", "bin", "pipi");
+  const launcher = readFileSync(launcherPath, "utf8");
+  assert.match(
+    launcher,
+    new RegExp(`exec '${join(pipiNpm, "node_modules", ".bin", "pi")}'`),
+  );
+  assert.equal(launcher.includes(fixture.piPath), false);
+  assert.deepEqual(
+    JSON.parse(
+      execFileSync(launcherPath, ["--version"], {
+        env: fixture.env,
+        encoding: "utf8",
+      }),
+    ),
+    {
+      pipiProfile: "1",
+      agentDir: join(fixture.home, ".pipi", "agent"),
+      args: ["--version"],
+    },
+  );
+
+  const skipped = spawnSync(
+    process.execPath,
+    [installScript, "--skip-dependencies", "--codex-tools", fixture.codexTools],
+    { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
+  );
+  assert.equal(skipped.status, 0, skipped.stderr);
+  assert.equal(readFileSync(launcherPath, "utf8"), launcher);
+});
+
+test("skipped dependency installation ignores npm's repository-local binary shim", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
 

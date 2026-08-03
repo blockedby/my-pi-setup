@@ -516,9 +516,9 @@
         <p class="eyebrow">Pipi runtime / visual architecture guide</p>
         <h1>One launch. One process. Many agents.</h1>
         <p class="lead">
-          You type <code>pipi</code>, but Pipi does not replace the Pi engine.
-          It starts Pi with an isolated profile. Pi subagents then run inside
-          that same configured process.
+          You type <code>pipi</code>, and its launcher starts the pinned,
+          Pipi-owned Pi engine with an isolated profile. Pi subagents then run
+          inside that same configured process.
         </p>
       </div>
     </header>
@@ -535,9 +535,9 @@
                 Pipi is an isolated launcher and configuration profile for Pi.
               </p>
               <p>
-                The <code>pipi</code> command first chooses Pipi-owned settings
-                and session folders. It then starts the existing Pi executable.
-                The engine is Pi; the environment and resources belong to Pipi.
+                The <code>pipi</code> command first chooses Pipi-owned settings,
+                session folders, and its pinned Pi runtime. The engine is Pi;
+                the runtime, environment, and resources belong to Pipi.
               </p>
               <p>
                 This is similar to opening the same application with a separate
@@ -554,9 +554,9 @@
           <span class="section-number" aria-hidden="true">2</span>
           <h2 id="launch-title">The launch path</h2>
           <p class="lead">
-            The executable path changes only once, at the outer edge. After
-            startup, Pipi uses Pi's in-process SDK instead of launching more
-            command-line programs.
+            The launcher selects Pipi's pinned runtime only once, at the outer
+            edge. After startup, Pipi uses Pi's in-process SDK instead of
+            launching more command-line programs.
           </p>
 
           <figure class="diagram" aria-labelledby="launch-caption">

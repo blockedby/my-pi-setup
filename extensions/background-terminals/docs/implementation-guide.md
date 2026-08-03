@@ -3,7 +3,7 @@
 > Research phase output. Updated 2026-07-24 against:
 > - `effect@4.0.0-beta.101` (verified installed in this package's `node_modules/effect`; the
 >   `unstable/process` module exists there but we deliberately do NOT use it — see §6)
-> - `@earendil-works/pi-coding-agent@^0.82.0` docs at
+> - `@earendil-works/pi-coding-agent@^0.83.0` docs at
 >   `/Users/davis/.vite-plus/js_runtime/node/24.18.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/`
 > - Reference implementations: `extensions/subagents` (Effect v4 service/manager/read-model/tools)
 >   and `extensions/workflows` (dashboard UI, status line, background completion follow-ups).

@@ -9,7 +9,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Source checkout                         | `/home/kcnc/code/tools/pipi-alias`                       |
 | Source branch                           | `main`                                                   |
 | Launcher                                | `/home/kcnc/.local/bin/pipi`                             |
-| Pi executable used                      | `/home/kcnc/.local/bin/pi`                               |
+| Pipi Pi executable                     | `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi`        |
+| Pipi runtime package                   | `@earendil-works/pi-coding-agent@0.83.0`                 |
 | Pipi settings                           | `/home/kcnc/.pipi/agent/settings.json`                   |
 | Pipi model overrides                    | `/home/kcnc/.pipi/agent/models.json`                     |
 | Tracked model-override record           | `config/pipi-model-overrides.json`                       |
@@ -23,12 +24,13 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Canonical code-review skill             | `vendor/gpt5.6-reviewer/skills/code-review`              |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
-| Pi version at initial acceptance        | `0.82.1`                                                 |
+| Current Pipi Pi version                 | `0.83.0`                                                 |
+| Original Pipi Pi version                | `0.82.1`                                                 |
 | Codex CLI version at initial acceptance | `0.145.0`                                                |
 
 ## Isolation contract
 
-- `pipi` uses the existing Pi executable; it is not a second global Pi binary.
+- `pipi` launches the exact pinned runtime at `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi` (`@earendil-works/pi-coding-agent@0.83.0`); it is not a second global installation and does not replace or launch regular `pi` by default.
 - The launcher exports `PI_CODING_AGENT_DIR=/home/kcnc/.pipi/agent`.
 - The launcher exports `PI_CODING_AGENT_SESSION_DIR=/home/kcnc/.pipi/sessions`.
 - Regular Pi settings, sessions, auth, and MCP override files remain under `/home/kcnc/.pi/agent`.
@@ -417,3 +419,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `main` and `origin/main` point to the merged profile implementation; the remote feature branch is intentionally retained. Installed Pipi still uses `/home/kcnc/code/tools/pipi-alias`, and model metadata reports Sol 350K plus Terra/Luna 300K.
 - **Verification:** Post-merge TypeScript, formatting, submodule validation, 129 deterministic non-live extension tests, 19 installer tests, and 22 file-search tests passed. `pipi --version` reports 0.82.1, `pipi list` reports the three expected package sources, both live profile spawn checks resolved the expected models, and the primary checkout is synchronized with `origin/main`.
 - **Pending:** Reload this already-running Pipi session or start a new interactive session before TUI-level automatic result-delivery testing.
+
+## Operation entry: Pi 0.83 upgrade
+
+- **Request:** Upgrade this Pipi setup from the `@earendil-works` Pi 0.82 line to the latest compatible 0.83 release while preserving isolation, Luna/Terra profiles, quotas, nonblocking result delivery, model overrides, and reviewer-submodule rules.
+- **Action:** Updated the root Pi AI, coding-agent, and TUI ranges and lockfile to `0.83.0`, aligned TypeBox to `1.3.7`, and confirmed the transitive `pi-agent-core` coupling at `0.83.0`. The installer now installs a Pipi-owned, exact `@earendil-works/pi-coding-agent@0.83.0` runtime under `~/.pipi/agent/npm`, retains it when `--skip-dependencies` is used, and persists exact Pi and MCP adapter dependencies so sequential isolated installs cannot replace the runtime. Added installer coverage for the aligned release family, the isolated runtime, and exact multi-package persistence. No Luna/Terra policy, quota, result-delivery, reviewer-submodule, or model-override value changed.
+- **Evidence and affected paths:** Upstream release evidence is [Pi v0.83.0](https://github.com/earendil-works/pi/releases/tag/v0.83.0) and its [TypeBox migration PR](https://github.com/earendil-works/pi/pull/7243). Changed `package.json`, `package-lock.json`, `scripts/install-dependencies.mjs`, `scripts/install.mjs`, `scripts/install.test.mjs`, `README.md`, `SETUP.md`, `extensions/background-terminals/docs/implementation-guide.md`, `docs/pipi-loads-pipi.html`, `docs/pipi-runtime-explained.html`, and this record. The tracked `config/pipi-model-overrides.json` was intentionally unchanged, so no runtime override synchronization was needed.
+- **Verification:** Initialized the canonical reviewer submodule and installed worktree dependencies normally. Passed TypeScript, formatting, submodule validation, 21 installer/submodule tests, 129 deterministic non-live extension tests, and 22 file-search tests; paid/live Claude and Codex backend tests were excluded. Public import checks passed for all used Pi API/TUI/AI exports, and a repository scan found no TypeBox APIs removed in 1.3. A disposable isolated installation at `/tmp/pipi-083-installer-smoke` retained exact Pi `0.83.0` and MCP adapter `2.15.0`, then `pipi --version` reported `0.83.0` and `pipi list` reported the expected setup sources. `--list-models` safely reported no authenticated models in the disposable isolated profile; the copied tracked override file remained byte-identical and no live model call was made.
+- **Pending:** Review and merge the upgrade pull request. The disposable smoke profile has no authentication by design, so authenticated interactive model selection remains a post-merge local acceptance check.

@@ -42,7 +42,7 @@ export const ensureIsolatedNpmPackage = ({
       "--prefix",
       prefix,
       "--no-package-lock",
-      "--no-save",
+      "--save-exact",
       packageSpec,
     ],
     { stdio: "inherit" },

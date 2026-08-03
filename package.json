@@ -2,11 +2,11 @@
   "name": "pipi-alias-setup",
   "private": true,
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.82.0",
-    "@earendil-works/pi-coding-agent": "^0.82.0",
-    "@earendil-works/pi-tui": "^0.82.0",
+    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@earendil-works/pi-tui": "^0.83.0",
     "acorn": "^8.17.0",
-    "typebox": "^1.3.6"
+    "typebox": "^1.3.7"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
