@@ -4,7 +4,7 @@ Pipi installs the creator's Pi extensions, skills, workflows, and GitHub Dark De
 
 Included resources:
 
-- Codex, Claude, and Pi subagents
+- Codex, Claude, and Pi subagents, including Luna exploration and Terra audit profiles
 - background terminals and workflows
 - `fd` file discovery and `rg` content search
 - summaries, Git/model status UI, ask-user, and copy-all tools
@@ -16,21 +16,23 @@ Included resources:
 
 ## Agents
 
-| Agent           | Short purpose                 |
-| --------------- | ----------------------------- |
-| Pi subagent     | General delegated Pi task     |
-| Claude subagent | General delegated Claude task |
-| Codex subagent  | General delegated Codex task  |
+| Agent/profile    | Short purpose                              |
+| ---------------- | ------------------------------------------ |
+| Pi subagent      | General delegated Pi task                  |
+| `luna-explore`   | Prompt-guided read-only exploration with Luna |
+| `terra-audit`    | Prompt-guided read-only audit with Terra    |
+| Claude subagent  | General delegated Claude task              |
+| Codex subagent   | General delegated Codex task               |
 
 ## Skills
 
-| Skill                  | Short purpose                         |
-| ---------------------- | ------------------------------------- |
-| `subagents`            | Delegate work to child models         |
-| `background-terminals` | Run and monitor background commands   |
+| Skill                  | Short purpose                              |
+| ---------------------- | ------------------------------------------ |
+| `subagents`            | Delegate work to child models              |
+| `background-terminals` | Run and monitor background commands        |
 | `code-review`          | Evidence-driven initial and closure review |
-| `browser-chrome`       | Select and control a safe Chrome mode |
-| `codex-tools`          | Search, fetch, patch, and Codex tasks |
+| `browser-chrome`       | Select and control a safe Chrome mode      |
+| `codex-tools`          | Search, fetch, patch, and Codex tasks      |
 
 The code-review policy is loaded directly from the initialized `vendor/gpt5.6-reviewer/skills` submodule, so Pipi has one canonical copy and no colliding host skill. The pinned source also includes the reviewer role, verifier prompt, schemas, examples, and optional dependency-free Python contract CLI; the Pipi installer does not fetch, advance, execute, or globally install that CLI.
 

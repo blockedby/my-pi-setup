@@ -9,10 +9,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Effect, Layer, ManagedRuntime } from "effect";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { BackendRegistry, type SubagentBackend } from "./src/backend.ts";
 import { piBackend } from "./src/backends/pi.ts";
 import { makeStubBackend } from "./src/backends/stub.ts";
 import type { BackendName, ParentContext, SpawnTask } from "./src/domain.ts";
+import { SpawnError } from "./src/domain.ts";
 import {
   SubagentManager,
   SubagentManagerLive,
@@ -43,9 +45,74 @@ const TestRegistryLive = Layer.sync(BackendRegistry, () => {
   );
 });
 
+const quotaModels = ["sol", "terra", "luna"].map(
+  (id) =>
+    ({
+      provider: "openai-codex",
+      id: `gpt-5.6-${id}`,
+      name: id,
+      api: "test",
+      baseUrl: "",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 300_000,
+      maxTokens: 128_000,
+    }) satisfies Model<Api>,
+);
+const quotaRegistry = {
+  find(provider: string, id: string) {
+    return quotaModels.find(
+      (model) => model.provider === provider && model.id === id,
+    );
+  },
+  getAll() {
+    return quotaModels;
+  },
+};
+const quotaPiBackend = makeStubBackend({
+  backend: "pi",
+  defaultModelLabel: "openai-codex/gpt-5.6-sol",
+  contextWindow: 300_000,
+  toolName: "read",
+  cadenceMs: 40,
+});
+const quotaRegistryLayer = (pi: SubagentBackend = quotaPiBackend) =>
+  Layer.sync(
+    BackendRegistry,
+    () =>
+      new Map<BackendName, SubagentBackend>([
+        ["pi", pi],
+        [
+          "claude",
+          makeStubBackend({
+            backend: "claude",
+            defaultModelLabel: "claude/sonnet",
+            contextWindow: 200_000,
+            toolName: "Bash",
+            cadenceMs: 40,
+          }),
+        ],
+        [
+          "codex",
+          makeStubBackend({
+            backend: "codex",
+            defaultModelLabel: "codex/gpt-5-codex",
+            contextWindow: 272_000,
+            toolName: "shell",
+            cadenceMs: 30,
+          }),
+        ],
+      ]),
+  );
+
 const createTestRuntime = () =>
   ManagedRuntime.make(
     SubagentManagerLive.pipe(Layer.provide(TestRegistryLive)),
+  );
+const createQuotaRuntime = (pi?: SubagentBackend) =>
+  ManagedRuntime.make(
+    SubagentManagerLive.pipe(Layer.provide(quotaRegistryLayer(pi))),
   );
 
 const parent: ParentContext = {
@@ -57,6 +124,14 @@ function task(prompt: string): SpawnTask {
   return { prompt, title: "test", cwd: process.cwd(), parent };
 }
 
+function quotaTask(prompt: string, model: string): SpawnTask {
+  return {
+    ...task(prompt),
+    model,
+    parent: { ...parent, modelRegistry: quotaRegistry },
+  };
+}
+
 async function withManager(
   run: (
     manager: SubagentManagerShape,
@@ -64,6 +139,22 @@ async function withManager(
   ) => Promise<void>,
 ) {
   const runtime = createTestRuntime();
+  try {
+    const manager = await runtime.runPromise(SubagentManager);
+    await run(manager, runtime);
+  } finally {
+    await runtime.dispose();
+  }
+}
+
+async function withQuotaManager(
+  run: (
+    manager: SubagentManagerShape,
+    runtime: ReturnType<typeof createQuotaRuntime>,
+  ) => Promise<void>,
+  pi?: SubagentBackend,
+) {
+  const runtime = createQuotaRuntime(pi);
   try {
     const manager = await runtime.runPromise(SubagentManager);
     await run(manager, runtime);
@@ -193,26 +284,151 @@ test("the global concurrency cap includes by-the-way sessions", async () => {
           origin: "btw",
         }),
       ),
-      /Max 4 subagents/,
+      /max 4 concurrent subagents/,
     );
   });
 });
 
-test("the concurrency cap rejects a fifth running subagent", async () => {
+test("Claude and Codex share one aggregate quota of four", async () => {
   await withManager(async (manager, runtime) => {
     const spawns = await runTool(
       runtime,
       Effect.forEach(
-        [1, 2, 3, 4],
-        (n) => manager.spawn("codex", task(`Task ${n}`)),
+        ["claude", "codex", "claude", "codex"] as const,
+        (backend, index) => manager.spawn(backend, task(`Task ${index + 1}`)),
         { concurrency: "unbounded" },
       ),
     );
     assert.equal(spawns.length, 4);
     await assert.rejects(
-      runTool(runtime, manager.spawn("codex", task("Task 5"))),
-      /Max 4 subagents/,
+      runTool(runtime, manager.spawn("claude", task("Task 5"))),
+      /max 4 concurrent subagents/,
     );
+  });
+});
+
+test("direct Pi quotas admit Sol 4, Terra 8, and Luna 16 independently", async () => {
+  await withQuotaManager(async (manager, runtime) => {
+    const capacities = [
+      ["openai-codex/gpt-5.6-sol", 4],
+      ["openai-codex/gpt-5.6-terra", 8],
+      ["openai-codex/gpt-5.6-luna", 16],
+    ] as const;
+    const tasks = capacities.flatMap(([model, limit]) =>
+      Array.from({ length: limit }, (_, index) =>
+        quotaTask(`${model} task ${index + 1}`, model),
+      ),
+    );
+
+    const spawns = await runTool(
+      runtime,
+      Effect.forEach(tasks, (spawnTask) => manager.spawn("pi", spawnTask), {
+        concurrency: "unbounded",
+      }),
+    );
+    assert.equal(spawns.length, 28);
+
+    for (const [model, limit] of capacities) {
+      await assert.rejects(
+        runTool(
+          runtime,
+          manager.spawn("pi", quotaTask(`${model} overflow`, model)),
+        ),
+        new RegExp(`${model}.*max ${limit} concurrent subagents`),
+      );
+    }
+  });
+});
+
+test("inherited Pi models use their canonical model quota", async () => {
+  await withQuotaManager(async (manager, runtime) => {
+    const inheritedTerra = {
+      ...task("inherited Terra"),
+      parent: {
+        ...parent,
+        inheritedModel: {
+          provider: "openai-codex",
+          id: "gpt-5.6-terra",
+        },
+        modelRegistry: quotaRegistry,
+      },
+    };
+    const spawns = await runTool(
+      runtime,
+      Effect.forEach(
+        Array.from({ length: 8 }, (_, index) => ({
+          ...inheritedTerra,
+          prompt: `inherited Terra ${index + 1}`,
+        })),
+        (spawnTask) => manager.spawn("pi", spawnTask),
+        { concurrency: "unbounded" },
+      ),
+    );
+    assert.equal(spawns.length, 8);
+    await assert.rejects(
+      runTool(runtime, manager.spawn("pi", inheritedTerra)),
+      /gpt-5\.6-terra.*max 8 concurrent subagents/,
+    );
+  });
+});
+
+test("failed Pi backend spawn releases its model reservation", async () => {
+  let failNext = true;
+  const failOncePiBackend: SubagentBackend = {
+    ...quotaPiBackend,
+    spawn: (spawnTask) => {
+      if (!failNext) return quotaPiBackend.spawn(spawnTask);
+      failNext = false;
+      return Effect.fail(
+        new SpawnError({ message: "requested test spawn failure" }),
+      );
+    },
+  };
+
+  await withQuotaManager(async (manager, runtime) => {
+    const sol = "openai-codex/gpt-5.6-sol";
+    await assert.rejects(
+      runTool(runtime, manager.spawn("pi", quotaTask("fails", sol))),
+      /requested test spawn failure/,
+    );
+    const spawns = await runTool(
+      runtime,
+      Effect.forEach(
+        Array.from({ length: 4 }, (_, index) =>
+          quotaTask(`Sol ${index + 1}`, sol),
+        ),
+        (spawnTask) => manager.spawn("pi", spawnTask),
+        { concurrency: "unbounded" },
+      ),
+    );
+    assert.equal(spawns.length, 4);
+  }, failOncePiBackend);
+});
+
+test("idle Pi restart reuses the original immutable model quota", async () => {
+  await withQuotaManager(async (manager, runtime) => {
+    const terra = "openai-codex/gpt-5.6-terra";
+    const settled = await runTool(
+      runtime,
+      manager.spawn("pi", quotaTask("early Terra", terra)),
+    );
+    await runTool(runtime, manager.waitFor([settled.id]));
+    await runTool(
+      runtime,
+      Effect.forEach(
+        Array.from({ length: 8 }, (_, index) =>
+          quotaTask(`Terra ${index + 1}`, terra),
+        ),
+        (spawnTask) => manager.spawn("pi", spawnTask),
+        { concurrency: "unbounded" },
+      ),
+    );
+
+    await assert.rejects(
+      runTool(runtime, manager.send(settled.id, "restart")),
+      /gpt-5\.6-terra.*max 8/,
+    );
+    assert.equal(manager.view.get(settled.id)?.status, "done");
   });
 });
 
@@ -247,7 +463,7 @@ test("idle restarts respect the concurrency cap", async () => {
     // Restarting the settled one would be a fifth concurrent run.
     await assert.rejects(
       runTool(runtime, manager.send(settled.id, "go again")),
-      /Max 4 subagents/,
+      /max 4/,
     );
     assert.equal(manager.view.get(settled.id)?.status, "done");
   });

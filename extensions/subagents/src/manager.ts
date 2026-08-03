@@ -36,13 +36,19 @@ import type {
   TranscriptItem,
 } from "./domain.ts";
 import {
+  createQuotaAdmission,
+  quotaKey as getQuotaKey,
+  quotaLimit,
+  resolvePiModel,
+  type QuotaKey,
+} from "./policy.ts";
+import {
   BackendUnavailableError,
   ConcurrencyLimitError,
   SendError,
   SpawnError,
 } from "./domain.ts";
 
-export const MAX_RUNNING = 4;
 export const MAX_TRACKED = 64;
 const STOP_TIMEOUT_MS = 5_000;
 const ERROR_TEXT_MAX_LENGTH = 4_096;
@@ -99,6 +105,7 @@ interface Entry {
   scope: Scope.Closeable;
   pump?: Fiber.Fiber<void>;
   liveToolMap: Map<string, LiveToolState>;
+  quotaKey: QuotaKey;
   /** Idle restart dispatched but RunStarted not folded yet; counts as running
    * so concurrent restarts cannot race past the cap. */
   restarting?: boolean;
@@ -190,7 +197,7 @@ const makeManager = Effect.gen(function* () {
   const cleanups = new Set<Fiber.Fiber<unknown>>();
   let modelCounter = 0;
   let btwCounter = 0;
-  let reserved = 0;
+  const quotaAdmission = createQuotaAdmission();
   let disposed = false;
   let onSettled:
     ((snap: SubagentSnapshot, consumed: boolean) => void) | undefined;
@@ -227,9 +234,11 @@ const makeManager = Effect.gen(function* () {
     });
   });
 
-  const runningCount = () =>
+  const runningCount = (key: QuotaKey) =>
     [...entries.values()].filter(
-      (e) => e.snapshot.status === "running" || e.restarting === true,
+      (e) =>
+        e.quotaKey === key &&
+        (e.snapshot.status === "running" || e.restarting === true),
     ).length;
 
   const addInterest = (ids: ReadonlyArray<string>) => {
@@ -421,8 +430,10 @@ const makeManager = Effect.gen(function* () {
 
   const spawn = (backendName: BackendName, task: SpawnTask) =>
     Effect.gen(function* () {
+      let admittedTask = task;
+      let admissionKey: QuotaKey = "non-pi";
       // Reserve synchronously (before the first yield inside doSpawn) so
-      // parallel tool calls cannot race past the global cap.
+      // parallel tool calls cannot race past a model quota.
       yield* Effect.suspend(
         (): Effect.Effect<void, SpawnError | ConcurrencyLimitError> => {
           if (disposed) {
@@ -430,12 +441,41 @@ const makeManager = Effect.gen(function* () {
               message: "Subagent manager is shutting down.",
             });
           }
-          if (runningCount() + reserved >= MAX_RUNNING) {
-            return new ConcurrencyLimitError({
-              message: `Max ${MAX_RUNNING} subagents can run concurrently. Wait for one to finish before spawning another.`,
+          try {
+            const resolvedPiModel =
+              backendName === "pi"
+                ? (task.resolvedPiModel ??
+                  (task.parent.modelRegistry
+                    ? resolvePiModel(
+                        task.parent.modelRegistry,
+                        task.model,
+                        task.parent.inheritedModel,
+                      )
+                    : undefined))
+                : undefined;
+            if (
+              backendName === "pi" &&
+              !task.resolvedPiModel &&
+              !task.parent.modelRegistry
+            ) {
+              throw new Error(
+                "pi backend requires the parent session's model registry.",
+              );
+            }
+            admissionKey = getQuotaKey(backendName, resolvedPiModel);
+            admittedTask = { ...task, resolvedPiModel };
+          } catch (error) {
+            return new SpawnError({
+              message: error instanceof Error ? error.message : String(error),
             });
           }
-          reserved++;
+          if (
+            !quotaAdmission.tryReserve(admissionKey, runningCount(admissionKey))
+          ) {
+            return new ConcurrencyLimitError({
+              message: `Quota for ${admissionKey} is full (max ${quotaLimit(admissionKey)} concurrent subagents).`,
+            });
+          }
           return Effect.void;
         },
       );
@@ -455,9 +495,10 @@ const makeManager = Effect.gen(function* () {
         }
 
         const scope = yield* Scope.make();
-        const session = yield* Scope.provide(backend.spawn(task), scope).pipe(
-          Effect.onError(() => Scope.close(scope, Exit.void)),
-        );
+        const session = yield* Scope.provide(
+          backend.spawn(admittedTask),
+          scope,
+        ).pipe(Effect.onError(() => Scope.close(scope, Exit.void)));
         if (disposed) {
           yield* Scope.close(scope, Exit.void);
           return yield* new SpawnError({
@@ -475,8 +516,8 @@ const makeManager = Effect.gen(function* () {
             origin,
             backend: backendName,
             title: task.title,
-            prompt: task.prompt,
-            cwd: task.cwd,
+            prompt: admittedTask.prompt,
+            cwd: admittedTask.cwd,
             status: "running",
             createdAt: Date.now(),
             meta,
@@ -490,6 +531,7 @@ const makeManager = Effect.gen(function* () {
           session,
           scope,
           liveToolMap: new Map(),
+          quotaKey: admissionKey,
         };
         entries.set(id, entry);
 
@@ -519,7 +561,7 @@ const makeManager = Effect.gen(function* () {
       return yield* doSpawn.pipe(
         Effect.ensuring(
           Effect.sync(() => {
-            reserved--;
+            quotaAdmission.release(admissionKey);
             notify();
           }),
         ),
@@ -633,9 +675,13 @@ const makeManager = Effect.gen(function* () {
       // must respect the same cap as spawn. Steering an already-running one
       // does not consume additional capacity.
       if (entry.snapshot.status !== "running") {
-        if (runningCount() + reserved >= MAX_RUNNING) {
+        if (
+          runningCount(entry.quotaKey) +
+            quotaAdmission.reserved(entry.quotaKey) >=
+          quotaLimit(entry.quotaKey)
+        ) {
           return new SendError({
-            message: `Max ${MAX_RUNNING} subagents can run concurrently; restarting "${id}" would exceed that.`,
+            message: `Quota for ${entry.quotaKey} is full (max ${quotaLimit(entry.quotaKey)}); restarting "${id}" would exceed it.`,
           });
         }
         // Occupy the slot synchronously: the RunStarted that flips status

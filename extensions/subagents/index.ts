@@ -4,7 +4,8 @@
  *
  * Tools (for the parent LLM):
  * - subagent_spawn: fire-and-forget spawn (prompt, title, agent, working_dir,
- *   model, reasoning_effort). Max 4 running at once across all backends.
+ *   model, reasoning_effort, profile). Direct Pi quotas are model-specific;
+ *   Claude and Codex share an aggregate cap of four.
  * - subagent_wait: block until the listed subagents settle, return results.
  * - subagent_cancel: stop one or more running subagents.
  * - subagent_check: peek at a subagent's status and recent activity.
@@ -75,6 +76,11 @@ import {
   type SubagentRuntime,
 } from "./src/runtime.ts";
 import { openSubagentPicker, openSubagentTakeover } from "./src/ui/takeover.ts";
+import {
+  applySubagentProfile,
+  profileNames,
+  type SubagentProfile,
+} from "./src/policy.ts";
 
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
 const WAIT_OUTPUT_MAX_BYTES = 48 * 1024;
@@ -279,9 +285,16 @@ export default function (pi: ExtensionAPI) {
       name: Type.String({
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
       }),
-      harness: StringEnum(BACKEND_NAMES, {
-        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
-      }),
+      harness: Type.Optional(
+        StringEnum(BACKEND_NAMES, {
+          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
+        }),
+      ),
+      profile: Type.Optional(
+        StringEnum(profileNames(), {
+          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.profile,
+        }),
+      ),
       working_dir: Type.Optional(
         Type.String({
           description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.workingDir,
@@ -300,7 +313,14 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const manager = await getManager();
-      const harness = params.harness;
+      const profile = params.profile as SubagentProfile | undefined;
+      const resolved = applySubagentProfile(profile, {
+        harness: params.harness,
+        model: params.model,
+        reasoningEffort: params.reasoning_effort,
+      });
+      const harness = resolved.harness;
+      if (!harness) throw new Error("harness is required without a profile.");
 
       const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
       if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
@@ -314,8 +334,10 @@ export default function (pi: ExtensionAPI) {
           prompt: params.prompt,
           title,
           cwd,
-          model: params.model,
-          reasoningEffort: params.reasoning_effort,
+          model: resolved.model,
+          reasoningEffort: resolved.reasoningEffort,
+          profile,
+          profileSystemPrompt: resolved.systemPrompt,
           parent: {
             parentCwd: ctx.cwd,
             projectTrusted: resolveChildProjectTrust({
