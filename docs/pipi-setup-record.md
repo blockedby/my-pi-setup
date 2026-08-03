@@ -261,3 +261,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Keep `.gitmodules` and `config/submodules.json` synchronized; installers must never fetch or advance the child automatically.
 - Do not restore a duplicate host `skills/code-review`; load the canonical submodule skill through `package.json`.
 - Record future completed and pending work in this file.
+
+## Operation entry: nonblocking parent turns for subagents
+
+- **Request:** Remove guidance telling the main agent to wait when a subagent result is required, strengthen automatic follow-up-turn guidance, and prepare the first-stage change as a pull request.
+- **Action:** Updated model-facing spawn descriptions, guidelines, and result text so the parent ends its current turn when no independent work remains, leaves the overall task pending, and relies on automatic result delivery to trigger a follow-up parent turn. Removed the blocking-wait recommendation from the subagents skill and added focused prompt-contract tests. Runtime delivery behavior and shell/tool enforcement were intentionally unchanged in this first stage.
+- **Affected paths:** `extensions/subagents/src/prompt.ts`, `extensions/subagents/prompt.test.ts`, `skills/subagents/SKILL.md`, and this record.
+- **Verification:** Focused prompt tests passed (2/2); `npm run check`, `npm run format:check`, and `git diff --check` passed after installing worktree dependencies. The initial type-check attempt failed because the new worktree lacked extension dependencies; rerunning after `npm run install:dependencies` passed.
+- **Pending:** Review and merge the pull request; then reload or restart Pipi before manually confirming that a main session becomes idle instead of issuing `sleep` while subagents run.
