@@ -286,7 +286,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Removed a temporary worktree `node_modules` symlink after confirming the existing `node_modules/` ignore rule treats a symlink as a file rather than a directory; dependencies were then installed normally inside the ignored worktree paths.
 - Local verification passed TypeScript, formatting, submodule validation, all 19 installer tests, all 22 file-search tests, and 129 deterministic non-live extension tests, including mixed 4/8/16 admission, inherited model quotas, failed-spawn reservation release, non-Pi aggregation, and immutable restart admission. Paid/live Claude and Codex backend tests were intentionally excluded.
 - The required independent initial review used the canonical vendored reviewer policy against base `e525aeb`; verdict `READY` with no findings.
-- Committed and pushed the feature, then opened [PR #5](https://github.com/blockedby/my-pi-setup/pull/5) against `main`. The required target-branch preparation rebased onto `origin/main` and exposed one conflict in `extensions/subagents/src/prompt.ts`; resolution preserves both upstream nonblocking automatic result delivery and the new Luna/Terra routing guidance. Pending: post-rebase verification, force-push of the reviewed branch, and final PR/CI verification.
+- Committed and pushed the feature, then opened [PR #5](https://github.com/blockedby/my-pi-setup/pull/5) against `main`. The required target-branch preparation rebased onto `origin/main` and exposed one conflict in `extensions/subagents/src/prompt.ts`; resolution preserves both upstream nonblocking automatic result delivery and the new Luna/Terra routing guidance.
+- Post-rebase verification reran the full non-live matrix successfully: TypeScript, formatting, submodule validation, 129 extension tests, 19 installer tests, 22 file-search tests, and tracked/live model override comparison. The rebased branch was force-pushed with lease. GitHub currently reports no configured checks for this branch; pending steps are PR review/merge and reloading Pipi after merge.
 
 ## Current package sources
 
@@ -392,3 +393,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths:** `extensions/subagents/src/prompt.ts`, `skills/subagents/SKILL.md`, and this record.
 - **Verification:** `npm run check`, `npm run format:check`, and `git diff --check` passed after installing worktree dependencies. The initial type-check attempt failed because the new worktree lacked extension dependencies; rerunning after `npm run install:dependencies` passed.
 - **Pending:** Review and merge the pull request; then reload or restart Pipi before manually confirming that a main session becomes idle instead of issuing `sleep` while subagents run.
+
+## Operation entry: merged nonblocking guidance and refreshed Pipi
+
+- **Request:** Merge pull request #4 and then update the local Pipi setup.
+- **Action:** Squash-merged pull request #4 into `main` as `696a97d46acec92dbe4edf584d9a8f724a62d48d`, fast-forwarded the local target checkout, removed the feature worktree and local feature branch, and reran `npm run install:pipi -- --skip-dependencies` against the isolated local setup.
+- **Affected paths or values:** Local and `origin/main` now point to the merged guidance; the Pipi launcher remains `/home/kcnc/.local/bin/pipi`, settings remain `/home/kcnc/.pipi/agent/settings.json`, and package discovery still uses `/home/kcnc/code/tools/pipi-alias`, `/home/kcnc/code/tools/pi-codex`, and `npm:pi-mcp-adapter@2.15.0`.
+- **Verification:** Pull request #4 reports `MERGED`; local `main` is synchronized with `origin/main`; `pipi --version` reports `0.82.1`; `pipi list` reports all three expected package sources; source inspection confirms the automatic follow-up-turn and no-wait guidance; feature worktree and local feature branch removal were verified.
+- **Pending:** Reload this already-running Pipi session or start a new one before manually testing the updated model-facing guidance.
