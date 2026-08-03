@@ -285,7 +285,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Profile children retain their normal tools except the existing recursive-orchestration and ask-user exclusions. Read-only behavior is system guidance rather than a technical tool restriction, preserving multi-step tool chains for Luna and Terra.
 - Removed a temporary worktree `node_modules` symlink after confirming the existing `node_modules/` ignore rule treats a symlink as a file rather than a directory; dependencies were then installed normally inside the ignored worktree paths.
 - Local verification passed TypeScript, formatting, submodule validation, all 19 installer tests, all 22 file-search tests, and 129 deterministic non-live extension tests, including mixed 4/8/16 admission, inherited model quotas, failed-spawn reservation release, non-Pi aggregation, and immutable restart admission. Paid/live Claude and Codex backend tests were intentionally excluded.
-- The required independent initial review used the canonical vendored reviewer policy against base `e525aeb`; verdict `READY` with no findings. Pending: commit, push, PR creation, target-branch preparation, any required post-rebase verification, and final CI verification.
+- The required independent initial review used the canonical vendored reviewer policy against base `e525aeb`; verdict `READY` with no findings.
+- Committed and pushed the feature, then opened [PR #5](https://github.com/blockedby/my-pi-setup/pull/5) against `main`. The required target-branch preparation rebased onto `origin/main` and exposed one conflict in `extensions/subagents/src/prompt.ts`; resolution preserves both upstream nonblocking automatic result delivery and the new Luna/Terra routing guidance. Pending: post-rebase verification, force-push of the reviewed branch, and final PR/CI verification.
 
 ## Current package sources
 
