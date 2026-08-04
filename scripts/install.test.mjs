@@ -379,9 +379,14 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
       .version,
     "2.15.0",
   );
-  assert.deepEqual(readJson(join(pipiNpm, "package.json")).dependencies, {
+  const isolatedManifest = readJson(join(pipiNpm, "package.json"));
+  assert.deepEqual(isolatedManifest.dependencies, {
     "@earendil-works/pi-coding-agent": runtimePiVersion,
     "pi-mcp-adapter": "2.15.0",
+  });
+  assert.deepEqual(isolatedManifest.allowScripts, {
+    "@google/genai@1.52.0": true,
+    "protobufjs@7.6.5": true,
   });
   const launcherPath = join(fixture.home, ".local", "bin", "pipi");
   const launcher = readFileSync(launcherPath, "utf8");
@@ -411,6 +416,65 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
   );
   assert.equal(skipped.status, 0, skipped.stderr);
   assert.equal(readFileSync(launcherPath, "utf8"), launcher);
+});
+
+test("install repairs non-exact isolated package metadata", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const pipiNpm = join(fixture.home, ".pipi", "agent", "npm");
+  const piPackageDir = join(
+    pipiNpm,
+    "node_modules",
+    "@earendil-works",
+    "pi-coding-agent",
+  );
+  const mcpPackageDir = join(pipiNpm, "node_modules", "pi-mcp-adapter");
+  const binDir = join(pipiNpm, "node_modules", ".bin");
+  mkdirSync(piPackageDir, { recursive: true });
+  mkdirSync(mcpPackageDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(
+    join(pipiNpm, "package.json"),
+    JSON.stringify({
+      private: true,
+      dependencies: {
+        "@earendil-works/pi-coding-agent": runtimePiVersion,
+        "pi-mcp-adapter": "^2.15.0",
+      },
+      allowScripts: {
+        "@google/genai": true,
+        "evil-package@1.0.0": true,
+      },
+    }),
+  );
+  writeFileSync(
+    join(piPackageDir, "package.json"),
+    JSON.stringify({ version: runtimePiVersion }),
+  );
+  writeFileSync(
+    join(mcpPackageDir, "package.json"),
+    JSON.stringify({ version: "2.15.0" }),
+  );
+  const piPath = join(binDir, "pi");
+  writeFileSync(piPath, "#!/bin/sh\nexit 0\n");
+  chmodSync(piPath, 0o755);
+
+  const result = spawnSync(
+    process.execPath,
+    [installScript, "--codex-tools", fixture.codexTools],
+    { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const isolatedManifest = readJson(join(pipiNpm, "package.json"));
+  assert.deepEqual(isolatedManifest.dependencies, {
+    "@earendil-works/pi-coding-agent": runtimePiVersion,
+    "pi-mcp-adapter": "2.15.0",
+  });
+  assert.deepEqual(isolatedManifest.allowScripts, {
+    "@google/genai@1.52.0": true,
+    "protobufjs@7.6.5": true,
+  });
 });
 
 test("skipped dependency installation ignores npm's repository-local binary shim", async (t) => {
