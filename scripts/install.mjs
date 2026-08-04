@@ -19,6 +19,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ensureIsolatedNpmPackage,
+  ensureIsolatedNpmPolicy,
   installDependencies,
 } from "./install-dependencies.mjs";
 
@@ -37,6 +38,10 @@ if (!runtimePiVersion)
     "package.json must declare @earendil-works/pi-coding-agent with an exact semver or caret range.",
   );
 const runtimePiPackage = `@earendil-works/pi-coding-agent@${runtimePiVersion}`;
+const isolatedAllowedInstallScripts = [
+  "@google/genai@1.52.0",
+  "protobufjs@7.6.5",
+];
 const managedLauncherMarker = "# Managed by pipi-alias installer.";
 const mcpAdapterVersion = "2.15.0";
 const mcpAdapterPackage = `npm:pi-mcp-adapter@${mcpAdapterVersion}`;
@@ -403,6 +408,10 @@ const install = () => {
   mkdirSync(binDir, { recursive: true });
   removePiSubagentsAssets(agentDir);
   const isolatedNpmPrefix = join(agentDir, "npm");
+  ensureIsolatedNpmPolicy({
+    prefix: isolatedNpmPrefix,
+    allowScripts: isolatedAllowedInstallScripts,
+  });
   if (!options.skipDependencies) {
     ensureIsolatedNpmPackage({
       prefix: isolatedNpmPrefix,

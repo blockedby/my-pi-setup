@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,26 +18,47 @@ const hasRuntimeDependencies = (directory) => {
   return Object.keys(manifest.dependencies ?? {}).length > 0;
 };
 
+const readManifest = (manifestPath) => {
+  try {
+    return JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+};
+
+export const ensureIsolatedNpmPolicy = ({ prefix, allowScripts }) => {
+  mkdirSync(prefix, { recursive: true, mode: 0o700 });
+  const manifestPath = join(prefix, "package.json");
+  const manifest = readManifest(manifestPath) ?? {
+    name: "pipi-isolated-runtime",
+    private: true,
+    dependencies: {},
+  };
+  manifest.private = true;
+  manifest.dependencies ??= {};
+  manifest.allowScripts = Object.fromEntries(
+    allowScripts.map((packageId) => [packageId, true]),
+  );
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+    mode: 0o600,
+  });
+};
+
 export const ensureIsolatedNpmPackage = ({
   prefix,
   packageName,
   packageSpec,
   expectedVersion,
 }) => {
-  const manifestPath = join(
-    prefix,
-    "node_modules",
-    packageName,
-    "package.json",
+  const installedManifest = readManifest(
+    join(prefix, "node_modules", packageName, "package.json"),
   );
-  if (existsSync(manifestPath)) {
-    try {
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-      if (manifest.version === expectedVersion) return;
-    } catch {
-      // Reinstall an unreadable or invalid package below.
-    }
-  }
+  const prefixManifest = readManifest(join(prefix, "package.json"));
+  if (
+    installedManifest?.version === expectedVersion &&
+    prefixManifest?.dependencies?.[packageName] === expectedVersion
+  )
+    return;
 
   mkdirSync(prefix, { recursive: true, mode: 0o700 });
   console.log(`Installing isolated Pi package ${packageSpec} in ${prefix}`);
