@@ -546,3 +546,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
 - **Verification:** The audit cross-checked session timestamps, raw native totals, compaction ordering, Pi 0.83 forwarding, and the formatter cap. A follow-up read-only Luna trace was started to attribute token growth to message/tool-result sizes without exposing their contents or calling a live model.
 - **Pending:** Receive and add the token-growth accounting trace. Decide separately on the context display/null fixes and on a less brittle Luna-first orchestration design.
+
+## Operation entry: non-blocking Luna advisory design added to issue #10
+
+- **Request:** Examine repository topology for a clearer way to steer the model toward subagents during long-file or broad-codebase investigation, without a vague hard gate or necessarily adding a new tool.
+- **Action:** Added [issue comment `#issuecomment-5194078486`](https://github.com/blockedby/my-pi-setup/issues/10#issuecomment-5194078486). The topology review found no existing automatic router, but found the existing Luna-first profile, prompt guidance, spawn/result delivery, and bounded search mechanisms. It replaces the proposed second-file hard gate with a non-blocking, deduplicated `tool_result` advisory triggered only by actual truncation/broad-result metadata.
+- **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
+- **Verification:** The read-only review covered subagent, workflow, file-search, summary, background-terminal, shared-helper, and installed Pi-extension patterns. It identified deterministic tests and corrected the generic `npm test` suggestion: root test runs may invoke live Claude/Codex tests and are not routine verification.
+- **Pending:** Receive and add the token-growth accounting trace. Decide whether to implement the evidence-triggered Luna advisory, separately from the context display/null-propagation fixes.
