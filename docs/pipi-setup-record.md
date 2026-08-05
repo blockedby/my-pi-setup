@@ -522,3 +522,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
 - **Verification:** Confirmed no duplicate open context issue before creation; GitHub returned the issue URL. The issue intentionally notes that broad wildcard tests can invoke live backend tests and should not be the default verification route.
 - **Pending:** Add the outstanding Luna context and delegation-policy reports to issue #10, then choose a bounded implementation phase.
+
+## Operation entry: Luna context trace added to issue #10
+
+- **Request:** Add the arriving agent findings to the tracked GitHub issue as they become available.
+- **Action:** Added [issue comment `#issuecomment-5189528977`](https://github.com/blockedby/my-pi-setup/issues/10#issuecomment-5189528977) reconciling both context-gauge traces. The screenshot-correlated sessions genuinely exceeded 300k and need an explicit `>100%` display; a separate Pi `null`-usage propagation path can retain stale pre-compaction tokens and needs correction/test coverage. No implementation was made.
+- **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
+- **Verification:** The comment records the exact type/event/manager boundaries, preserves the current occupancy formula, and separates screenshot-proven saturation from the independent stale-usage edge. Both source audits were read-only.
+- **Pending:** Add the outstanding Luna runtime-orchestration design report to issue #10, then choose a bounded implementation phase.
