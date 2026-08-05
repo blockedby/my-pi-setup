@@ -13,23 +13,33 @@ import {
 import { appendProfileSystemPrompt } from "./src/backends/pi.ts";
 import { SUBAGENT_SPAWN_PROMPT_GUIDELINES } from "./src/prompt.ts";
 
-test("profiles fix Pi model, high effort, and read-only guidance", () => {
+test("profiles fix Pi models, reasoning, and role guidance", () => {
   assert.deepEqual(applySubagentProfile("luna-explore", {}), {
     ...SUBAGENT_PROFILES["luna-explore"],
   });
+  assert.equal(applySubagentProfile("luna-explore", {}).reasoningEffort, "max");
+  const worker = applySubagentProfile("luna-worker", {});
+  assert.equal(worker.model, "openai-codex/gpt-5.6-luna");
+  assert.equal(worker.reasoningEffort, "max");
+  assert.match(
+    SUBAGENT_PROFILES["luna-worker"].systemPrompt,
+    /may edit workspace files/i,
+  );
   assert.equal(
     applySubagentProfile("terra-audit", {}).model,
     "openai-codex/gpt-5.6-terra",
   );
-  for (const conflicting of [
-    { harness: "pi" as const },
-    { model: "other" },
-    { reasoningEffort: "high" as const },
-  ]) {
-    assert.throws(
-      () => applySubagentProfile("luna-explore", conflicting),
-      /conflicting explicit values/,
-    );
+  for (const profile of ["luna-explore", "luna-worker"] as const) {
+    for (const conflicting of [
+      { harness: "pi" as const },
+      { model: "other" },
+      { reasoningEffort: "high" as const },
+    ]) {
+      assert.throws(
+        () => applySubagentProfile(profile, conflicting),
+        /conflicting explicit values/,
+      );
+    }
   }
   assert.deepEqual(
     applySubagentProfile(undefined, {
@@ -90,11 +100,16 @@ test("quota admission is mixed-model, race-safe, and releases failed reservation
   admission.release(luna);
 });
 
-test("main-agent guidance delegates exploration and audits through profiles", () => {
+test("main-agent guidance delegates exploration, work, and audits through profiles", () => {
   const guidance = SUBAGENT_SPAWN_PROMPT_GUIDELINES.join("\n");
   assert.match(guidance, /luna-explore.*exploration/i);
+  assert.match(guidance, /luna-worker.*implementation/i);
   assert.match(guidance, /terra-audit.*audits\/verification/i);
-  assert.match(guidance, /edits, integration, and final acceptance.*Sol/i);
+  assert.match(
+    guidance,
+    /cross-cutting integration and final acceptance.*Sol/i,
+  );
+  assert.match(guidance, /later parent turn.*automatic result follow-ups/i);
 });
 
 test("profile prompt guidance appends without replacing discovered prompts", () => {

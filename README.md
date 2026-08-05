@@ -19,7 +19,8 @@ Included resources:
 | Agent/profile    | Short purpose                              |
 | ---------------- | ------------------------------------------ |
 | Pi subagent      | General delegated Pi task                  |
-| `luna-explore`   | Prompt-guided read-only exploration with Luna |
+| `luna-explore`   | Read-only exploration with Luna at max reasoning |
+| `luna-worker`    | Scoped implementation and testing with Luna at max reasoning |
 | `terra-audit`    | Prompt-guided read-only audit with Terra    |
 | Claude subagent  | General delegated Claude task              |
 | Codex subagent   | General delegated Codex task               |

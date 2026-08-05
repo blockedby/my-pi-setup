@@ -2,7 +2,7 @@
 
 /** Describes subagent_spawn, including harnesses and the fixed concurrency cap. */
 export const SUBAGENT_SPAWN_TOOL_DESCRIPTION =
-  "Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. Use profile luna-explore for broad routine independent multi-tool exploration, terra-audit for deeper audits and verification, and the Sol/main agent for edits, integration, and final acceptance. Profiles fix Pi, the exact model, high reasoning, and a read-only role prompt; omit conflicting harness/model/reasoning_effort values. Without a profile, choose an explicit harness and preserve its normal model inheritance. Fire-and-forget: this returns immediately with an id. When the subagent settles, its final output is automatically delivered as a follow-up message that triggers a new parent turn. Do not wait or poll for subagent completion. Children cannot orchestrate more agents/workflows or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Pi quotas are Sol 4, Terra 8, and Luna 16; Claude and Codex share an aggregate cap of 4.";
+  "Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. Use profile luna-explore for broad routine independent read-only exploration, luna-worker for focused implementation, testing, and mechanical refactors, terra-audit for deeper audits and verification, and the Sol/main agent for cross-cutting integration and final acceptance. Profiles fix Pi, the exact model, and reasoning level; omit conflicting harness/model/reasoning_effort values. luna-explore and terra-audit have read-only role prompts, while luna-worker is authorized for scoped workspace changes. Without a profile, choose an explicit harness and preserve its normal model inheritance. Fire-and-forget: this returns immediately with an id. When the subagent settles, its final output is automatically delivered as a follow-up message that triggers a new parent turn. Do not wait or poll for subagent completion. Children cannot orchestrate more agents/workflows or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Pi quotas are Sol 4, Terra 8, and Luna 16; Claude and Codex share an aggregate cap of 4.";
 
 /** Adds background subagent delegation to the parent model's available-tools prompt. */
 export const SUBAGENT_SPAWN_PROMPT_SNIPPET =
@@ -11,7 +11,8 @@ export const SUBAGENT_SPAWN_PROMPT_SNIPPET =
 /** Guides the parent model to delegate standalone tasks without blocking for results. */
 export const SUBAGENT_SPAWN_PROMPT_GUIDELINES = [
   "Use subagent_spawn to delegate self-contained tasks that can run in the background; give it a complete, standalone prompt.",
-  "Use profile luna-explore for broad/routine independent multi-tool exploration, terra-audit for deeper audits/verification, and keep edits, integration, and final acceptance with the Sol/main agent.",
+  "Use profile luna-explore for broad/routine independent read-only exploration, luna-worker for focused implementation, test execution, and mechanical refactors, terra-audit for deeper audits/verification, and keep cross-cutting integration and final acceptance with the Sol/main agent.",
+  "A Terra review of Luna workers belongs in a later parent turn, after their automatic result follow-ups arrive. Ask workers to put their conclusion and recommended next step first so it survives output truncation.",
   "After subagent_spawn, continue useful independent work. If none remains, end the current turn and leave the overall task pending. The subagent result will be delivered automatically and trigger a follow-up parent turn.",
   "Do not wait or poll for subagents. Do not use sleep, repeated subagent_check/subagent_list calls, or any other blocking command just to wait for completion.",
 ];
@@ -22,7 +23,7 @@ export const SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS = {
     "Task prompt for the subagent. Must be self-contained: include all needed context, file paths, and what to report back.",
   name: "Short human-readable name for this subagent, shown in listings and the UI",
   profile:
-    'Optional capability profile: "luna-explore" or "terra-audit". With a profile, provide profile, prompt, and name; it fixes Pi, model, high reasoning, and read-only system guidance.',
+    'Optional capability profile: "luna-explore", "luna-worker", or "terra-audit". With a profile, provide profile, prompt, and name; it fixes Pi, model, and reasoning. luna-explore and terra-audit use read-only system guidance; luna-worker permits scoped workspace changes.',
   harness:
     'Harness to run the subagent on: "pi", "claude", or "codex". Required without a profile and conflicting with profiles.',
   workingDir:
