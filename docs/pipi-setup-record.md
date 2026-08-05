@@ -530,3 +530,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
 - **Verification:** The comment records the exact type/event/manager boundaries, preserves the current occupancy formula, and separates screenshot-proven saturation from the independent stale-usage edge. Both source audits were read-only.
 - **Pending:** Add the outstanding Luna runtime-orchestration design report to issue #10, then choose a bounded implementation phase.
+
+## Operation entry: Luna runtime-orchestration design added to issue #10
+
+- **Request:** Add the outstanding runtime-first Luna orchestration design report to the tracked GitHub issue.
+- **Action:** Added [issue comment `#issuecomment-5189567344`](https://github.com/blockedby/my-pi-setup/issues/10#issuecomment-5189567344). It proposes a hybrid first phase: explicit model-facing Luna-first thresholds plus a narrow deterministic `tool_call` gate that redirects broad repository exploration to an explicit `luna-explore` spawn. It deliberately avoids automatic model spawning, blocking ordinary local/integration work, workflow changes, and waiting for child completion.
+- **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
+- **Verification:** The read-only design review inspected the current subagent extension boundary and Pi 0.83 event capabilities, found that `tool_call` preflight can block high-confidence exploration calls, and returned a deterministic test plan. No live model was invoked by the reviewer.
+- **Pending:** Choose whether to implement the bounded hybrid gate. The independently identified context-gauge display/null-propagation fixes remain separately unimplemented in issue #10.
