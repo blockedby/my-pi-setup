@@ -498,3 +498,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Local and `origin/main` now contain the merged Luna-worker implementation; the primary checkout is `/home/kcnc/code/tools/pipi-alias` on `main`. The removed local worktree was `.worktrees/feat-luna-worker-profile`; the remote `feat/luna-worker-profile` branch remains. No Pipi runtime setting, model override, or authentication data changed.
 - **Verification:** GitHub reports PR #9 `MERGED` at `d346e13`; local `HEAD` and `origin/main` matched immediately after synchronization, and the primary checkout was clean. The feature branch was clean before removal; the canonical reviewer submodule pin remained `81053d6a05f2160341582d2eacf30cbc9f2c3bd5`. Existing PR verification covered TypeScript, formatting, submodule validation, 130 deterministic non-live extension tests, 22 installer/submodule tests, 22 file-search tests, and independent review `READY`.
 - **Pending:** Reload or start a new Pipi session before using the newly merged model-facing profile guidance.
+
+## Operation entry: refreshed local Pipi after Luna worker merge
+
+- **Request:** After merging PR #9 and synchronizing local `main`, confirm whether the local Pipi setup is updated.
+- **Action:** Ran `npm run install:pipi -- --skip-dependencies` from synchronized `main`. The isolated launcher and package registration remain configured to load `/home/kcnc/code/tools/pipi-alias`, which now contains the merged Luna-worker profile. No dependency, model-override, authentication, or regular-Pi setting changed.
+- **Affected paths or values:** The isolated launcher remains `/home/kcnc/.local/bin/pipi`; Pipi runtime remains `@earendil-works/pi-coding-agent@0.83.0`; package sources remain the creator checkout, sibling `pi-codex`, and `npm:pi-mcp-adapter@2.15.0`.
+- **Verification:** Installer completed successfully with `--skip-dependencies`; `pipi --version` reports `0.83.0`; `pipi list` reports the expected three package sources including `/home/kcnc/code/tools/pipi-alias`. No live model or authentication action was invoked.
+- **Pending:** Reload the currently running Pipi session or start a new one so its already-built model prompt includes `luna-worker` and the Luna `max` guidance.
