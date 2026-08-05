@@ -554,3 +554,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
 - **Verification:** The read-only review covered subagent, workflow, file-search, summary, background-terminal, shared-helper, and installed Pi-extension patterns. It identified deterministic tests and corrected the generic `npm test` suggestion: root test runs may invoke live Claude/Codex tests and are not routine verification.
 - **Pending:** Receive and add the token-growth accounting trace. Decide whether to implement the evidence-triggered Luna advisory, separately from the context display/null-propagation fixes.
+
+## Operation entry: token-growth accounting added to issue #10
+
+- **Request:** Establish the concrete cause of the high Pi/Luna context totals and add the completed forensic trace to the GitHub record.
+- **Action:** Added [issue comment `#issuecomment-5194146054`](https://github.com/blockedby/my-pi-setup/issues/10#issuecomment-5194146054). It attributes the saturation to 104–130 retained tool results per child (about 1.49–1.74 MB serialized and 333k–352k estimated content tokens), their repeated cached-prefix reuse, and Pi 0.83 compaction occurring only after an enclosing tool-use loop. It found no Pi token arithmetic double-counting and confirmed post-compaction totals reset.
+- **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
+- **Verification:** The read-only trace correlated timestamped native usage components, preceding event types/record lengths, compaction `tokensBefore` estimates, and post-compaction reset behavior. It deliberately did not reveal tool-result contents or invoke live models.
+- **Pending:** Decide whether to implement the context display/null-propagation fixes. Refine and validate an evidence-triggered Luna advisory for repeated/broad-result accumulation as well as explicit truncation before implementation.
