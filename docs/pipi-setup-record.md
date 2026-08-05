@@ -538,3 +538,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
 - **Verification:** The read-only design review inspected the current subagent extension boundary and Pi 0.83 event capabilities, found that `tool_call` preflight can block high-confidence exploration calls, and returned a deterministic test plan. No live model was invoked by the reviewer.
 - **Pending:** Choose whether to implement the bounded hybrid gate. The independently identified context-gauge display/null-propagation fixes remain separately unimplemented in issue #10.
+
+## Operation entry: verified context-gauge root cause added to issue #10
+
+- **Request:** Establish confidence in the cause of high subagent context occupancy and retain the reasoning in the GitHub issue.
+- **Action:** Added [issue comment `#issuecomment-5193981928`](https://github.com/blockedby/my-pi-setup/issues/10#issuecomment-5193981928). An independent read-only audit matched the screenshot's three Luna JSONL sessions: at the screenshot elapsed time (`3m37s`), all had raw native context totals of `304,865–320,123` against a `300,000` capacity before compaction. The existing formatter caps them to `100%`. It also preserved the separate post-compaction `null`-usage/stale-label edge as a secondary bug.
+- **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime setting, model override, package, credential, or product-code change.
+- **Verification:** The audit cross-checked session timestamps, raw native totals, compaction ordering, Pi 0.83 forwarding, and the formatter cap. A follow-up read-only Luna trace was started to attribute token growth to message/tool-result sizes without exposing their contents or calling a live model.
+- **Pending:** Receive and add the token-growth accounting trace. Decide separately on the context display/null fixes and on a less brittle Luna-first orchestration design.
