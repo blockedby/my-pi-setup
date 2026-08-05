@@ -143,6 +143,40 @@ function resolveChildProjectTrust(options: {
   }
 }
 
+export const SUBAGENT_SPAWN_PARAMETERS = Type.Object({
+  prompt: Type.String({
+    description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.prompt,
+  }),
+  name: Type.String({
+    description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
+  }),
+  harness: Type.Optional(
+    StringEnum(BACKEND_NAMES, {
+      description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
+    }),
+  ),
+  profile: Type.Optional(
+    StringEnum(profileNames(), {
+      description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.profile,
+    }),
+  ),
+  working_dir: Type.Optional(
+    Type.String({
+      description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.workingDir,
+    }),
+  ),
+  model: Type.Optional(
+    Type.String({
+      description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.model,
+    }),
+  ),
+  reasoning_effort: Type.Optional(
+    StringEnum(REASONING_EFFORTS, {
+      description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.reasoningEffort,
+    }),
+  ),
+});
+
 export default function (pi: ExtensionAPI) {
   let runtime: SubagentRuntime | undefined;
   let managerPromise: Promise<SubagentManagerShape> | undefined;
@@ -278,39 +312,7 @@ export default function (pi: ExtensionAPI) {
     description: SUBAGENT_SPAWN_TOOL_DESCRIPTION,
     promptSnippet: SUBAGENT_SPAWN_PROMPT_SNIPPET,
     promptGuidelines: SUBAGENT_SPAWN_PROMPT_GUIDELINES,
-    parameters: Type.Object({
-      prompt: Type.String({
-        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.prompt,
-      }),
-      name: Type.String({
-        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
-      }),
-      harness: Type.Optional(
-        StringEnum(BACKEND_NAMES, {
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
-        }),
-      ),
-      profile: Type.Optional(
-        StringEnum(profileNames(), {
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.profile,
-        }),
-      ),
-      working_dir: Type.Optional(
-        Type.String({
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.workingDir,
-        }),
-      ),
-      model: Type.Optional(
-        Type.String({
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.model,
-        }),
-      ),
-      reasoning_effort: Type.Optional(
-        StringEnum(REASONING_EFFORTS, {
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.reasoningEffort,
-        }),
-      ),
-    }),
+    parameters: SUBAGENT_SPAWN_PARAMETERS,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const manager = await getManager();
       const profile = params.profile as SubagentProfile | undefined;
