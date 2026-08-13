@@ -36,7 +36,7 @@ const reviewerSkillSource = join(
   "SKILL.md",
 );
 const runtimePiPackage = "@earendil-works/pi-coding-agent";
-const runtimePiVersion = "0.83.0";
+const runtimePiVersion = "0.84.1";
 const createFixture = async () => {
   const home = await mkdtemp(join(tmpdir(), "pipi-install-"));
   const fakeBin = join(home, "fake-bin");
@@ -280,7 +280,7 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   );
 });
 
-test("Pi 0.83 package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
+test("Pi 0.84 package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
   const manifest = readJson(join(repositoryRoot, "package.json"));
   const lockfile = readJson(join(repositoryRoot, "package-lock.json"));
   const rootPackages = lockfile.packages;
@@ -290,7 +290,7 @@ test("Pi 0.83 package, SDK, TUI, and TypeBox dependencies remain aligned", () =>
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-tui",
   ]) {
-    assert.equal(manifest.dependencies[packageName], "^0.83.0");
+    assert.equal(manifest.dependencies[packageName], "^0.84.1");
     assert.equal(
       rootPackages[`node_modules/${packageName}`].version,
       runtimePiVersion,
@@ -311,9 +311,9 @@ test("Pi 0.83 package, SDK, TUI, and TypeBox dependencies remain aligned", () =>
       typebox: codingAgent.dependencies.typebox,
     },
     {
-      "@earendil-works/pi-agent-core": "^0.83.0",
-      "@earendil-works/pi-ai": "^0.83.0",
-      "@earendil-works/pi-tui": "^0.83.0",
+      "@earendil-works/pi-agent-core": "^0.84.1",
+      "@earendil-works/pi-ai": "^0.84.1",
+      "@earendil-works/pi-tui": "^0.84.1",
       typebox: "1.3.7",
     },
   );

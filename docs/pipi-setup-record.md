@@ -10,7 +10,7 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Source branch                           | `main`                                                   |
 | Launcher                                | `/home/kcnc/.local/bin/pipi`                             |
 | Pipi Pi executable                     | `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi`        |
-| Pipi runtime package                   | `@earendil-works/pi-coding-agent@0.83.0`                 |
+| Pipi runtime package                   | `@earendil-works/pi-coding-agent@0.84.1`                 |
 | Pipi settings                           | `/home/kcnc/.pipi/agent/settings.json`                   |
 | Pipi model overrides                    | `/home/kcnc/.pipi/agent/models.json`                     |
 | Tracked model-override record           | `config/pipi-model-overrides.json`                       |
@@ -24,13 +24,13 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Canonical code-review skill             | `vendor/gpt5.6-reviewer/skills/code-review`              |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
-| Current Pipi Pi version                 | `0.83.0`                                                 |
+| Current Pipi Pi version                 | `0.84.1`                                                 |
 | Original Pipi Pi version                | `0.82.1`                                                 |
 | Codex CLI version at initial acceptance | `0.145.0`                                                |
 
 ## Isolation contract
 
-- `pipi` launches the exact pinned runtime at `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi` (`@earendil-works/pi-coding-agent@0.83.0`); it is not a second global installation and does not replace or launch regular `pi` by default.
+- `pipi` launches the exact pinned runtime at `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi` (`@earendil-works/pi-coding-agent@0.84.1`); it is not a second global installation and does not replace or launch regular `pi` by default.
 - The launcher exports `PI_CODING_AGENT_DIR=/home/kcnc/.pipi/agent`.
 - The launcher exports `PI_CODING_AGENT_SESSION_DIR=/home/kcnc/.pipi/sessions`.
 - Regular Pi settings, sessions, auth, and MCP override files remain under `/home/kcnc/.pi/agent`.
@@ -602,3 +602,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Main product behavior now includes `/subagents` `?%`/`100%`/`>100%` occupancy states, explicit Pi null propagation and successful-compaction refresh, plus one passive truncation-triggered Luna advisory per parent run. Runtime installation refreshed `/home/kcnc/.local/bin/pipi` and Pipi-managed settings/resources without changing model overrides, credentials, dependencies, auth sharing, workflows, or compaction policy.
 - **Verification:** On merged `main`, the combined deterministic subagents suite passed 37/37, file-search passed 22/22, installer tests passed 22/22, and TypeScript, formatting, submodule, and `git diff --check` checks passed. PR #11 canonical review was `READY` with no findings; PR #12 closure review marked `REV-001` fixed and returned `READY`. Both PRs are confirmed merged, local `HEAD` equals `origin/main`, and `pipi --version` reports `0.83.0`. No root/live Claude/Codex tests were run.
 - **Pending:** Reload or restart any Pipi session that was already running before installation. A future live truncated-result occurrence can provide an optional runtime UX observation; deterministic contracts already cover result preservation and advisory injection.
+
+## Operation entry: Pi 0.84.1 upgrade
+
+- **Request:** Upgrade the isolated Pipi runtime from Pi 0.83.0 to 0.84.1 after the runtime reported the available update.
+- **Action:** Updated the aligned root `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, and `@earendil-works/pi-tui` ranges and lockfile to 0.84.1; updated installer alignment assertions and the background-terminal implementation reference. Reviewed the 0.84.0 breaking changes and 0.84.1 release notes. This repository does not use the renamed `ModelsStreamTransforms`, removed agent-core experimental/base entrypoints, handwritten provider-refresh store API, or JSON/RPC cumulative message fields; existing extension event code uses `assistantMessageEvent` deltas. The repository-pinned isolated runtime must be upgraded through this manifest and installer rather than standalone `pi update`.
+- **Affected paths or values:** `package.json`, `package-lock.json`, `scripts/install.test.mjs`, `extensions/background-terminals/docs/implementation-guide.md`, and this record. The target isolated runtime is exact `@earendil-works/pi-coding-agent@0.84.1`; TypeBox remains `1.3.7`, MCP remains `pi-mcp-adapter@2.15.0`, and model overrides, auth, profiles, quotas, submodule pin, and regular Pi are unchanged.
+- **Verification:** Upstream evidence: [Pi 0.84.1](https://pi.dev/news/releases/0.84.1) and [Pi 0.84.0](https://pi.dev/news/releases/0.84.0). Fresh dependencies installed and TypeScript/formatting passed against 0.84.1. Deterministic checks passed: 22 installer/submodule tests, 37 subagent tests, 22 file-search tests, and 99 remaining extension tests; submodule validation and diff checks passed. A disposable isolated installation at `/tmp/pipi-0841-home` created exact Pi `0.84.1` and MCP adapter `2.15.0` declarations, left no unreviewed install scripts, and its launcher reported `0.84.1` plus the expected package sources. No live model call or auth data access was performed.
+- **Pending:** Complete canonical review, merge the upgrade PR, install the exact isolated 0.84.1 runtime in the real Pipi prefix, verify `pipi --version`, and reload/restart existing sessions.
