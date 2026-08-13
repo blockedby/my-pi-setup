@@ -7,6 +7,10 @@ description: invoke this skill when the user asks you to use subagents
 
 Each subagent is headless, has its own context window, cannot see the parent conversation, cannot ask the user, and cannot spawn subagents or workflows. Give every child a self-contained prompt with paths, constraints, and the expected report.
 
+## Truncated-result advisory
+
+When a completed tool result explicitly reports truncation metadata, the parent may receive one passive advisory per run. If it appears, consider `subagent_spawn` with `profile: "luna-explore"` and a self-contained prompt; do not wait or poll for it. The advisory never blocks the current tool, auto-spawns, sends a message, or creates another turn. Child sessions bypass it naturally because `subagent_spawn` is unavailable there.
+
 ## Pi Harness
 
 **Harness:** `pi`

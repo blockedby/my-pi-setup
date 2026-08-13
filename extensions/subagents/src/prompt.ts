@@ -11,6 +11,7 @@ export const SUBAGENT_SPAWN_PROMPT_SNIPPET =
 /** Guides the parent model to delegate standalone tasks without blocking for results. */
 export const SUBAGENT_SPAWN_PROMPT_GUIDELINES = [
   "Use subagent_spawn to delegate self-contained tasks that can run in the background; give it a complete, standalone prompt.",
+  'After a tool result explicitly reports truncation, consider delegating a self-contained follow-up with subagent_spawn using profile "luna-explore"; do not wait or poll for it.',
   "Use profile luna-explore for broad/routine independent read-only exploration, luna-worker for focused implementation, test execution, and mechanical refactors, terra-audit for deeper audits/verification, and keep cross-cutting integration and final acceptance with the Sol/main agent.",
   "A Terra review of Luna workers belongs in a later parent turn, after their automatic result follow-ups arrive. Ask workers to put their conclusion and recommended next step first so it survives output truncation.",
   "After subagent_spawn, continue useful independent work. If none remains, end the current turn and leave the overall task pending. The subagent result will be delivered automatically and trigger a follow-up parent turn.",
