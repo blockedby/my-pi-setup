@@ -8,18 +8,25 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime, Queue, Stream } from "effect";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { BackendRegistry, type SubagentBackend } from "./src/backend.ts";
 import { piBackend } from "./src/backends/pi.ts";
 import { makeStubBackend } from "./src/backends/stub.ts";
-import type { BackendName, ParentContext, SpawnTask } from "./src/domain.ts";
+import type {
+  BackendName,
+  ParentContext,
+  SpawnTask,
+  SubagentEvent,
+  SubagentSnapshot,
+} from "./src/domain.ts";
 import { SpawnError } from "./src/domain.ts";
 import {
   SubagentManager,
   SubagentManagerLive,
   type SubagentManagerShape,
 } from "./src/manager.ts";
+import { formatContextUtilization } from "./src/format.ts";
 import { runTool } from "./src/runtime.ts";
 
 const TestRegistryLive = Layer.sync(BackendRegistry, () => {
@@ -115,6 +122,54 @@ const createQuotaRuntime = (pi?: SubagentBackend) =>
     SubagentManagerLive.pipe(Layer.provide(quotaRegistryLayer(pi))),
   );
 
+function makeContextUsageBackend() {
+  let pushEvent: ((event: SubagentEvent) => Promise<unknown>) | undefined;
+  const backend: SubagentBackend = {
+    name: "claude",
+    capabilities: {
+      steering: false,
+      modelSelection: false,
+      reasoningEffort: false,
+    },
+    available: Effect.succeed(true),
+    spawn: () =>
+      Effect.gen(function* () {
+        const events = yield* Queue.unbounded<SubagentEvent>();
+        pushEvent = (event) => {
+          Queue.offerUnsafe(events, event);
+          return Promise.resolve();
+        };
+        return {
+          meta: Effect.succeed({
+            backend: "claude" as const,
+            contextWindow: 300_000,
+          }),
+          events: Stream.fromQueue(events),
+          send: (_text) => Effect.void,
+          interrupt: Effect.void,
+        };
+      }),
+  };
+  const push = async (event: SubagentEvent) => {
+    if (!pushEvent) throw new Error("context usage backend is not spawned");
+    await pushEvent(event);
+  };
+  return { backend, push };
+}
+
+const createSingleBackendRuntime = (backend: SubagentBackend) =>
+  ManagedRuntime.make(
+    SubagentManagerLive.pipe(
+      Layer.provide(
+        Layer.sync(
+          BackendRegistry,
+          () =>
+            new Map<BackendName, SubagentBackend>([[backend.name, backend]]),
+        ),
+      ),
+    ),
+  );
+
 const parent: ParentContext = {
   parentCwd: process.cwd(),
   projectTrusted: false,
@@ -191,6 +246,77 @@ test("stub subagent completes and delivers a final result", async () => {
     // The waitFor marked the settle as consumed.
     assert.deepEqual(settled, [{ id: snap.id, consumed: true }]);
   });
+});
+
+test("manager retains omitted usage and clears explicit null usage", async () => {
+  const { backend, push } = makeContextUsageBackend();
+  const runtime = createSingleBackendRuntime(backend);
+  try {
+    const manager = await runtime.runPromise(SubagentManager);
+    const snap = await runTool(
+      runtime,
+      manager.spawn("claude", task("Track context occupancy")),
+    );
+
+    const waitForNextUsage = () =>
+      new Promise<SubagentSnapshot["usage"]>((resolve) => {
+        let unsubscribe = () => {};
+        unsubscribe = manager.view.subscribeTo(snap.id, () => {
+          const current = manager.view.get(snap.id);
+          if (!current) return;
+          unsubscribe();
+          resolve({ ...current.usage });
+        });
+      });
+
+    const firstUsage = waitForNextUsage();
+    await push({
+      _tag: "UsageChanged",
+      tokens: 311_923,
+      contextWindow: 300_000,
+    });
+    assert.deepEqual(await firstUsage, {
+      tokens: 311_923,
+      contextWindow: 300_000,
+    });
+    assert.equal(
+      formatContextUtilization(manager.view.get(snap.id)?.usage ?? {}),
+      ">100%/300k",
+    );
+
+    const retainedUsage = waitForNextUsage();
+    await push({ _tag: "UsageChanged", contextWindow: 300_000 });
+    assert.deepEqual(await retainedUsage, {
+      tokens: 311_923,
+      contextWindow: 300_000,
+    });
+
+    const clearedUsage = waitForNextUsage();
+    await push({ _tag: "UsageChanged", tokens: null });
+    assert.deepEqual(await clearedUsage, {
+      tokens: null,
+      contextWindow: 300_000,
+    });
+    assert.equal(
+      formatContextUtilization(manager.view.get(snap.id)?.usage ?? {}),
+      "?%/300k",
+    );
+
+    const retainedUnknownUsage = waitForNextUsage();
+    await push({ _tag: "UsageChanged", contextWindow: 300_000 });
+    assert.deepEqual(await retainedUnknownUsage, {
+      tokens: null,
+      contextWindow: 300_000,
+    });
+
+    await push({
+      _tag: "RunSettled",
+      outcome: { _tag: "Completed", finalText: "done" },
+    });
+    await runTool(runtime, manager.waitFor([snap.id]));
+  } finally {
+    await runtime.dispose();
+  }
 });
 
 test("FAIL: prompts settle as errors; unconsumed settles are delivered", async () => {

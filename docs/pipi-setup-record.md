@@ -578,3 +578,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** GitHub issue #10 and this durable record only; no runtime behavior, model override, dependency, package, credential, or product code changed.
 - **Verification:** All four planners were read-only and used no live Claude/Codex backend tests. Terra verified the current Pi event/result contracts and removed unnecessary shared-formatter/workflow scope, compaction-start events, child markers, telemetry, arbitrary thresholds, history tracking, hard gates, and auto-spawning from v1.
 - **Pending:** Implement PR1 independently. Implement PR2 only after product approval for its passive model-visible advisory. After each substantial implementation, run focused deterministic checks and the canonical initial/closure reviewer workflow.
+
+## Operation entry: subagent context occupancy correctness implementation
+
+- **Request:** Implement both approved issue #10 changes in parallel; this branch contains the context-occupancy correctness slice.
+- **Action:** Updated `/subagents` usage normalization and display so explicit Pi unknown usage survives as `null`, omitted samples retain prior state, exact capacity remains `100%`, raw overflow renders `>100%`, and successful Pi compaction completion refreshes current usage. Added focused formatter, manager, adapter, and compaction-refresh regression coverage.
+- **Affected paths or values:** `extensions/subagents/src/{domain,format,manager}.ts`, `extensions/subagents/src/backends/pi.ts`, `extensions/subagents/{format,manager,pi-context}.test.ts`, and its deterministic package test script. No model override, dependency, credential, workflow formatter, compaction policy, or live backend changed.
+- **Verification:** The updated subagents deterministic suite passed 33/33; TypeScript, formatting, submodule, installer, file-search, and `git diff --check` checks passed. No root/live Claude/Codex tests were run.
+- **Pending:** Complete the canonical initial/closure review, open the PR to `main`, merge only after authorization, reinstall/reload Pipi after merge, and verify the runtime display.
