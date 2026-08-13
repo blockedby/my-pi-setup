@@ -183,7 +183,7 @@ export type SubagentEvent =
     }
   | {
       readonly _tag: "UsageChanged";
-      readonly tokens?: number;
+      readonly tokens?: number | null;
       readonly contextWindow?: number;
     }
   | { readonly _tag: "MetaChanged"; readonly meta: Partial<SubagentMeta> }
@@ -208,7 +208,10 @@ export interface SubagentSnapshot {
   readonly settledAt?: number;
   readonly errorText?: string;
   readonly meta: SubagentMeta;
-  readonly usage: { readonly tokens?: number; readonly contextWindow?: number };
+  readonly usage: {
+    readonly tokens?: number | null;
+    readonly contextWindow?: number;
+  };
   readonly transcript: ReadonlyArray<TranscriptItem>;
   /** Streaming assistant buffers, cleared when the finalized message lands. */
   readonly liveAssistant?: { readonly text: string; readonly thinking: string };

@@ -61,6 +61,25 @@ type ThinkingLevel = NonNullable<
   NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"]
 >;
 
+/** Preserve Pi's nullable post-compaction usage in the normalized event. */
+export function normalizePiContextUsage(
+  usage: ReturnType<AgentSession["getContextUsage"]>,
+  modelContextWindow?: number,
+) {
+  const contextWindow = modelContextWindow ?? usage?.contextWindow;
+  return {
+    ...(usage ? { tokens: usage.tokens } : {}),
+    ...(contextWindow === undefined ? {} : { contextWindow }),
+  };
+}
+
+export function refreshPiUsageAfterCompaction(
+  event: Extract<AgentSessionEvent, { type: "compaction_end" }>,
+  emitUsage: () => void,
+) {
+  if (!event.aborted && event.result !== undefined) emitUsage();
+}
+
 /**
  * Resolve the generic model hint against the parent registry (v1 semantics):
  * "provider/model-id" is exact; a bare id prefers the inherited provider,
@@ -341,11 +360,12 @@ const makePiSession = (
     };
 
     const emitUsage = () => {
-      const usage = session.getContextUsage();
       emit({
         _tag: "UsageChanged",
-        tokens: usage?.tokens ?? undefined,
-        contextWindow: activeModel()?.contextWindow ?? usage?.contextWindow,
+        ...normalizePiContextUsage(
+          session.getContextUsage(),
+          activeModel()?.contextWindow,
+        ),
       });
     };
 
@@ -463,6 +483,12 @@ const makePiSession = (
               })),
             ],
           });
+          break;
+        case "compaction_start":
+          // Keep the last known occupancy until compaction succeeds.
+          break;
+        case "compaction_end":
+          refreshPiUsageAfterCompaction(event, emitUsage);
           break;
         case "agent_settled":
           settle();
