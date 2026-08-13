@@ -26,6 +26,7 @@ test("classifies only explicit supported truncation metadata", () => {
     true,
   );
   assert.equal(isTruncatedToolResult("grep", { matchLimitReached: 100 }), true);
+  assert.equal(isTruncatedToolResult("grep", { linesTruncated: true }), true);
   assert.equal(
     isTruncatedToolResult("find", { resultLimitReached: 1000 }),
     true,

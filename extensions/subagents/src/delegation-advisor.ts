@@ -28,7 +28,8 @@ export function isTruncatedToolResult(toolName: string, details: unknown) {
   if (toolName === "grep") {
     return (
       hasTruncatedDetails(details) ||
-      hasNumericLimitFlag(details, "matchLimitReached")
+      hasNumericLimitFlag(details, "matchLimitReached") ||
+      (isRecord(details) && details.linesTruncated === true)
     );
   }
   if (toolName === "find") {
