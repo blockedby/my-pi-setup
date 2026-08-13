@@ -69,6 +69,7 @@ import {
   SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS,
   SUBAGENT_WAIT_TOOL_DESCRIPTION,
 } from "./src/prompt.ts";
+import { createDelegationAdvisor } from "./src/delegation-advisor.ts";
 import { createDeferredResultDelivery } from "./src/result-delivery.ts";
 import {
   createSubagentRuntime,
@@ -184,6 +185,7 @@ export default function (pi: ExtensionAPI) {
   let ui: ExtensionUIContext | undefined;
   let unsubStatus: (() => void) | undefined;
   const resultDelivery = createDeferredResultDelivery<SubagentSnapshot>();
+  const delegationAdvisor = createDelegationAdvisor();
 
   const getRuntime = () => (runtime ??= createSubagentRuntime());
 
@@ -287,9 +289,23 @@ export default function (pi: ExtensionAPI) {
     pi.setActiveTools(pi.getActiveTools().filter((n) => n !== "subagent_wait"));
   });
 
-  pi.on("agent_settled", flushResults);
+  pi.on("agent_settled", () => {
+    delegationAdvisor.reset();
+    flushResults();
+  });
+
+  pi.on("tool_result", (event) =>
+    delegationAdvisor.patchResult({
+      activeTools: pi.getActiveTools(),
+      toolName: event.toolName,
+      details: event.details,
+      isError: event.isError,
+      content: event.content,
+    }),
+  );
 
   pi.on("session_shutdown", async () => {
+    delegationAdvisor.reset();
     sessionContext = undefined;
     resultDelivery.clear();
     unsubStatus?.();
