@@ -257,6 +257,14 @@ const validateSubmoduleAssets = () => {
         `Submodule ${name} is not initialized: ${assetsRoot}; run git submodule update --init --recursive`,
       );
     }
+    for (const relativePath of submodule.requiredFiles) {
+      const path = join(assetsRoot, relativePath);
+      if (!existsSync(path))
+        throw new Error(
+          `Missing submodule ${name} asset: ${path}; run git submodule update --init --recursive`,
+        );
+    }
+
     const indexEntry = git(["ls-files", "--stage", "--", submodule.path]);
     const gitlink = indexEntry.match(/^160000 ([0-9a-f]{40}) 0\t/);
     if (!gitlink)
@@ -276,13 +284,6 @@ const validateSubmoduleAssets = () => {
     if (git(["status", "--porcelain=v1", "--untracked-files=all"], assetsRoot))
       throw new Error(`Submodule ${name} has direct worktree changes`);
 
-    for (const relativePath of submodule.requiredFiles) {
-      const path = join(assetsRoot, relativePath);
-      if (!existsSync(path))
-        throw new Error(
-          `Missing submodule ${name} asset: ${path}; run git submodule update --init --recursive`,
-        );
-    }
     assetRoots[name] = assetsRoot;
   }
   return assetRoots;
