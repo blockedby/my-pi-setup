@@ -32,6 +32,7 @@ for (const capability of [
 const BOOTSTRAP = String.raw`
 (function bootstrapWorkflowApi() {
   "use strict";
+  const MAX_PARALLEL_CONCURRENCY = 8;
   const callHost = globalThis.__hostBridge;
   delete globalThis.__hostBridge;
   let nextRequestId = 0;
@@ -104,11 +105,11 @@ const BOOTSTRAP = String.raw`
     if (!Array.isArray(items)) throw new Error("parallel() expects an array of zero-argument agent thunks");
     const requested = options && typeof options.concurrency === "number"
       ? Math.floor(options.concurrency)
-      : 4;
+      : MAX_PARALLEL_CONCURRENCY;
     if (!Number.isFinite(requested) || requested < 1) {
       throw new Error("parallel(): concurrency must be a positive integer");
     }
-    const concurrency = Math.min(4, requested);
+    const concurrency = Math.min(MAX_PARALLEL_CONCURRENCY, requested);
     return mapLimited(items, concurrency, (item) => {
       if (typeof item !== "function") {
         throw new Error("parallel() items must be zero-argument functions");

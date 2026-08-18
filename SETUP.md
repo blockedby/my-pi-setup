@@ -143,16 +143,29 @@ npm run uninstall:pipi -- --purge
 
 The uninstaller refuses to remove a `pipi` launcher that lacks its managed-file marker. Neither uninstall mode changes regular Pi files.
 
+## Updating the pinned Pi runtime
+
+Use the repository-level `update-pipi` skill. It runs the same three commands used for manual maintenance:
+
+```sh
+npm run check:pipi-changelog -- <version>
+npm run update:pipi -- <version>
+npm run complete:pipi-upgrade
+```
+
+The first command uses `curl` to show relevant coding-agent changelog entries before a minor or major upgrade and highlights a `Breaking Changes` section; patch upgrades skip that fetch. Inspect its output before continuing. The updater then checks that the aligned Pi AI, coding-agent, and TUI packages are published, pins lockfile resolution to the requested release while retaining caret declarations, and rolls back the manifest and lockfile if the update fails. The completion command runs deterministic source verification, installs the isolated runtime, and verifies the runtime, MCP pin, install-script policy, and model overrides.
+
 ## Development checks
 
 ```sh
+npm run check:pipi-version
 npm run check:submodules
-npm run test:installer
+npm run test:deterministic
 npm run check
 npm run format:check
 node --test vendor/pi-agent-setup/skills/browser-chrome/control-mcp/*.test.mjs
 ```
 
-Installer tests use temporary home directories and fake `pi`/`codex` executables; they never write to the real user configuration. Browser control tests do not open an authenticated profile. Run the broad `npm test` command only when live backend calls are explicitly authorized: upstream tests can detect installed Claude/Codex CLIs and invoke them.
+Installer tests use temporary home directories and fake `pi`/`codex` executables; they never write to the real user configuration. Browser control tests do not open an authenticated profile. `npm test` is deterministic and excludes live Claude/Codex backend tests; run those explicitly with `npm run test:live` only when live backend calls are authorized.
 
 See [docs/pipi-setup-record.md](docs/pipi-setup-record.md) for the complete local change record and pending steps.

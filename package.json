@@ -2,9 +2,9 @@
   "name": "pipi-alias-setup",
   "private": true,
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.84.1",
-    "@earendil-works/pi-coding-agent": "^0.84.1",
-    "@earendil-works/pi-tui": "^0.84.1",
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
     "acorn": "^8.17.0",
     "typebox": "^1.3.7"
   },
@@ -28,13 +28,23 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
+    "check:pipi-changelog": "node scripts/check-pipi-changelog.mjs",
+    "check:pipi-install": "node scripts/check-pipi-install.mjs",
+    "check:pipi-version": "node scripts/check-pipi-version.mjs",
     "check:submodules": "node scripts/check-submodules.mjs",
+    "complete:pipi-upgrade": "npm run verify:pipi-upgrade && npm run rollout:pipi-upgrade",
     "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"scripts/**/*.mjs\" \"config/*.json\" \"*.json\"",
     "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"scripts/**/*.mjs\" \"config/*.json\" \"*.json\"",
     "install:dependencies": "node scripts/install-dependencies.mjs",
     "install:pipi": "node scripts/install.mjs",
-    "test:installer": "node --test scripts/check-submodules.test.mjs scripts/install.test.mjs",
-    "test": "npm run test:installer && node --test --experimental-strip-types extensions/*/*.test.ts && npm --prefix extensions/file-search test",
-    "uninstall:pipi": "node scripts/uninstall.mjs"
+    "rollout:pipi-upgrade": "npm run install:pipi && npm run check:pipi-install",
+    "test": "npm run test:deterministic",
+    "test:deterministic": "npm run test:installer && npm run test:extensions && npm --prefix extensions/file-search test",
+    "test:extensions": "node scripts/run-deterministic-tests.mjs",
+    "test:installer": "node --test scripts/check-submodules.test.mjs scripts/install.test.mjs scripts/pipi-version.test.mjs",
+    "test:live": "npm --prefix extensions/subagents run test:live",
+    "uninstall:pipi": "node scripts/uninstall.mjs",
+    "update:pipi": "node scripts/update-pipi-version.mjs",
+    "verify:pipi-upgrade": "npm run install:dependencies && npm run check:pipi-version && npm run check:submodules && npm run test:deterministic && npm run check && npm run format:check && git diff --check"
   }
 }

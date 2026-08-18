@@ -35,7 +35,7 @@ Default routine, independent work to Luna before using Sol directly:
   - mechanical refactors
   - comparing candidate solutions
 
-It is safe to run up to four genuinely independent Luna workers in parallel. Their results arrive as automatic follow-ups in a later parent turn. Then launch `terra-audit` with the workers' conclusion-first reports to verify or compare them. Keep cross-cutting integration and final acceptance with the Sol/main agent.
+It is safe to run up to eight genuinely independent Luna workers in parallel. Their results arrive as automatic follow-ups in a later parent turn. Then launch `terra-audit` with the workers' conclusion-first reports to verify or compare them. Keep cross-cutting integration and final acceptance with the Sol/main agent.
 
 Pi can use any model shown by `pi --list-models`. Prefer `provider/model-id`; a bare model id only works when unambiguous. Common picks in this environment:
 

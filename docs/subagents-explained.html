@@ -603,8 +603,9 @@
               </div>
             </div>
             <figcaption id="graph-caption">
-              Main Pipi can run up to four workers at the same time. Every
-              worker is a leaf: there is no worker-to-worker branch.
+              Main Pipi normally delegates up to eight independent Luna
+              workers at the same time. Every worker is a leaf: there is no
+              worker-to-worker branch.
             </figcaption>
           </figure>
 
@@ -768,8 +769,9 @@
                   through one coordinator.
                 </li>
                 <li>
-                  <strong>Unclear cost:</strong> the system keeps a fixed limit
-                  of four active workers.
+                  <strong>Unclear cost:</strong> workflow fanout is limited to
+                  eight active workers, while direct limits depend on the
+                  selected model.
                 </li>
               </ol>
               <p>

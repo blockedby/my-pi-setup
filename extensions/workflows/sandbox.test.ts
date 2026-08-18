@@ -45,6 +45,32 @@ test("sandbox exposes only workflow capabilities and validates results", async (
   assert.deepEqual(phases, ["Gather"]);
 });
 
+test("sandbox parallel caps fanout at eight", async () => {
+  let active = 0;
+  let peak = 0;
+  const result = await run(
+    `
+      const tasks = Array.from(
+        { length: 12 },
+        (_, index) => () => agent("task-" + index),
+      );
+      return (await parallel(tasks, { concurrency: 99 })).length;
+    `,
+    {
+      onAgent: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active--;
+        return { ok: true, output: "done" };
+      },
+    },
+  );
+
+  assert.equal(result, 12);
+  assert.equal(peak, 8);
+});
+
 test("sandbox result serialization handles cycles and bigint", async () => {
   const result = await run(`
     const value = { count: 7n };

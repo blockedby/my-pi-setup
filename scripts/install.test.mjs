@@ -36,7 +36,13 @@ const reviewerSkillSource = join(
   "SKILL.md",
 );
 const runtimePiPackage = "@earendil-works/pi-coding-agent";
-const runtimePiVersion = "0.84.1";
+const rootManifest = JSON.parse(
+  readFileSync(join(repositoryRoot, "package.json"), "utf8"),
+);
+const runtimePiSpec = rootManifest.dependencies[runtimePiPackage];
+const runtimePiVersion = runtimePiSpec.match(/^\^(\d+\.\d+\.\d+)$/)?.[1];
+if (!runtimePiVersion)
+  throw new Error(`Unexpected Pi runtime dependency range: ${runtimePiSpec}`);
 const createFixture = async () => {
   const home = await mkdtemp(join(tmpdir(), "pipi-install-"));
   const fakeBin = join(home, "fake-bin");
@@ -280,7 +286,7 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   );
 });
 
-test("Pi 0.84 package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
+test("Pi package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
   const manifest = readJson(join(repositoryRoot, "package.json"));
   const lockfile = readJson(join(repositoryRoot, "package-lock.json"));
   const rootPackages = lockfile.packages;
@@ -290,7 +296,7 @@ test("Pi 0.84 package, SDK, TUI, and TypeBox dependencies remain aligned", () =>
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-tui",
   ]) {
-    assert.equal(manifest.dependencies[packageName], "^0.84.1");
+    assert.equal(manifest.dependencies[packageName], `^${runtimePiVersion}`);
     assert.equal(
       rootPackages[`node_modules/${packageName}`].version,
       runtimePiVersion,
@@ -311,9 +317,9 @@ test("Pi 0.84 package, SDK, TUI, and TypeBox dependencies remain aligned", () =>
       typebox: codingAgent.dependencies.typebox,
     },
     {
-      "@earendil-works/pi-agent-core": "^0.84.1",
-      "@earendil-works/pi-ai": "^0.84.1",
-      "@earendil-works/pi-tui": "^0.84.1",
+      "@earendil-works/pi-agent-core": `^${runtimePiVersion}`,
+      "@earendil-works/pi-ai": `^${runtimePiVersion}`,
+      "@earendil-works/pi-tui": `^${runtimePiVersion}`,
       typebox: "1.3.7",
     },
   );
