@@ -10,7 +10,7 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Source branch                           | `main`                                                   |
 | Launcher                                | `/home/kcnc/.local/bin/pipi`                             |
 | Pipi Pi executable                     | `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi`        |
-| Pipi runtime package                   | `@earendil-works/pi-coding-agent@0.84.1`                 |
+| Pipi runtime package                   | `@earendil-works/pi-coding-agent@0.84.2`                 |
 | Pipi settings                           | `/home/kcnc/.pipi/agent/settings.json`                   |
 | Pipi model overrides                    | `/home/kcnc/.pipi/agent/models.json`                     |
 | Tracked model-override record           | `config/pipi-model-overrides.json`                       |
@@ -24,13 +24,13 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Canonical code-review skill             | `vendor/gpt5.6-reviewer/skills/code-review`              |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
-| Current Pipi Pi version                 | `0.84.1`                                                 |
+| Current Pipi Pi version                 | `0.84.2`                                                 |
 | Original Pipi Pi version                | `0.82.1`                                                 |
 | Codex CLI version at initial acceptance | `0.145.0`                                                |
 
 ## Isolation contract
 
-- `pipi` launches the exact pinned runtime at `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi` (`@earendil-works/pi-coding-agent@0.84.1`); it is not a second global installation and does not replace or launch regular `pi` by default.
+- `pipi` launches the exact pinned runtime at `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi` (`@earendil-works/pi-coding-agent@0.84.2`); it is not a second global installation and does not replace or launch regular `pi` by default.
 - The launcher exports `PI_CODING_AGENT_DIR=/home/kcnc/.pipi/agent`.
 - The launcher exports `PI_CODING_AGENT_SESSION_DIR=/home/kcnc/.pipi/sessions`.
 - Regular Pi settings, sessions, auth, and MCP override files remain under `/home/kcnc/.pi/agent`.
@@ -626,3 +626,39 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Temporary smoke files and disposable child session evidence only; this operation record is the only repository change. No product code, model override, setting, credential, auth file, package, profile, quota, or persistent test fixture changed.
 - **Verification:** The first result contained the advisory and accepted `sa-1` as Pi `openai-codex/gpt-5.6-luna`. In the full-cycle RPC smoke, `sa-1` completed read-only, automatically delivered `Conclusion: LINE-0001 marker-1; LINE-2501 marker-2`, and triggered a second parent turn that repeated the correct conclusion. No polling/wait tool was used. Focused deterministic advisory/profile/schema tests also passed 11/11.
 - **Pending:** None. Existing Pipi sessions created before the runtime/extension rollout still require reload or restart.
+
+## Operation entry: eight-way delegation and workflow concurrency
+
+- **Request:** Explain why Pipi tends to delegate to four subagents, then raise both the automatic direct-Luna delegation recommendation and workflow parallelism to eight.
+- **Action:** Identified the soft four-worker recommendation in `skills/subagents/SKILL.md` separately from the direct model quotas and the workflow hard cap. Changed the recommendation to eight independent Luna workers; raised both the workflow host controller and sandbox `parallel()` default/maximum from four to eight; aligned the workflow tool description and explanatory HTML; and added deterministic host-controller and sandbox fanout coverage. Direct quotas remain Sol=4, Terra=8, Luna=16, with the non-Pi aggregate unchanged at four.
+- **Affected paths or values:** `skills/subagents/SKILL.md`, `extensions/workflows/controller.ts`, `extensions/workflows/sandbox-child.cjs`, `extensions/workflows/prompt.ts`, `extensions/workflows/controller.test.ts`, `extensions/workflows/sandbox.test.ts`, `docs/subagents-explained.html`, and this record. Workflow total calls per run remain capped at 32; model context-window overrides, credentials, submodule pin, and installed dependencies were not changed.
+- **Verification:** Focused workflow tests passed 24/24. The full repository run passed 22 installer/submodule tests, 148 extension tests, and 22 file-search tests; TypeScript, formatting, submodule validation, and `git diff --check` passed. The full extension command also exercised and passed the configured live Claude/Codex backend tests. A canonical read-only initial review was launched against the working-tree diff.
+- **Review:** Canonical initial review returned `NOT_READY` with `REV-001` (one remaining explanatory statement still claimed a fixed four-worker limit) and `REV-002` (the host fanout test derived its expected peak from the production constant instead of independently requiring eight). Remediation now states that workflow fanout is eight while direct limits are model-specific, and asserts both the exported host cap and observed peak against literal eight.
+- **Closure:** Focused remediation checks passed: workflow tests 24/24, TypeScript, changed-file formatting, obsolete-text search, and `git diff --check`. Canonical closure review marked `REV-001` and `REV-002` fixed and returned `READY` with no findings. A later repository-wide formatting check was blocked only by unrelated concurrently created untracked `scripts/pipi-version.mjs`; this operation did not inspect beyond formatting output, edit, or remove that file, and the earlier full formatting check plus all changed-file checks passed.
+- **Pending:** Reload or restart Pipi so the current process loads the new skill and workflow extension code.
+
+## Operation entry: Pi 0.84.2 upgrade automation and rollout
+
+- **Request:** Update Pipi to 0.84.2, create a repository-level skill for future upgrades, and add repeatable scripts that simplify the process.
+- **Action:** Updated the aligned `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, and `@earendil-works/pi-tui` ranges and lockfile to 0.84.2. Added a deliberately short repository-level `.agents/skills/update-pipi` skill that runs three commands: conditional changelog review, dependency update, and complete verification/rollout. The changelog script uses `curl` only for forward minor or major upgrades, prints all release sections through the target, and highlights `Breaking Changes`; patch upgrades skip the fetch. Added registry-preflight/explicit lockfile-pin/rollback, source-verification, installed-runtime verification, focused version/changelog tests, and a deterministic test runner that excludes explicitly live Claude/Codex backend tests. Installer alignment tests now derive the pinned version from `package.json`, reducing manual edits on later upgrades. Reviewed the Pi 0.84.2 release notes and coding-agent changelog; its additions and fixes do not require changes to the repository's existing extension imports or event contracts.
+- **Affected paths or values:** `.agents/skills/update-pipi/SKILL.md`, `scripts/{check-pipi-changelog,update-pipi-version,check-pipi-version,check-pipi-install,pipi-version,run-deterministic-tests}.mjs`, `tests/scripts/pipi-version.test.mjs`, `tests/scripts/install.test.mjs`, `package.json`, `package-lock.json`, `SETUP.md`, `extensions/background-terminals/docs/implementation-guide.md`, and this record. The target isolated runtime is exact Pi 0.84.2; MCP remains 2.15.0. Model overrides, auth isolation, profiles, quotas, and the reviewer submodule pin are unchanged. Unrelated concurrent eight-way workflow/delegation changes already present in the working tree were preserved.
+- **Release evidence:** [Pi 0.84.2 release notes](https://pi.dev/news/releases/0.84.2) and npm metadata confirmed all three aligned packages at 0.84.2 with Node `>=22.19.0`; the current environment uses Node 24.19.0.
+- **Verification:** The three-command maintenance path was exercised against 0.84.2: conditional changelog check, explicit update, complete deterministic verification, rollout, and installed-state verification. The final full run passed 28 installer/version/changelog/submodule tests, 144 deterministic extension tests, and 22 file-search tests while explicitly excluding live Claude/Codex backend files. TypeScript, Pi-version alignment, installed-state validation, submodule validation, repository formatting, and `git diff --check` passed. The real isolated installation completed: `pipi --version` and the installed coding-agent package report 0.84.2; `pipi list` reports the expected checkout, `pi-codex`, and MCP sources; the isolated manifest pins exact Pi 0.84.2 and MCP 2.15.0 with only the two reviewed lifecycle-script approvals; npm reports no unreviewed scripts; the runtime model override remains byte-identical to the tracked copy; and regular `pi` remains 0.82.1. No live model/backend test or authentication-data access was performed by the implementation checks.
+- **Review:** The first canonical review attempt hit provider overload. The retry returned `NOT_READY` with `REV-001`: an unqualified npm lockfile regeneration could select a later compatible patch and then fail exact-target validation. Remediation now passes all three explicit target package specs while preserving caret declarations and retains a deterministic regression test that models a newer compatible patch. Canonical closure marked `REV-001` fixed and returned `READY` with no findings.
+- **Pending:** Reload or restart sessions created before the upgrade so they use Pi 0.84.2; future upgrades in this repository can invoke `/skill:update-pipi`.
+
+## Operation entry: pushed Pi 0.84.2 and workflow fanout changes
+
+- **Request:** Commit and push the completed local changes.
+- **Action:** Moved the cleanly reviewed working-tree changes from the primary `main` checkout into `.worktrees/pipi-0842-upgrade-and-workflow-fanout` on `feat/pipi-0842-upgrade-and-workflow-fanout`, committed them as `209f27b` (`feat: automate Pipi upgrades and increase workflow fanout`), pushed the branch to `origin`, and opened [PR #14](https://github.com/blockedby/my-pi-setup/pull/14) against `blockedby/my-pi-setup` `main`. The target-branch preparation helper reported the branch up to date with `origin/main`, no conflict, no content change, and no regression rerun requirement.
+- **Affected paths or values:** The pushed branch contains the reviewed Pi 0.84.2 runtime/upgrade automation and the independently reviewed eight-way workflow fanout changes. The primary `main` checkout is clean and remains at `dccc487`; the real isolated Pipi runtime remains 0.84.2. The verified transfer stash was dropped after the feature worktree and remote branch matched.
+- **Verification:** In the feature worktree, 28 installer/version/changelog/submodule tests, 144 deterministic extension tests, and 22 file-search tests passed. Pi version/install checks, TypeScript, formatting, submodule validation, and `git diff --check` passed. Both canonical review tracks ended `READY` with no open findings.
+- **Pending:** PR #14 is open, clean, and has no configured status checks. Review and merge remain separate user decisions.
+
+## Operation entry: separated script tests
+
+- **Request:** Move all script tests into a separate folder.
+- **Action:** Moved the submodule-checker, installer, and Pipi-version test files from `scripts/` to `tests/scripts/`; updated their repository-root resolution and production-script imports; changed `test:installer` to discover `tests/scripts/*.test.mjs`; and added the new test directory to formatting commands.
+- **Affected paths or values:** `tests/scripts/check-submodules.test.mjs`, `tests/scripts/install.test.mjs`, `tests/scripts/pipi-version.test.mjs`, `package.json`, current path references in this record, and the removed former test paths under `scripts/`. Production scripts and runtime behavior are unchanged.
+- **Verification:** The moved script suite passed 28/28 both directly and through the full deterministic command; 144 extension tests and 22 file-search tests also passed. TypeScript, Pi-version alignment, formatting including `tests/**/*.mjs`, submodule validation, `git diff --check`, and an explicit check that no `*.test.mjs` files remain directly under `scripts/` passed.
+- **Pending:** PR #14 remains open for review and merge after this test-layout follow-up.

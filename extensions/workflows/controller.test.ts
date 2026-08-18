@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MAX_AGENT_CALLS, RunController } from "./controller.ts";
+import {
+  MAX_AGENT_CALLS,
+  MAX_WORKFLOW_CONCURRENCY,
+  RunController,
+} from "./controller.ts";
 
 const delay = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
 test("RunController reserves calls synchronously and caps global fanout", async () => {
-  const controller = new RunController(undefined, 4);
+  const controller = new RunController(undefined, 99);
   let active = 0;
   let peak = 0;
-  const tasks = Array.from({ length: 12 }, (_, index) =>
+  const taskCount = 12;
+  const tasks = Array.from({ length: taskCount }, (_, index) =>
     controller.schedule(async () => {
       active++;
       peak = Math.max(peak, active);
@@ -20,9 +25,10 @@ test("RunController reserves calls synchronously and caps global fanout", async 
   );
   assert.deepEqual(
     await Promise.all(tasks),
-    Array.from({ length: 12 }, (_, i) => i),
+    Array.from({ length: taskCount }, (_, i) => i),
   );
-  assert.equal(peak, 4);
+  assert.equal(MAX_WORKFLOW_CONCURRENCY, 8);
+  assert.equal(peak, 8);
   assert.equal(await controller.settle(), true);
 });
 
