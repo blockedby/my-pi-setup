@@ -22,7 +22,7 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Browser Chrome skill                    | `/home/kcnc/.pipi/agent/skills/browser-chrome`           |
 | Evidence-driven reviewer submodule      | `vendor/gpt5.6-reviewer` at `81053d6`                    |
 | Canonical code-review skill             | `vendor/gpt5.6-reviewer/skills/code-review`              |
-| Backlog planning submodule              | `vendor/plan-gh-backlog` at `2913620`                    |
+| Backlog planning submodule              | `vendor/plan-gh-backlog` at `bbdf312`                    |
 | Canonical plan-gh-backlog skill         | `vendor/plan-gh-backlog`                                 |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
@@ -691,3 +691,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `.gitmodules`, `vendor/plan-gh-backlog`, `config/submodules.json`, `package.json`, `scripts/install.mjs`, `tests/scripts/install.test.mjs`, `AGENTS.md`, `README.md`, `SETUP.md`, and this record. The backlog source is read-only and pinned to `2913620`; runtime version, MCP version, model overrides, credentials, auth isolation, profiles, and quotas are unchanged.
 - **Verification:** Submodule validation accepted both exact clean gitlinks. The final deterministic suite passed 29 script/installer tests, 144 extension tests, and 22 file-search tests; TypeScript, formatting, and `git diff --check` passed. The pinned child passed 13 Python unit tests; Pi's skill loader discovered exactly one `plan-gh-backlog` skill; and the bundled CLI validated and planned its complete example. Canonical closure review marked `REV-001` and `REV-002` fixed and returned `READY` with no new findings. Target preparation reported an up-to-date, conflict-free branch with no rerun required. Pipi package resolution confirmed the worktree contributes exactly the one intended skill and no extension, prompt, theme, or other skill; `pipi list` shows the filtered package, `pipi --version` remains `0.84.2`, and the bundled CLI reports `plan-gh-backlog 1.0.0`.
 - **Pending:** Reload or restart the active Pipi session to discover the newly installed skill. PR #16 is open to `main`; merge remains a separate decision. After merge, rerun the primary-checkout installer and remove the temporary filtered worktree package entry before worktree cleanup.
+
+## Operation entry: plan-gh-backlog latest-source update
+
+- **Request:** Fetch the latest `plan-gh-backlog` version and update the skill installed in Pipi.
+- **Action:** Synchronized merged PR #16 into the primary `main` checkout, refreshed Pipi from that canonical package, removed the retired filtered package entry and old feature worktree, then created `.worktrees/update-plan-gh-backlog` on `chore/update-plan-gh-backlog`. Fetched `origin/main` inside the read-only child and advanced the parent gitlink from `29136202437149b477e5d21317d82219fcc011bb` to latest commit `bbdf31286597daa440ab70efe207378d4bbc74d2`, which adds sanitized apply-progress and retry logging plus network-timeout retries.
+- **Affected paths or values:** `vendor/plan-gh-backlog` and this record. The child still reports CLI version `1.0.0`; only its reviewed source pin changes. Pipi runtime, MCP version, model overrides, credentials, auth isolation, profiles, and quotas are unchanged.
+- **Verification:** The latest child passed all 15 standard-library Python tests and its bundled CLI validated and planned the complete example. Parent checks passed for both exact clean gitlinks, all 29 installer/script tests, TypeScript, formatting, and `git diff --check`.
+- **Pending:** Complete canonical review, install the new pin through the filtered update worktree, open a PR to `main`, and reload or restart the active Pipi session. Merge remains a separate decision.
