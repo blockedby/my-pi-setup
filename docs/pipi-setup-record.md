@@ -22,6 +22,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Browser Chrome skill                    | `/home/kcnc/.pipi/agent/skills/browser-chrome`           |
 | Evidence-driven reviewer submodule      | `vendor/gpt5.6-reviewer` at `81053d6`                    |
 | Canonical code-review skill             | `vendor/gpt5.6-reviewer/skills/code-review`              |
+| Backlog planning submodule              | `vendor/plan-gh-backlog` at `2913620`                    |
+| Canonical plan-gh-backlog skill         | `vendor/plan-gh-backlog`                                 |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
 | Current Pipi Pi version                 | `0.84.2`                                                 |
@@ -37,8 +39,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Pipi auth is separate by default. No auth secret bytes were copied.
 - Pipi's MCP adapter is isolated under `~/.pipi/agent/npm`.
 - The browser skill and MCP commands are Pipi-owned copies under `~/.pipi/agent`.
-- The canonical code-review skill is loaded directly from the initialized, commit-pinned reviewer submodule; no duplicate host copy is loaded.
-- The installer never fetches or advances the submodule, and its optional Python CLI is not installed or executed by Pipi setup.
+- The canonical code-review and plan-gh-backlog skills are loaded directly from initialized, commit-pinned submodules; no duplicate host copies are loaded.
+- The installer never fetches or advances either submodule, and no optional Python CLI is globally installed by Pipi setup.
 - The optional `pi-subagents` named-agent extension is not installed.
 - Regular Pi's `mcp.json` was not copied or linked because it contains environment fields that may hold secrets.
 - The removed web-search provider is not installed, configured, or required.
