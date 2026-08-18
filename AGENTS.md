@@ -4,9 +4,9 @@
 - after every user-requested Pipi operation, append a durable entry to `docs/pipi-setup-record.md`; record the request, action, affected paths or values, verification performed, and any pending step
 - keep Pipi's GPT context-window overrides recorded in `config/pipi-model-overrides.json`; when those values change, sync the runtime copy at `~/.pipi/agent/models.json` and update `docs/pipi-setup-record.md`
 - never put secrets in the operation log or repository; do not commit authentication data or copy anything from `~/.pipi/agent/auth.json`
-- treat `vendor/gpt5.6-reviewer` as a read-only Git submodule sourced from `https://github.com/blockedby/gpt5.6-reviewer.git`; do not edit files inside it directly
-- initialize it with `git submodule update --init --recursive`; the parent gitlink is the authoritative pin and installers must never fetch or advance it automatically
-- update it only by fetching/checking out a reviewed upstream commit inside the submodule and committing the changed parent gitlink; keep `.gitmodules` and `config/submodules.json` synchronized
-- keep the canonical `code-review` skill loaded from `./vendor/gpt5.6-reviewer/skills`; do not restore a duplicate `skills/code-review` host copy
+- treat `vendor/gpt5.6-reviewer` and `vendor/plan-gh-backlog` as read-only Git submodules sourced from their URLs in `config/submodules.json`; do not edit files inside them directly
+- initialize submodules with `git submodule update --init --recursive`; parent gitlinks are the authoritative pins and installers must never fetch or advance them automatically
+- update a submodule only by fetching/checking out a reviewed upstream commit inside it and committing the changed parent gitlink; keep `.gitmodules` and `config/submodules.json` synchronized
+- keep the canonical `code-review` skill loaded from `./vendor/gpt5.6-reviewer/skills` and `plan-gh-backlog` from `./vendor/plan-gh-backlog`; do not restore duplicate host copies under `skills/`
 - after substantial implementation, use `vendor/gpt5.6-reviewer/agents/code-reviewer.md`, load `vendor/gpt5.6-reviewer/skills/code-review/SKILL.md`, and follow the initial/closure routing in `vendor/gpt5.6-reviewer/AGENTS.md`
 - after submodule or skill integration changes, run `npm run check:submodules`, installer tests, type checks, and formatting checks

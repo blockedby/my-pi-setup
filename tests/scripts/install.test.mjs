@@ -38,6 +38,8 @@ const reviewerSkillSource = join(
   "code-review",
   "SKILL.md",
 );
+const backlogSubmodule = join(repositoryRoot, "vendor", "plan-gh-backlog");
+const backlogSkillSource = join(backlogSubmodule, "SKILL.md");
 const runtimePiPackage = "@earendil-works/pi-coding-agent";
 const rootManifest = JSON.parse(
   readFileSync(join(repositoryRoot, "package.json"), "utf8"),
@@ -205,6 +207,10 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     first.stdout,
     new RegExp(`Evidence-driven code-review skill: ${reviewerSubmodule}`),
   );
+  assert.match(
+    first.stdout,
+    new RegExp(`Plan GitHub backlog skill: ${backlogSubmodule}`),
+  );
 
   const launcherPath = join(fixture.home, ".local", "bin", "pipi");
   const settingsPath = join(fixture.home, ".pipi", "agent", "settings.json");
@@ -328,12 +334,13 @@ test("Pi package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
   );
 });
 
-test("package loads the canonical submodule code-review skill once", () => {
+test("package loads each canonical submodule skill once", () => {
   const manifest = readJson(join(repositoryRoot, "package.json"));
   const submodules = readJson(
     join(repositoryRoot, "config", "submodules.json"),
   );
   const reviewer = submodules.submodules["gpt5.6-reviewer"];
+  const backlog = submodules.submodules["plan-gh-backlog"];
 
   assert.equal(existsSync(reviewerSkillSource), true);
   assert.match(
@@ -357,6 +364,25 @@ test("package loads the canonical submodule code-review skill once", () => {
   );
   assert.equal(reviewer.branch, "main");
   assert.equal(reviewer.piSkillPath, "./vendor/gpt5.6-reviewer/skills");
+
+  assert.equal(existsSync(backlogSkillSource), true);
+  assert.match(
+    readFileSync(backlogSkillSource, "utf8"),
+    /^---\nname: plan-gh-backlog\n/,
+  );
+  assert.equal(
+    existsSync(join(repositoryRoot, "skills", "plan-gh-backlog")),
+    false,
+  );
+  assert.equal(
+    manifest.pi.skills.filter((path) => path === "./vendor/plan-gh-backlog")
+      .length,
+    1,
+  );
+  assert.equal(backlog.path, "vendor/plan-gh-backlog");
+  assert.equal(backlog.url, "https://github.com/blockedby/plan-gh-backlog.git");
+  assert.equal(backlog.branch, "main");
+  assert.equal(backlog.piSkillPath, "./vendor/plan-gh-backlog");
 });
 
 test("default install uses Pipi-owned Pi runtime pinned by package.json", async (t) => {
@@ -577,7 +603,7 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   }
 });
 
-test("install rejects an uninitialized reviewer submodule before writing Pipi state", async (t) => {
+test("install rejects uninitialized submodules before writing Pipi state", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
 
@@ -601,13 +627,13 @@ test("install rejects an uninitialized reviewer submodule before writing Pipi st
   );
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Reviewer submodule is not initialized/);
+  assert.match(result.stderr, /Submodule gpt5\.6-reviewer is not initialized/);
   assert.match(result.stderr, /git submodule update --init --recursive/);
   assert.equal(existsSync(join(fixture.home, ".pipi")), false);
   assert.equal(existsSync(join(fixture.home, ".local", "bin", "pipi")), false);
 });
 
-test("install rejects every configured missing reviewer asset before writing Pipi state", async (t) => {
+test("install rejects every configured missing submodule asset before writing Pipi state", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
 
@@ -617,13 +643,18 @@ test("install rejects every configured missing reviewer asset before writing Pip
     ["clone", "-q", "--no-hardlinks", repositoryRoot, cloneRoot],
     { encoding: "utf8" },
   );
-  execFileSync("git", [
-    "-C",
-    cloneRoot,
-    "config",
-    "submodule.vendor/gpt5.6-reviewer.url",
-    reviewerSubmodule,
-  ]);
+  for (const [name, source] of [
+    ["vendor/gpt5.6-reviewer", reviewerSubmodule],
+    ["vendor/plan-gh-backlog", backlogSubmodule],
+  ]) {
+    execFileSync("git", [
+      "-C",
+      cloneRoot,
+      "config",
+      `submodule.${name}.url`,
+      source,
+    ]);
+  }
   execFileSync("git", [
     "-C",
     cloneRoot,
@@ -635,13 +666,97 @@ test("install rejects every configured missing reviewer asset before writing Pip
     "--recursive",
   ]);
   const submodules = readJson(join(cloneRoot, "config", "submodules.json"));
-  const reviewer = submodules.submodules["gpt5.6-reviewer"];
-  for (const relativePath of reviewer.requiredFiles) {
-    const assetPath = join(cloneRoot, reviewer.path, relativePath);
-    const original = readFileSync(assetPath);
-    await rm(assetPath);
+  for (const submodule of Object.values(submodules.submodules)) {
+    execFileSync("git", [
+      "-C",
+      join(cloneRoot, submodule.path),
+      "remote",
+      "set-url",
+      "origin",
+      submodule.url,
+    ]);
+  }
+  for (const [name, submodule] of Object.entries(submodules.submodules)) {
+    for (const relativePath of submodule.requiredFiles) {
+      const assetPath = join(cloneRoot, submodule.path, relativePath);
+      const original = readFileSync(assetPath);
+      await rm(assetPath);
 
-    const result = spawnSync(
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(cloneRoot, "scripts", "install.mjs"),
+          "--skip-dependencies",
+          "--pi",
+          fixture.piPath,
+          "--codex-tools",
+          fixture.codexTools,
+        ],
+        { cwd: cloneRoot, env: fixture.env, encoding: "utf8" },
+      );
+
+      assert.notEqual(result.status, 0, `${name}: ${relativePath}`);
+      assert.match(
+        result.stderr,
+        new RegExp(`Missing submodule ${name.replace(".", "\\.")} asset:`),
+      );
+      assert.equal(result.stderr.includes(relativePath), true, relativePath);
+      assert.equal(existsSync(join(fixture.home, ".pipi")), false);
+      assert.equal(
+        existsSync(join(fixture.home, ".local", "bin", "pipi")),
+        false,
+      );
+      writeFileSync(assetPath, original);
+    }
+  }
+});
+
+test("install rejects backlog submodule pin, origin, and cleanliness drift before writing Pipi state", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const cloneRoot = join(fixture.home, "pipi-alias-submodule-drift");
+  execFileSync(
+    "git",
+    ["clone", "-q", "--no-hardlinks", repositoryRoot, cloneRoot],
+    { encoding: "utf8" },
+  );
+  for (const [name, source] of [
+    ["vendor/gpt5.6-reviewer", reviewerSubmodule],
+    ["vendor/plan-gh-backlog", backlogSubmodule],
+  ]) {
+    execFileSync("git", [
+      "-C",
+      cloneRoot,
+      "config",
+      `submodule.${name}.url`,
+      source,
+    ]);
+  }
+  execFileSync("git", [
+    "-C",
+    cloneRoot,
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "update",
+    "--init",
+    "--recursive",
+  ]);
+  const submodules = readJson(join(cloneRoot, "config", "submodules.json"));
+  for (const submodule of Object.values(submodules.submodules)) {
+    execFileSync("git", [
+      "-C",
+      join(cloneRoot, submodule.path),
+      "remote",
+      "set-url",
+      "origin",
+      submodule.url,
+    ]);
+  }
+  const backlogRoot = join(cloneRoot, "vendor", "plan-gh-backlog");
+  const runCloneInstaller = () =>
+    spawnSync(
       process.execPath,
       [
         join(cloneRoot, "scripts", "install.mjs"),
@@ -653,17 +768,63 @@ test("install rejects every configured missing reviewer asset before writing Pip
       ],
       { cwd: cloneRoot, env: fixture.env, encoding: "utf8" },
     );
-
-    assert.notEqual(result.status, 0, relativePath);
-    assert.match(result.stderr, /Missing reviewer submodule asset:/);
-    assert.equal(result.stderr.includes(relativePath), true, relativePath);
+  const assertRejectedWithoutState = (result, pattern) => {
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, pattern);
     assert.equal(existsSync(join(fixture.home, ".pipi")), false);
     assert.equal(
       existsSync(join(fixture.home, ".local", "bin", "pipi")),
       false,
     );
-    writeFileSync(assetPath, original);
-  }
+  };
+
+  const skillPath = join(backlogRoot, "SKILL.md");
+  writeFileSync(skillPath, `${readFileSync(skillPath, "utf8")}\ndrift\n`);
+  assertRejectedWithoutState(
+    runCloneInstaller(),
+    /Submodule plan-gh-backlog has direct worktree changes/,
+  );
+  execFileSync("git", ["-C", backlogRoot, "restore", "."]);
+
+  execFileSync("git", [
+    "-C",
+    backlogRoot,
+    "remote",
+    "set-url",
+    "origin",
+    "https://example.invalid/plan-gh-backlog.git",
+  ]);
+  assertRejectedWithoutState(
+    runCloneInstaller(),
+    /Submodule plan-gh-backlog origin URL does not match configured URL/,
+  );
+  execFileSync("git", [
+    "-C",
+    backlogRoot,
+    "remote",
+    "set-url",
+    "origin",
+    submodules.submodules["plan-gh-backlog"].url,
+  ]);
+
+  execFileSync("git", ["-C", backlogRoot, "config", "user.name", "Pipi Test"]);
+  execFileSync("git", [
+    "-C",
+    backlogRoot,
+    "config",
+    "user.email",
+    "pipi-test@example.invalid",
+  ]);
+  writeFileSync(
+    join(backlogRoot, "README.md"),
+    `${readFileSync(join(backlogRoot, "README.md"), "utf8")}\nnext\n`,
+  );
+  execFileSync("git", ["-C", backlogRoot, "add", "README.md"]);
+  execFileSync("git", ["-C", backlogRoot, "commit", "-qm", "test drift"]);
+  assertRejectedWithoutState(
+    runCloneInstaller(),
+    /Submodule plan-gh-backlog worktree is at .* expected/,
+  );
 });
 
 test("install refuses a missing Pi executable before writing files", async (t) => {

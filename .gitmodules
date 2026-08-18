@@ -2,3 +2,7 @@
 	path = vendor/gpt5.6-reviewer
 	url = https://github.com/blockedby/gpt5.6-reviewer.git
 	branch = main
+[submodule "vendor/plan-gh-backlog"]
+	path = vendor/plan-gh-backlog
+	url = https://github.com/blockedby/plan-gh-backlog.git
+	branch = main

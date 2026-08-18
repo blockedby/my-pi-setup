@@ -20,7 +20,8 @@
     ],
     "skills": [
       "./skills",
-      "./vendor/gpt5.6-reviewer/skills"
+      "./vendor/gpt5.6-reviewer/skills",
+      "./vendor/plan-gh-backlog"
     ],
     "themes": [
       "./themes"

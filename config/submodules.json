@@ -17,6 +17,22 @@
       ],
       "piSkillPath": "./vendor/gpt5.6-reviewer/skills",
       "replacesHostPaths": ["skills/code-review"]
+    },
+    "plan-gh-backlog": {
+      "path": "vendor/plan-gh-backlog",
+      "gitmodulesName": "vendor/plan-gh-backlog",
+      "url": "https://github.com/blockedby/plan-gh-backlog.git",
+      "branch": "main",
+      "requiredFiles": [
+        "SKILL.md",
+        "scripts/plan-gh-backlog",
+        "references/schema.md",
+        "references/migration.md",
+        "references/publishing.md",
+        "examples/backlog.md"
+      ],
+      "piSkillPath": "./vendor/plan-gh-backlog",
+      "replacesHostPaths": ["skills/plan-gh-backlog"]
     }
   }
 }

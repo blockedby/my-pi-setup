@@ -27,7 +27,7 @@ The installer reproducibly installs root and extension dependencies from their l
 - `~/.pipi/agent/settings.json` — Pipi-only settings
 - `~/.pipi/sessions` — Pipi-only session storage
 
-It installs the Pi version pinned by this checkout and `pi-mcp-adapter` under `~/.pipi/agent/npm`, loads this checkout as a local Pi package, and adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package. The isolated npm manifest records reviewed, version-pinned install-script approvals for `@google/genai@1.52.0` and `protobufjs@7.6.5`; the installer does not approve arbitrary pending scripts. The local package loads the canonical code-review skill directly from the initialized, commit-pinned `vendor/gpt5.6-reviewer` submodule. The installer copies the vendored `pi-agent-setup` browser skill into Pipi-owned paths and removes the previously added `pi-subagents` extension, named browser agent, and agent-only skill dependency. It also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings, package entries, and MCP servers are preserved.
+It installs the Pi version pinned by this checkout and `pi-mcp-adapter` under `~/.pipi/agent/npm`, loads this checkout as a local Pi package, and adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package. The isolated npm manifest records reviewed, version-pinned install-script approvals for `@google/genai@1.52.0` and `protobufjs@7.6.5`; the installer does not approve arbitrary pending scripts. The local package loads the canonical `code-review` and `plan-gh-backlog` skills directly from initialized, commit-pinned submodules. The installer copies the vendored `pi-agent-setup` browser skill into Pipi-owned paths and removes the previously added `pi-subagents` extension, named browser agent, and agent-only skill dependency. It also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings, package entries, and MCP servers are preserved.
 
 Add `~/.local/bin` to `PATH` if necessary, then verify the launcher:
 
@@ -47,15 +47,16 @@ Custom executable and package locations are supported:
 npm run install:pipi -- --pi /path/to/pi --codex-tools /path/to/pi-codex
 ```
 
-## Evidence-driven code review
+## Submodule skills
 
-Pipi loads one canonical `code-review` skill from:
+Pipi loads canonical skills from two pinned sources:
 
 ```text
 vendor/gpt5.6-reviewer/skills/code-review
+vendor/plan-gh-backlog
 ```
 
-The pinned submodule also contains the independent reviewer role, verifier prompt, JSON contracts, examples, and optional Python CLI. Pipi does not duplicate the skill under the host `skills/` directory and does not fetch or advance the submodule or install or execute the Python CLI during setup.
+The reviewer source also contains its independent role, verifier prompt, JSON contracts, examples, and optional Python CLI. The backlog source includes its standard-library Python CLI, schema, safety guidance, and complete example. Pipi does not duplicate either skill under the host `skills/` directory and does not fetch, advance, or globally install submodule CLIs during setup; `plan-gh-backlog` runs through its bundled `scripts/plan-gh-backlog` launcher.
 
 For a fresh checkout, clone recursively:
 
@@ -63,13 +64,13 @@ For a fresh checkout, clone recursively:
 git clone --recurse-submodules https://github.com/blockedby/my-pi-setup.git
 ```
 
-For an existing checkout, initialize the reviewer source before installation:
+For an existing checkout, initialize all pinned sources before installation:
 
 ```sh
 git submodule update --init --recursive
 ```
 
-Run `npm run check:submodules` to verify `.gitmodules`, the parent gitlink, initialized/clean child state, required files, package skill path, and duplicate absence.
+Run `npm run check:submodules` to verify `.gitmodules`, every parent gitlink, initialized/clean child state, required files, package skill paths, and duplicate absence.
 
 ## MCP adapter
 

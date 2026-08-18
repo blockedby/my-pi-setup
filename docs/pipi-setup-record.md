@@ -22,6 +22,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Browser Chrome skill                    | `/home/kcnc/.pipi/agent/skills/browser-chrome`           |
 | Evidence-driven reviewer submodule      | `vendor/gpt5.6-reviewer` at `81053d6`                    |
 | Canonical code-review skill             | `vendor/gpt5.6-reviewer/skills/code-review`              |
+| Backlog planning submodule              | `vendor/plan-gh-backlog` at `2913620`                    |
+| Canonical plan-gh-backlog skill         | `vendor/plan-gh-backlog`                                 |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
 | Current Pipi Pi version                 | `0.84.2`                                                 |
@@ -37,8 +39,8 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 - Pipi auth is separate by default. No auth secret bytes were copied.
 - Pipi's MCP adapter is isolated under `~/.pipi/agent/npm`.
 - The browser skill and MCP commands are Pipi-owned copies under `~/.pipi/agent`.
-- The canonical code-review skill is loaded directly from the initialized, commit-pinned reviewer submodule; no duplicate host copy is loaded.
-- The installer never fetches or advances the submodule, and its optional Python CLI is not installed or executed by Pipi setup.
+- The canonical code-review and plan-gh-backlog skills are loaded directly from initialized, commit-pinned submodules; no duplicate host copies are loaded.
+- The installer never fetches or advances either submodule, and no optional Python CLI is globally installed by Pipi setup.
 - The optional `pi-subagents` named-agent extension is not installed.
 - Regular Pi's `mcp.json` was not copied or linked because it contains environment fields that may hold secrets.
 - The removed web-search provider is not installed, configured, or required.
@@ -681,3 +683,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Preparation:** Rebasing PR #15 after PR #14 produced one conflict only in this operation record; all product, test, skill, and explanatory-document changes were already byte-equivalent upstream and required no resolution. Preserved the complete merged-main history plus this isolated-PR record. The rebased PR #15 diff now contains only this durable record, with no duplicate runtime or test change.
 - **Post-rebase verification:** Fresh checks passed 28 script/installer/submodule tests, 144 deterministic extension tests, and 22 file-search tests; TypeScript, Pipi version/install checks, formatting, submodule validation, and `git diff --check` passed.
 - **Pending:** Push the rebased branch with lease, merge PR #15 as authorized, synchronize and clean up the local feature worktree/branch, and reload or restart any stale Pipi session.
+
+## Operation entry: plan-gh-backlog submodule integration
+
+- **Request:** In a new `pipi-alias` worktree, integrate the `plan-gh-backlog` skill as a Git submodule, install it for Pipi, and open a pull request to `main`.
+- **Action:** Created `.worktrees/plan-gh-backlog-skill` on `feat/plan-gh-backlog-skill`; added `https://github.com/blockedby/plan-gh-backlog.git` at parent gitlink `29136202437149b477e5d21317d82219fcc011bb`; registered its root `SKILL.md` in the Pipi package; generalized installer preflight across configured submodules; and documented the canonical skill and bundled standard-library Python launcher. Initial canonical review found that installer preflight did not enforce the parent pin/clean child and that this operation entry was missing; both blockers were remediated with retained regression coverage. Opened [PR #16](https://github.com/blockedby/my-pi-setup/pull/16) to `main`, ran the Pipi installer from the feature worktree, and narrowed that temporary local package entry to only `vendor/plan-gh-backlog/SKILL.md` so existing Pipi resources remain sourced from the primary checkout without duplicate skill names.
+- **Affected paths or values:** `.gitmodules`, `vendor/plan-gh-backlog`, `config/submodules.json`, `package.json`, `scripts/install.mjs`, `tests/scripts/install.test.mjs`, `AGENTS.md`, `README.md`, `SETUP.md`, and this record. The backlog source is read-only and pinned to `2913620`; runtime version, MCP version, model overrides, credentials, auth isolation, profiles, and quotas are unchanged.
+- **Verification:** Submodule validation accepted both exact clean gitlinks. The final deterministic suite passed 29 script/installer tests, 144 extension tests, and 22 file-search tests; TypeScript, formatting, and `git diff --check` passed. The pinned child passed 13 Python unit tests; Pi's skill loader discovered exactly one `plan-gh-backlog` skill; and the bundled CLI validated and planned its complete example. Canonical closure review marked `REV-001` and `REV-002` fixed and returned `READY` with no new findings. Target preparation reported an up-to-date, conflict-free branch with no rerun required. Pipi package resolution confirmed the worktree contributes exactly the one intended skill and no extension, prompt, theme, or other skill; `pipi list` shows the filtered package, `pipi --version` remains `0.84.2`, and the bundled CLI reports `plan-gh-backlog 1.0.0`.
+- **Pending:** Reload or restart the active Pipi session to discover the newly installed skill. PR #16 is open to `main`; merge remains a separate decision. After merge, rerun the primary-checkout installer and remove the temporary filtered worktree package entry before worktree cleanup.

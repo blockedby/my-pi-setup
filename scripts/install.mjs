@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   accessSync,
   chmodSync,
@@ -54,6 +55,9 @@ const modelDefaults = [
   "defaultModel",
   "defaultThinkingLevel",
 ];
+
+const git = (args, cwd = repositoryRoot) =>
+  execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 const usage = `Usage: node scripts/install.mjs [options]
 
@@ -219,42 +223,70 @@ const removePiSubagentsAssets = (agentDir) => {
   }
 };
 
-const validateReviewerAssets = () => {
-  let reviewer;
+const validateSubmoduleAssets = () => {
+  let submodules;
   try {
     const config = JSON.parse(readFileSync(submoduleConfigPath, "utf8"));
-    reviewer = config.submodules?.["gpt5.6-reviewer"];
+    submodules = config.submodules;
   } catch (error) {
     throw new Error(
-      `Cannot read reviewer submodule config: ${error instanceof Error ? error.message : String(error)}`,
+      `Cannot read submodule config: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (
-    !reviewer ||
-    typeof reviewer.path !== "string" ||
-    !Array.isArray(reviewer.requiredFiles) ||
-    reviewer.requiredFiles.length === 0 ||
-    reviewer.requiredFiles.some((path) => typeof path !== "string" || !path)
-  ) {
-    throw new Error(
-      `Invalid reviewer submodule config: ${submoduleConfigPath}`,
-    );
-  }
+  if (!submodules || typeof submodules !== "object")
+    throw new Error(`Invalid submodule config: ${submoduleConfigPath}`);
 
-  const reviewerAssetsRoot = join(repositoryRoot, reviewer.path);
-  if (!existsSync(join(reviewerAssetsRoot, ".git"))) {
-    throw new Error(
-      `Reviewer submodule is not initialized: ${reviewerAssetsRoot}; run git submodule update --init --recursive`,
-    );
-  }
-  for (const relativePath of reviewer.requiredFiles) {
-    const path = join(reviewerAssetsRoot, relativePath);
-    if (!existsSync(path))
+  const assetRoots = {};
+  for (const [name, submodule] of Object.entries(submodules)) {
+    if (
+      !submodule ||
+      typeof submodule.path !== "string" ||
+      typeof submodule.url !== "string" ||
+      !Array.isArray(submodule.requiredFiles) ||
+      submodule.requiredFiles.length === 0 ||
+      submodule.requiredFiles.some((path) => typeof path !== "string" || !path)
+    ) {
       throw new Error(
-        `Missing reviewer submodule asset: ${path}; run git submodule update --init --recursive`,
+        `Invalid submodule config for ${name}: ${submoduleConfigPath}`,
       );
+    }
+
+    const assetsRoot = join(repositoryRoot, submodule.path);
+    if (!existsSync(join(assetsRoot, ".git"))) {
+      throw new Error(
+        `Submodule ${name} is not initialized: ${assetsRoot}; run git submodule update --init --recursive`,
+      );
+    }
+    for (const relativePath of submodule.requiredFiles) {
+      const path = join(assetsRoot, relativePath);
+      if (!existsSync(path))
+        throw new Error(
+          `Missing submodule ${name} asset: ${path}; run git submodule update --init --recursive`,
+        );
+    }
+
+    const indexEntry = git(["ls-files", "--stage", "--", submodule.path]);
+    const gitlink = indexEntry.match(/^160000 ([0-9a-f]{40}) 0\t/);
+    if (!gitlink)
+      throw new Error(
+        `Submodule ${name} is not recorded as a parent Git gitlink`,
+      );
+    const pinnedCommit = gitlink[1];
+    const worktreeCommit = git(["rev-parse", "HEAD"], assetsRoot);
+    if (worktreeCommit !== pinnedCommit)
+      throw new Error(
+        `Submodule ${name} worktree is at ${worktreeCommit}, expected ${pinnedCommit}`,
+      );
+    if (git(["remote", "get-url", "origin"], assetsRoot) !== submodule.url)
+      throw new Error(
+        `Submodule ${name} origin URL does not match configured URL`,
+      );
+    if (git(["status", "--porcelain=v1", "--untracked-files=all"], assetsRoot))
+      throw new Error(`Submodule ${name} has direct worktree changes`);
+
+    assetRoots[name] = assetsRoot;
   }
-  return join(reviewerAssetsRoot, "skills", "code-review");
+  return assetRoots;
 };
 
 const installBrowserChromeAssets = (agentDir) => {
@@ -400,7 +432,12 @@ const install = () => {
   }
 
   if (options.shareAuth) validateAuthShare(regularAuthPath, pipiAuthPath);
-  const reviewerSkillDir = validateReviewerAssets();
+  const submoduleAssets = validateSubmoduleAssets();
+  const reviewerAssetsRoot = submoduleAssets["gpt5.6-reviewer"];
+  const backlogSkillDir = submoduleAssets["plan-gh-backlog"];
+  if (!reviewerAssetsRoot || !backlogSkillDir)
+    throw new Error("Required submodule skill configuration is missing");
+  const reviewerSkillDir = join(reviewerAssetsRoot, "skills", "code-review");
   if (!options.skipDependencies) installDependencies();
 
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
@@ -462,6 +499,7 @@ const install = () => {
   console.log(`Pipi sessions: ${sessionDir}`);
   console.log(`Browser Chrome skill: ${browserSkillDir}`);
   console.log(`Evidence-driven code-review skill: ${reviewerSkillDir}`);
+  console.log(`Plan GitHub backlog skill: ${backlogSkillDir}`);
   console.log(`Browser Chrome MCP config: ${pipiMcpPath}`);
   if (codexExecutable) console.log(`Codex CLI: ${codexExecutable}`);
   else
