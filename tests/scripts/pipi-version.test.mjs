@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { extractChangelogRange } from "./check-pipi-changelog.mjs";
+import { extractChangelogRange } from "../../scripts/check-pipi-changelog.mjs";
 import {
   compareStableVersions,
   getDeclaredPipiVersion,
@@ -12,11 +12,11 @@ import {
   pipiPackageNames,
   requiresChangelogReview,
   validatePipiVersionState,
-} from "./pipi-version.mjs";
+} from "../../scripts/pipi-version.mjs";
 import {
   lockfileInstallArgs,
   updatePipiVersion,
-} from "./update-pipi-version.mjs";
+} from "../../scripts/update-pipi-version.mjs";
 
 const manifestFor = (version) => ({
   dependencies: Object.fromEntries(

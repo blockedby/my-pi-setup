@@ -15,7 +15,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../..",
+);
 const installScript = join(repositoryRoot, "scripts", "install.mjs");
 const uninstallScript = join(repositoryRoot, "scripts", "uninstall.mjs");
 const mcpAdapterPackage = "npm:pi-mcp-adapter@2.15.0";
