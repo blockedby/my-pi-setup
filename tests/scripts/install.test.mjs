@@ -666,6 +666,16 @@ test("install rejects every configured missing submodule asset before writing Pi
     "--recursive",
   ]);
   const submodules = readJson(join(cloneRoot, "config", "submodules.json"));
+  for (const submodule of Object.values(submodules.submodules)) {
+    execFileSync("git", [
+      "-C",
+      join(cloneRoot, submodule.path),
+      "remote",
+      "set-url",
+      "origin",
+      submodule.url,
+    ]);
+  }
   for (const [name, submodule] of Object.entries(submodules.submodules)) {
     for (const relativePath of submodule.requiredFiles) {
       const assetPath = join(cloneRoot, submodule.path, relativePath);
@@ -699,6 +709,122 @@ test("install rejects every configured missing submodule asset before writing Pi
       writeFileSync(assetPath, original);
     }
   }
+});
+
+test("install rejects backlog submodule pin, origin, and cleanliness drift before writing Pipi state", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const cloneRoot = join(fixture.home, "pipi-alias-submodule-drift");
+  execFileSync(
+    "git",
+    ["clone", "-q", "--no-hardlinks", repositoryRoot, cloneRoot],
+    { encoding: "utf8" },
+  );
+  for (const [name, source] of [
+    ["vendor/gpt5.6-reviewer", reviewerSubmodule],
+    ["vendor/plan-gh-backlog", backlogSubmodule],
+  ]) {
+    execFileSync("git", [
+      "-C",
+      cloneRoot,
+      "config",
+      `submodule.${name}.url`,
+      source,
+    ]);
+  }
+  execFileSync("git", [
+    "-C",
+    cloneRoot,
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "update",
+    "--init",
+    "--recursive",
+  ]);
+  const submodules = readJson(join(cloneRoot, "config", "submodules.json"));
+  for (const submodule of Object.values(submodules.submodules)) {
+    execFileSync("git", [
+      "-C",
+      join(cloneRoot, submodule.path),
+      "remote",
+      "set-url",
+      "origin",
+      submodule.url,
+    ]);
+  }
+  const backlogRoot = join(cloneRoot, "vendor", "plan-gh-backlog");
+  const runCloneInstaller = () =>
+    spawnSync(
+      process.execPath,
+      [
+        join(cloneRoot, "scripts", "install.mjs"),
+        "--skip-dependencies",
+        "--pi",
+        fixture.piPath,
+        "--codex-tools",
+        fixture.codexTools,
+      ],
+      { cwd: cloneRoot, env: fixture.env, encoding: "utf8" },
+    );
+  const assertRejectedWithoutState = (result, pattern) => {
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, pattern);
+    assert.equal(existsSync(join(fixture.home, ".pipi")), false);
+    assert.equal(
+      existsSync(join(fixture.home, ".local", "bin", "pipi")),
+      false,
+    );
+  };
+
+  const skillPath = join(backlogRoot, "SKILL.md");
+  writeFileSync(skillPath, `${readFileSync(skillPath, "utf8")}\ndrift\n`);
+  assertRejectedWithoutState(
+    runCloneInstaller(),
+    /Submodule plan-gh-backlog has direct worktree changes/,
+  );
+  execFileSync("git", ["-C", backlogRoot, "restore", "."]);
+
+  execFileSync("git", [
+    "-C",
+    backlogRoot,
+    "remote",
+    "set-url",
+    "origin",
+    "https://example.invalid/plan-gh-backlog.git",
+  ]);
+  assertRejectedWithoutState(
+    runCloneInstaller(),
+    /Submodule plan-gh-backlog origin URL does not match configured URL/,
+  );
+  execFileSync("git", [
+    "-C",
+    backlogRoot,
+    "remote",
+    "set-url",
+    "origin",
+    submodules.submodules["plan-gh-backlog"].url,
+  ]);
+
+  execFileSync("git", ["-C", backlogRoot, "config", "user.name", "Pipi Test"]);
+  execFileSync("git", [
+    "-C",
+    backlogRoot,
+    "config",
+    "user.email",
+    "pipi-test@example.invalid",
+  ]);
+  writeFileSync(
+    join(backlogRoot, "README.md"),
+    `${readFileSync(join(backlogRoot, "README.md"), "utf8")}\nnext\n`,
+  );
+  execFileSync("git", ["-C", backlogRoot, "add", "README.md"]);
+  execFileSync("git", ["-C", backlogRoot, "commit", "-qm", "test drift"]);
+  assertRejectedWithoutState(
+    runCloneInstaller(),
+    /Submodule plan-gh-backlog worktree is at .* expected/,
+  );
 });
 
 test("install refuses a missing Pi executable before writing files", async (t) => {

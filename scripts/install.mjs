@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   accessSync,
   chmodSync,
@@ -54,6 +55,9 @@ const modelDefaults = [
   "defaultModel",
   "defaultThinkingLevel",
 ];
+
+const git = (args, cwd = repositoryRoot) =>
+  execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 const usage = `Usage: node scripts/install.mjs [options]
 
@@ -237,6 +241,7 @@ const validateSubmoduleAssets = () => {
     if (
       !submodule ||
       typeof submodule.path !== "string" ||
+      typeof submodule.url !== "string" ||
       !Array.isArray(submodule.requiredFiles) ||
       submodule.requiredFiles.length === 0 ||
       submodule.requiredFiles.some((path) => typeof path !== "string" || !path)
@@ -252,6 +257,25 @@ const validateSubmoduleAssets = () => {
         `Submodule ${name} is not initialized: ${assetsRoot}; run git submodule update --init --recursive`,
       );
     }
+    const indexEntry = git(["ls-files", "--stage", "--", submodule.path]);
+    const gitlink = indexEntry.match(/^160000 ([0-9a-f]{40}) 0\t/);
+    if (!gitlink)
+      throw new Error(
+        `Submodule ${name} is not recorded as a parent Git gitlink`,
+      );
+    const pinnedCommit = gitlink[1];
+    const worktreeCommit = git(["rev-parse", "HEAD"], assetsRoot);
+    if (worktreeCommit !== pinnedCommit)
+      throw new Error(
+        `Submodule ${name} worktree is at ${worktreeCommit}, expected ${pinnedCommit}`,
+      );
+    if (git(["remote", "get-url", "origin"], assetsRoot) !== submodule.url)
+      throw new Error(
+        `Submodule ${name} origin URL does not match configured URL`,
+      );
+    if (git(["status", "--porcelain=v1", "--untracked-files=all"], assetsRoot))
+      throw new Error(`Submodule ${name} has direct worktree changes`);
+
     for (const relativePath of submodule.requiredFiles) {
       const path = join(assetsRoot, relativePath);
       if (!existsSync(path))
