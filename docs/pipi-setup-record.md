@@ -699,3 +699,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Canonical source `skills/general/git-branching/SKILL.md` in `pi-agent-setup`, installed `/home/kcnc/.pipi/agent/skills/git-branching/SKILL.md`, and this record. The unrelated untracked source-repository `.claude/` directory was preserved and not staged.
 - **Verification:** Source `git diff --check`, direct local-asset tests, and the direct secret check passed; source and installed `SKILL.md` copies compare byte-for-byte and both contain the 15-second sentence. The npm wrappers could not start because the source repository requires Node 24.18.0 while the host has 24.19.0, so their underlying relevant scripts were run directly instead.
 - **Pending:** Reload or restart the active Pipi session so its loaded skill context reflects the updated installed file.
+
+## Operation entry: relaxed pi-agent-setup Node development range
+
+- **Request:** Replace the exact Node 24.18.0 development-runtime requirement with a less strict rule.
+- **Action:** Changed `pi-agent-setup` `package.json` `devEngines.runtime.version` from `24.18.0` to `^24.18.0`, committed it as `ae96283` (`build: relax Node development runtime range`), and pushed directly to `blockedby/pi-agent-setup` `main` as requested. This accepts compatible Node 24 releases, including the current 24.19.0 host, while remaining within major version 24.
+- **Affected paths or values:** `/home/kcnc/code/tools/pi-agent-setup/package.json` and this record. The unrelated untracked source-repository `.claude/` directory remained untouched.
+- **Verification:** With Node 24.19.0, the full `npm test` chain now starts and passes: config components, local assets, runtime resolution, AAD task package, OpenCode adapter, and main-thread wait guard. `npm run secrets:check` and `git diff --check` also passed.
+- **Pending:** None.
