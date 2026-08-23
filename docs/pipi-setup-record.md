@@ -726,3 +726,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Merged `extensions/subagents/src/prompt.ts`, the removal of literal prompt-word assertions from `extensions/subagents/policy.test.ts`, and the operation record. Runtime quotas, child profiles, tool schemas, workflow limits, installed dependencies, model overrides, and credentials are unchanged.
 - **Verification:** Canonical reviews returned `READY` before and after the requested test cleanup. Final post-rebase checks passed 29 script/installer/submodule tests, 143 deterministic extension tests, 22 file-search tests, TypeScript, formatting, Pipi version/install validation, submodule validation, and `git diff --check`. GitHub reports PR #18 merged; local `HEAD` equals `origin/main`; the feature worktree and local branch are absent.
 - **Pending:** Reload or restart the active Pipi session so it loads the merged parent-agent guidance.
+
+## Operation entry: clarify code-review skill trigger
+
+- **Request:** Replace the upstream `code-review` skill header description with correct English expressing that initial or closure reviews use subagents.
+- **Action:** Replaced the description with `Use when an initial or closure code review requires subagent-assisted verification.` in the canonical `gpt5.6-reviewer` repository, committed it on `docs/clarify-code-review-skill-description` as `504f6cc`, pushed the branch, and opened [upstream PR #2](https://github.com/blockedby/gpt5.6-reviewer/pull/2) to `main`. Target preparation reported the branch current and conflict-free.
+- **Affected paths or values:** Upstream `skills/code-review/SKILL.md` frontmatter only. The read-only `vendor/gpt5.6-reviewer` submodule and its parent gitlink remain unchanged pending the upstream merge; installed skills and credentials are unchanged.
+- **Verification:** All 51 upstream Python unit tests passed, the exact frontmatter structure was asserted, and `git diff --check` passed.
+- **Pending:** Merge upstream PR #2 if approved, update this repository's `vendor/gpt5.6-reviewer` gitlink to the merged upstream commit through a parent-repository PR, run required submodule/installer/type/format checks, and reload Pipi after that parent PR merges and installs.
