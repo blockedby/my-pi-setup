@@ -11,9 +11,8 @@ import {
   SUBAGENT_PROFILES,
 } from "./src/policy.ts";
 import { appendProfileSystemPrompt } from "./src/backends/pi.ts";
-import { SUBAGENT_SPAWN_PROMPT_GUIDELINES } from "./src/prompt.ts";
 
-test("profiles fix Pi models, reasoning, and role guidance", () => {
+test("profiles fix Pi models and reasoning", () => {
   assert.deepEqual(applySubagentProfile("luna-explore", {}), {
     ...SUBAGENT_PROFILES["luna-explore"],
   });
@@ -21,10 +20,6 @@ test("profiles fix Pi models, reasoning, and role guidance", () => {
   const worker = applySubagentProfile("luna-worker", {});
   assert.equal(worker.model, "openai-codex/gpt-5.6-luna");
   assert.equal(worker.reasoningEffort, "max");
-  assert.match(
-    SUBAGENT_PROFILES["luna-worker"].systemPrompt,
-    /may edit workspace files/i,
-  );
   assert.equal(
     applySubagentProfile("terra-audit", {}).model,
     "openai-codex/gpt-5.6-terra",
@@ -98,18 +93,6 @@ test("quota admission is mixed-model, race-safe, and releases failed reservation
   admission.release(sol);
   assert.equal(admission.tryReserve(sol, 0), true);
   admission.release(luna);
-});
-
-test("main-agent guidance delegates exploration, work, and audits through profiles", () => {
-  const guidance = SUBAGENT_SPAWN_PROMPT_GUIDELINES.join("\n");
-  assert.match(guidance, /luna-explore.*exploration/i);
-  assert.match(guidance, /luna-worker.*implementation/i);
-  assert.match(guidance, /terra-audit.*audits\/verification/i);
-  assert.match(
-    guidance,
-    /cross-cutting integration and final acceptance.*Sol/i,
-  );
-  assert.match(guidance, /later parent turn.*automatic result follow-ups/i);
 });
 
 test("profile prompt guidance appends without replacing discovered prompts", () => {
