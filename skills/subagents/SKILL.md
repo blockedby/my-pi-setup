@@ -19,7 +19,7 @@ When a completed tool result explicitly reports truncation metadata, the parent 
 
 ### Luna-First Rule
 
-Optimize for wall-clock speed. For nontrivial work with two or more dependency-ready, independent scopes, split it and launch one Luna per scope in the same parallel wave before broad sequential Sol exploration or planning. Work locally only for a trivial lookup, a shared decision or overlapping write ownership, or when delegation would add more latency than it saves.
+Optimize for wall-clock speed. For nontrivial work with two or more dependency-ready, independent scopes, split it and launch one Luna per scope in the same parallel wave before broad sequential Sol exploration or planning. If work cannot form a genuine parallel wave because it is ordered, dependency-heavy, or shares mutable ownership, keep it in the main chat rather than serializing it through subagents. Work locally only for a trivial lookup, a shared decision or overlapping write ownership, or when delegation would add more latency than it saves.
 
 Default routine, independent work to Luna before using Sol directly:
 

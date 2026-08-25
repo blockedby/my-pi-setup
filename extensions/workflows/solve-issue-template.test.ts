@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { Check } from "typebox/value";
+import { WORKFLOW_PARAMETERS } from "./index.ts";
 import { prepareWorkflowScript } from "./meta.ts";
 import { runWorkflowSandbox } from "./sandbox.ts";
+
+function workflowArgs(issue: string) {
+  return JSON.parse(JSON.stringify({ issue }));
+}
 
 function solveIssueScript() {
   const template = readFileSync(
@@ -15,6 +21,23 @@ function solveIssueScript() {
     throw new Error("Missing workflow code block");
   return template.slice(opening + 6, closing);
 }
+
+test("workflow arguments are JSON strings at the tool boundary", () => {
+  assert.equal(
+    Check(WORKFLOW_PARAMETERS, {
+      script: "return args;",
+      args: JSON.stringify({ issue: "Example issue" }),
+    }),
+    true,
+  );
+  assert.equal(
+    Check(WORKFLOW_PARAMETERS, {
+      script: "return args;",
+      args: { issue: "Example issue" },
+    }),
+    false,
+  );
+});
 
 test("solve-issue template executes discovery and implementation waves in parallel", async () => {
   const prepared = prepareWorkflowScript(solveIssueScript());
@@ -30,7 +53,7 @@ test("solve-issue template executes discovery and implementation waves in parall
   const peaks = new Map<string, number>();
   const result = await runWorkflowSandbox({
     source: prepared.source,
-    args: { issue: "Example issue" },
+    args: workflowArgs("Example issue"),
     cwd: process.cwd(),
     signal: controller.signal,
     onPhase: (title) => phases.push(title),
@@ -127,7 +150,67 @@ test("solve-issue template executes discovery and implementation waves in parall
       "implement:validation complete",
     ],
     integration: "integrate complete",
+    planningBlocker: null,
     audit: "audit complete",
     verification: "verify complete",
   });
+});
+
+test("solve-issue template blocks conflicting implementation ownership", async () => {
+  const prepared = prepareWorkflowScript(solveIssueScript());
+  const controller = new AbortController();
+  const calls: string[] = [];
+  const result = await runWorkflowSandbox({
+    source: prepared.source,
+    args: workflowArgs("Example issue"),
+    cwd: process.cwd(),
+    signal: controller.signal,
+    onPhase: () => {},
+    onAgent: async (_prompt, options) => {
+      const label = String(options.label);
+      calls.push(label);
+      if (label === "plan") {
+        return {
+          ok: true,
+          output: "plan complete",
+          structured: {
+            contract: "Example contract",
+            sharedPaths: ["src/index.ts"],
+            needsTerraAudit: false,
+            auditReason: "",
+            tasks: [
+              {
+                id: "first",
+                objective: "First change",
+                editPaths: ["src/shared.ts"],
+                context: "",
+                acceptance: "",
+                nonGoals: "",
+              },
+              {
+                id: "second",
+                objective: "Conflicting change",
+                editPaths: ["src/shared.ts"],
+                context: "",
+                acceptance: "",
+                nonGoals: "",
+              },
+            ],
+          },
+        };
+      }
+      return { ok: true, output: `${label} complete` };
+    },
+  });
+
+  assert.equal(
+    calls.some((label) => label.startsWith("implement:")),
+    false,
+  );
+  assert.equal(calls.includes("integrate"), false);
+  assert.equal(calls.includes("verify"), false);
+  assert.match(
+    JSON.stringify(result),
+    /overlaps a shared or already-owned edit path/,
+  );
 });
