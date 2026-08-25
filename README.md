@@ -41,6 +41,12 @@ The code-review policy is loaded directly from the initialized `vendor/gpt5.6-re
 
 No extra web-search service key or environment file is required. Pipi does not copy regular Pi's secret-bearing MCP configuration. See [SETUP.md](SETUP.md) for installation, isolation, MCP setup, auth, and uninstall instructions.
 
+## Prompt templates
+
+| Template | Usage | Purpose |
+| -------- | ----- | ------- |
+| `solve-issue` | `/solve-issue <issue URL or description>` | Runs a staged workflow: parallel discovery, shared planning, disjoint Luna implementation, Sol integration, conditional Terra audit, and verification. It never commits, pushes, or closes the issue. |
+
 Additional documentation:
 
 - [Complete local setup record and pending steps](docs/pipi-setup-record.md)

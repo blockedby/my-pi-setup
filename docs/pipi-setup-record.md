@@ -769,3 +769,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `AGENTS.md`, removed `extensions/subagents/prompt-contract.test.ts`, and this record. Runtime behavior, profiles, quotas, and model overrides are unchanged.
 - **Verification:** Confirmed the removed file was the only subagent test importing the prompt-text constants. Passed `npm run check`, `npm run test:extensions` (143 deterministic tests), `npm run format:check`, and `git diff --check` in the feature worktree.
 - **Pending:** Update PR #20 and review the policy change.
+
+## Operation entry: reusable solve-issue workflow template
+
+- **Request:** Add only a reusable `solve-issue` workflow to PR #20 so issue work is explicitly staged and parallelized.
+- **Action:** Added the package prompt template `prompts/solve-issue.md`, invoked as `/solve-issue <issue URL or description>`. It directs the main agent to run an inline workflow with three concurrent read-only Luna discovery agents; a Sol planning gate; up to four disjoint Luna implementation agents running concurrently; Sol integration; a conditional Terra audit for high-risk, cross-cutting, or disputed work; then Sol verification. It explicitly prevents commits, pushes, closing issues, and external-state changes. Added README discovery documentation.
+- **Affected paths or values:** `prompts/solve-issue.md`, `README.md`, `package.json`, and this record. `package.json` explicitly registers the package `prompts/` directory so `/solve-issue` is discoverable. The direct-subagent runtime, workflow runtime, model overrides, and quotas are unchanged.
+- **Verification:** Parsed the embedded workflow through `prepareWorkflowScript` and ran it in the permission-restricted workflow sandbox with deterministic child results. The behavioral test proves three concurrent discovery agents, a plan gate, two concurrently dispatched implementation tasks, then integration and verification; it does not assert prompt wording. Passed `npm run check`, `npm run test:extensions` (144 deterministic tests), `npm run format:check`, and `git diff --check`. No live workflow or model invocation has been run.
+- **Pending:** Update PR #20 and review the workflow design.
