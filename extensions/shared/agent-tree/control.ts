@@ -311,6 +311,13 @@ export class AgentTreeController {
   async cancel(id: string) {
     const entry = this.entries.get(id);
     if (!entry?.session) throw new Error(`Unknown agent id "${id}".`);
+    if (entry.node.status === "idle") {
+      this.settle(entry, {
+        type: "settled",
+        outcome: { type: "cancelled", finalText: entry.node.finalText },
+      });
+      return entry.node as AgentNodeSnapshot;
+    }
     if (entry.node.status !== "starting" && entry.node.status !== "running") {
       return entry.node as AgentNodeSnapshot;
     }

@@ -161,5 +161,9 @@ test("persistent roots become idle and accept additional remediation turns", asy
   assert.equal(tree.view.get(root.id)?.status, "idle");
   assert.equal(tree.view.get(root.id)?.finalText, "remediated");
 
+  await tree.cancel(root.id);
+  assert.equal(tree.view.get(root.id)?.status, "cancelled");
+  assert.equal(session.interrupted, 0);
+
   await tree.dispose();
 });

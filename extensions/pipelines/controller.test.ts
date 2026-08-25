@@ -7,6 +7,7 @@ import type {
   AgentTreeSessionEvent,
 } from "../shared/agent-tree/domain.ts";
 import { PipelineController } from "./controller.ts";
+import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
   LUNA_MODEL,
   PIPELINE_CHILD_ROLES,
@@ -317,6 +318,37 @@ test("completion is rejected while a child is still active", async () => {
   );
   assert.equal(run.controller.get(runId)?.status, "running");
   assert.equal(run.handoffs.length, 0);
+  await run.controller.dispose();
+});
+
+test("dashboard cancellation of an idle root cancels the run and active children", async () => {
+  const run = harness();
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  const rootId = run.controller.get(runId)?.rootId;
+  assert.ok(rootId);
+  const rootSession = run.sessions[0]!;
+  rootSession.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "waiting for next stage" },
+  });
+  assert.equal(run.controller.agentView.get(rootId)?.status, "idle");
+  const child = await run.controller.spawnChild(
+    runId,
+    "audit-reliability-regressions",
+  );
+  const rootRow = buildPipelineRows([run.controller.get(runId)!]).find(
+    (row) => row.kind === "agent" && row.agentId === rootId,
+  );
+  assert.ok(rootRow);
+
+  await cancelPipelineRow(run.controller, rootRow);
+
+  assert.equal(run.controller.get(runId)?.status, "cancelled");
+  assert.equal(run.controller.getAgent(runId, rootId).status, "cancelled");
+  assert.equal(run.controller.getAgent(runId, child.id).status, "cancelled");
+  assert.equal(run.handoffs.length, 1);
+  assert.equal(run.handoffs[0]?.status, "cancelled");
   await run.controller.dispose();
 });
 

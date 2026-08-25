@@ -129,6 +129,23 @@ export function buildPipelineRows(runs: ReadonlyArray<PipelineRunSnapshot>) {
   return rows;
 }
 
+export async function cancelPipelineRow(
+  controller: PipelineController,
+  row: PipelineRow,
+) {
+  if (row.kind === "run") {
+    await controller.cancelRun(row.runId);
+    return;
+  }
+  if (row.kind !== "agent") return;
+  const run = controller.get(row.runId);
+  if (run?.rootId === row.agentId) {
+    await controller.cancelRun(row.runId);
+    return;
+  }
+  await controller.cancelChild(row.runId, row.agentId);
+}
+
 export interface PipelineSelection {
   key?: string;
   index: number;
@@ -234,8 +251,11 @@ class PipelineDashboard implements Component {
       if (selected?.kind === "agent") this.close(selected.agentId);
       return;
     }
-    if (data === "x" && selected?.kind === "agent") {
-      this.controller.agentView.requestCancel(selected.agentId);
+    if (
+      data === "x" &&
+      (selected?.kind === "run" || selected?.kind === "agent")
+    ) {
+      void cancelPipelineRow(this.controller, selected).catch(() => {});
     }
   }
 
