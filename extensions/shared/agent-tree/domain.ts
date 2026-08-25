@@ -97,6 +97,8 @@ export interface AgentNodeSpec {
   readonly cwd: string;
   readonly prompt: string;
   readonly persistent?: boolean;
+  /** Recheck after asynchronous session creation, immediately before prompt. */
+  readonly shouldStart?: () => boolean;
 }
 
 export interface AgentTreeSessionFactory {

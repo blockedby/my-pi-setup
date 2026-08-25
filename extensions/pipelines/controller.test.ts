@@ -139,6 +139,42 @@ test("start is fire-and-forget and multiple same-cwd runs are admitted", async (
   await gated.controller.dispose();
 });
 
+test("dashboard cancellation of a starting run prevents its root prompt", async () => {
+  let releaseRoot = () => {};
+  const rootGate = new Promise<void>((resolve) => {
+    releaseRoot = resolve;
+  });
+  const run = harness({ rootGate });
+  const runId = run.controller.start(request());
+  const runRow = buildPipelineRows([run.controller.get(runId)!]).find(
+    (row) => row.kind === "run" && row.runId === runId,
+  );
+  assert.ok(runRow);
+
+  await cancelPipelineRow(run.controller, runRow);
+  assert.equal(run.controller.get(runId)?.status, "cancelled");
+  assert.equal(run.handoffs.length, 1);
+
+  releaseRoot();
+  await settleInitialization();
+
+  assert.equal(run.sessions.length, 1);
+  assert.equal(run.sessions[0]?.prompts.length, 0);
+  assert.equal(run.sessions[0]?.disposed, 1);
+  assert.equal(run.controller.get(runId)?.rootId, "node-1");
+  assert.equal(run.controller.get(runId)?.agents[0]?.status, "cancelled");
+  assert.equal(
+    run.controller
+      .get(runId)
+      ?.agents.some(
+        (agent) => agent.status === "starting" || agent.status === "running",
+      ),
+    false,
+  );
+  assert.equal(run.handoffs.length, 1);
+  await run.controller.dispose();
+});
+
 test("root tools are run-scoped and children have coding tools without orchestration", async () => {
   const run = harness();
   const runId = run.controller.start(request());

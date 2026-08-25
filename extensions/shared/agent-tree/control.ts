@@ -225,6 +225,14 @@ export class AgentTreeController {
       entry.session = session;
       node.sessionFile = session.sessionFile;
       node.activeTools = [...session.activeTools];
+      if (spec.shouldStart && !spec.shouldStart()) {
+        node.status = "cancelled";
+        node.settledAt = Date.now();
+        node.error = "Run was cancelled before the agent started";
+        await session.dispose();
+        this.notify(id);
+        return node as AgentNodeSnapshot;
+      }
       entry.unsubscribe = session.subscribe((event) =>
         this.onEvent(entry, event),
       );

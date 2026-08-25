@@ -188,9 +188,13 @@ export class PipelineController {
         cwd: run.request.workingDir,
         prompt: buildFeaturePipelinePrompt(run.request),
         persistent: true,
+        shouldStart: () => run.status === "starting",
       });
-      if (run.status !== "starting") return;
       run.rootId = root.id;
+      if (run.status !== "starting") {
+        this.notify();
+        return;
+      }
       if (root.status === "error") {
         this.failRun(run, root.error ?? "Pipeline root failed.");
       } else if (root.status === "cancelled") {
