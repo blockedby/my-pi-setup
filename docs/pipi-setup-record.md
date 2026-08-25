@@ -761,3 +761,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Verification:** In the feature worktree, installed local dependencies and passed `npm run check`, `npm run test:extensions` (147 deterministic tests), `npm run format:check`, and `git diff --check`. Independent Luna analyses confirmed current quota/admission behavior and reviewed routing, orchestration, safety, and external examples. The required independent Terra initial review returned `READY` with no findings for base `a1615b8` and implementation commit `b27b613`.
 - **Pull request:** Opened [PR #20](https://github.com/blockedby/my-pi-setup/pull/20) from `feat/speed-first-luna-delegation` to `main`, then prepared the target branch. The feature branch was already up to date with `origin/main`; no rebase, conflict, content change, or verification rerun was required.
 - **Pending:** Review PR #20; reload or restart Pipi after merging so new sessions use the guidance.
+
+## Operation entry: prohibit literal prompt-text tests
+
+- **Request:** Record that prompt text-presence tests must never be written because they do not prove behavior.
+- **Action:** Added a durable repository rule prohibiting tests for the presence, absence, or exact wording of model-facing prompt text. Removed the newly added literal prompt-contract test from PR #20; future prompt changes must use observable behavior or structured contracts instead.
+- **Affected paths or values:** `AGENTS.md`, removed `extensions/subagents/prompt-contract.test.ts`, and this record. Runtime behavior, profiles, quotas, and model overrides are unchanged.
+- **Verification:** Confirmed the removed file was the only subagent test importing the prompt-text constants. Passed `npm run check`, `npm run test:extensions` (143 deterministic tests), `npm run format:check`, and `git diff --check` in the feature worktree.
+- **Pending:** Update PR #20 and review the policy change.
