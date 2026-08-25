@@ -23,9 +23,6 @@
       "./vendor/gpt5.6-reviewer/skills",
       "./vendor/plan-gh-backlog"
     ],
-    "prompts": [
-      "./prompts"
-    ],
     "themes": [
       "./themes"
     ]

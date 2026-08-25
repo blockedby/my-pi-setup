@@ -36,11 +36,9 @@ Source: `/Users/davis/.pi/agent/extensions/subagents/` (`index.ts`, `manager.ts`
 | `subagent_list` | — | One `describeSubagent()` line per agent: `id [status] "title" (provider/model, ctx%, elapsed, cwd)`. |
 
 Prompt metadata (all strings live in `prompt.ts`): `subagent_spawn` has a
-`promptSnippet` plus Luna-first, speed-first swarm-orchestration guidelines. They require
-bounded dependency-ready scopes, Luna profiles for routine work, exclusive edit ownership,
-and automatic-result-driven follow-ups without blocking batch waits. Tool descriptions
-explain fire-and-forget semantics, model-specific quotas, and that children can't
-orchestrate or see the parent conversation.
+`promptSnippet` and two `promptGuidelines` (delegate self-contained tasks; don't block on
+`subagent_wait` unless necessary). Tool descriptions explain fire-and-forget semantics,
+the concurrency cap, and that children can't orchestrate/see the parent conversation.
 
 ### 1.2 State tracking (v1 `SubagentManager`)
 

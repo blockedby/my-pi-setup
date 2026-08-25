@@ -15,11 +15,9 @@ When a completed tool result explicitly reports truncation metadata, the parent 
 
 **Harness:** `pi`
 **Prompt nicknames:** “pi”, “pi agent”, “pi subagent”
-**Best default:** Pi is the general subagent harness, not the routine-routing default. For routine independent work, use `luna-explore` or `luna-worker`; use bare Pi only when deliberately choosing inherited-model behavior. It inherits the parent model and thinking level when `model` or `reasoning_effort` is omitted.
+**Best default:** Use when the user does not request another harness. It inherits the parent model and thinking level when `model` or `reasoning_effort` is omitted.
 
 ### Luna-First Rule
-
-Optimize for wall-clock speed. For nontrivial work with two or more dependency-ready, independent scopes, split it and launch one Luna per scope in the same parallel wave before broad sequential Sol exploration or planning. If work cannot form a genuine parallel wave because it is ordered, dependency-heavy, or shares mutable ownership, keep it in the main chat rather than serializing it through subagents. Work locally only for a trivial lookup, a shared decision or overlapping write ownership, or when delegation would add more latency than it saves.
 
 Default routine, independent work to Luna before using Sol directly:
 
@@ -37,11 +35,7 @@ Default routine, independent work to Luna before using Sol directly:
   - mechanical refactors
   - comparing candidate solutions
 
-### Swarm orchestration
-
-Before a multi-Luna wave, make a lightweight manifest: scope name/id, prerequisites, exclusive edit ownership (shared read context is allowed), and acceptance check. Give every worker one objective, expected concise output/evidence, explicit non-goals, and a completion condition. Require a conclusion and recommended next step first. Start every dependency-ready scope in the same wave; never serialize independent Luna work. The direct Luna quota is 16, not a target: choose the number of genuinely independent scopes that reduces wall-clock time.
-
-Treat automatic results as dependency events, not a batch barrier. Continue unrelated shared work and do not integrate on the first arrival. For each downstream decision, use only the required reports after they arrive; use one status check only when that gate needs it. Launch a follow-up only for a concrete unblocked gap or failed scope. Inspect claimed paths and validation before depending on a result. For an error or blocker, resolve its prerequisite or launch one narrower replacement with the missing input; never blindly retry or duplicate active/completed work unless adversarial comparison is intentional. Stop the wave once its declared objectives are covered. Use `terra-audit` in a later parent turn only for an integrated change, high-risk claim, or conflicting conclusions. Keep cross-cutting integration and final acceptance with the Sol/main agent.
+It is safe to run up to eight genuinely independent Luna workers in parallel. Their results arrive as automatic follow-ups in a later parent turn. Then launch `terra-audit` with the workers' conclusion-first reports to verify or compare them. Keep cross-cutting integration and final acceptance with the Sol/main agent.
 
 Pi can use any model shown by `pi --list-models`. Prefer `provider/model-id`; a bare model id only works when unambiguous. Common picks in this environment:
 
