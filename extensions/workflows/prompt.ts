@@ -44,7 +44,7 @@ export const WORKFLOW_PROMPT_SNIPPET =
 
 /** Guides the model on appropriate workflow fan-out and mandatory agent result checks. */
 export const WORKFLOW_PROMPT_GUIDELINES = [
-  "Use workflow when a task needs several subagents with phase dependencies or dynamic fan-out; keep single small delegations in the main session.",
+  "Use workflow only when a task has a genuine parallel wave plus phase dependencies or dynamic fan-out. If work is ordered, dependency-heavy, or shares mutable ownership, complete it in the main chat rather than serializing agents through a workflow.",
   "In workflow scripts, agent() never throws — always check `.ok` on its result before using `.output`/`.structured`.",
 ];
 

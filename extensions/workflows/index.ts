@@ -107,7 +107,7 @@ interface AgentCallOptions {
   effort?: unknown;
 }
 
-const WorkflowParams = Type.Object({
+export const WORKFLOW_PARAMETERS = Type.Object({
   script: Type.String({
     description: WORKFLOW_PARAMETER_DESCRIPTIONS.script,
   }),
@@ -123,7 +123,7 @@ const WorkflowParams = Type.Object({
   ),
 });
 
-type WorkflowInput = Static<typeof WorkflowParams>;
+type WorkflowInput = Static<typeof WORKFLOW_PARAMETERS>;
 
 function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(
@@ -370,7 +370,7 @@ export default function workflows(pi: ExtensionAPI) {
     description: WORKFLOW_TOOL_DESCRIPTION,
     promptSnippet: WORKFLOW_PROMPT_SNIPPET,
     promptGuidelines: WORKFLOW_PROMPT_GUIDELINES,
-    parameters: WorkflowParams,
+    parameters: WORKFLOW_PARAMETERS,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       let prepared: ReturnType<typeof prepareWorkflowScript>;
