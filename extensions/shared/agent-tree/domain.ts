@@ -1,0 +1,114 @@
+export type AgentNodeStatus =
+  "starting" | "running" | "idle" | "done" | "error" | "cancelled";
+
+export type AgentTranscriptItem =
+  | { readonly kind: "user"; readonly text: string; readonly at: number }
+  | {
+      readonly kind: "assistant";
+      readonly text: string;
+      readonly thinking?: string;
+      readonly at: number;
+    }
+  | {
+      readonly kind: "tool";
+      readonly phase: "call" | "result";
+      readonly toolCallId: string;
+      readonly name: string;
+      readonly text: string;
+      readonly isError: boolean;
+      readonly at: number;
+    };
+
+export interface AgentNodeSnapshot {
+  readonly id: string;
+  readonly scopeId?: string;
+  readonly parentId?: string;
+  readonly role: string;
+  readonly attempt: number;
+  readonly title: string;
+  readonly model: string;
+  readonly cwd: string;
+  readonly persistent: boolean;
+  readonly status: AgentNodeStatus;
+  readonly createdAt: number;
+  readonly settledAt?: number;
+  readonly error?: string;
+  readonly finalText: string;
+  readonly transcript: ReadonlyArray<AgentTranscriptItem>;
+  readonly liveAssistant?: {
+    readonly text: string;
+    readonly thinking: string;
+  };
+  readonly sessionFile?: string;
+  readonly activeTools: ReadonlyArray<string>;
+}
+
+export type AgentTreeSessionEvent =
+  | { readonly type: "run_started" }
+  | { readonly type: "user"; readonly text: string }
+  | {
+      readonly type: "assistant_delta";
+      readonly kind: "text" | "thinking";
+      readonly delta: string;
+    }
+  | {
+      readonly type: "assistant";
+      readonly text: string;
+      readonly thinking?: string;
+    }
+  | {
+      readonly type: "tool";
+      readonly phase: "call" | "result";
+      readonly toolCallId: string;
+      readonly name: string;
+      readonly text: string;
+      readonly isError: boolean;
+    }
+  | {
+      readonly type: "settled";
+      readonly outcome:
+        | { readonly type: "completed"; readonly finalText: string }
+        | {
+            readonly type: "failed";
+            readonly error: string;
+            readonly finalText?: string;
+          }
+        | { readonly type: "cancelled"; readonly finalText?: string };
+    };
+
+export interface AgentTreeSession {
+  readonly sessionFile?: string;
+  readonly activeTools: ReadonlyArray<string>;
+  readonly isStreaming: boolean;
+  subscribe(listener: (event: AgentTreeSessionEvent) => void): () => void;
+  prompt(text: string): Promise<void>;
+  send(text: string): Promise<void>;
+  interrupt(): Promise<void>;
+  dispose(): Promise<void> | void;
+}
+
+export interface AgentNodeSpec {
+  readonly scopeId?: string;
+  readonly parentId?: string;
+  readonly role: string;
+  readonly attempt: number;
+  readonly title: string;
+  readonly model: string;
+  readonly cwd: string;
+  readonly prompt: string;
+  readonly persistent?: boolean;
+}
+
+export interface AgentTreeSessionFactory {
+  create(spec: AgentNodeSpec): Promise<AgentTreeSession>;
+}
+
+export interface AgentTreeReadModel {
+  list(): ReadonlyArray<AgentNodeSnapshot>;
+  get(id: string): AgentNodeSnapshot | undefined;
+  childrenOf(parentId: string): ReadonlyArray<AgentNodeSnapshot>;
+  subscribe(listener: () => void): () => void;
+  subscribeTo(id: string, listener: () => void): () => void;
+  requestSend(id: string, text: string): void;
+  requestCancel(id: string): void;
+}

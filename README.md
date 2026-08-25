@@ -5,6 +5,7 @@ Pipi installs the creator's Pi extensions, skills, workflows, GitHub Dark Defaul
 Included resources:
 
 - Codex, Claude, and Pi subagents, including Luna exploration and Terra audit profiles
+- a built-in feature pipeline with a persistent Sol implementer, parallel Luna discovery/review, Terra final audit, and nested `/pipelines` control
 - background terminals and workflows
 - `fd` file discovery and `rg` content search
 - summaries, Git/model status UI, ask-user, and copy-all tools
@@ -44,6 +45,7 @@ No extra web-search service key or environment file is required. Pipi does not c
 Additional documentation:
 
 - [Complete local setup record and pending steps](docs/pipi-setup-record.md)
+- [Feature-pipeline v1 design](docs/pipelines-v1-design.md)
 - [Black-and-white subagent graph](docs/subagents-explained.html)
 - [Original subagent design plan used as a reference](https://github.com/davis7dotsh/my-pi-setup/blob/main/extensions/subagents/docs/design-plan.md)
 

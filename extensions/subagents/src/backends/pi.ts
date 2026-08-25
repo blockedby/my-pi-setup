@@ -35,20 +35,10 @@ import type {
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
 import { resolvePiModel } from "../policy.ts";
+import { CHILD_EXCLUDED_TOOL_NAMES } from "../../../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
-
-/** Tools that headless children must not receive. Everything else stays enabled. */
-const CHILD_EXCLUDED_TOOL_NAMES = [
-  "subagent_spawn",
-  "subagent_wait",
-  "subagent_cancel",
-  "subagent_check",
-  "subagent_list",
-  "workflow",
-  "ask_user",
-] as const;
 
 export function appendProfileSystemPrompt(
   base: ReadonlyArray<string>,
