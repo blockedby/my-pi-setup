@@ -16,6 +16,7 @@ export const meta = {
     { title: "Plan", detail: "Create one shared contract and disjoint implementation scopes." },
     { title: "Implement", detail: "Run the planned non-overlapping Luna tasks in parallel." },
     { title: "Integrate", detail: "Apply shared wiring and inspect the combined workspace." },
+    { title: "Unblock", detail: "Find and dispatch newly dependency-ready issue-scoped leaf work." },
     { title: "Audit", detail: "Use Terra when risk, cross-cutting impact, or disagreement warrants it." },
     { title: "Verify", detail: "Run focused acceptance checks and report residual risks." },
   ],
@@ -55,6 +56,11 @@ const PLAN = {
   },
   required: ["contract", "sharedPaths", "needsTerraAudit", "auditReason", "tasks"],
 };
+const NEXT_WAVE = {
+  type: "object",
+  properties: { tasks: PLAN.properties.tasks },
+  required: ["tasks"],
+};
 
 phase("Discover");
 const discovery = await parallel([
@@ -72,8 +78,10 @@ const planResult = await agent(
 const plan = planResult.ok && planResult.structured ? planResult.structured : undefined;
 const normalizePath = (value) => {
   if (typeof value !== "string") return undefined;
-  const path = value.replace(/^\.\//, "").replace(/\/+$/, "");
-  if (!path || path === "." || path.includes("*")) return undefined;
+  const path = value.trim().replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  if (!path || path === "." || path.includes("*") || path.startsWith("/") || /^[A-Za-z]:\//.test(path)) return undefined;
+  const segments = path.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) return undefined;
   return path;
 };
 const overlaps = (left, right) => left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
@@ -123,6 +131,23 @@ const integration = planValidation.ok ? await agent(
   { label: "integrate", phase: "Integrate", ...SOL },
 ) : { ok: false, error: planValidation.error };
 
+phase("Unblock");
+const readiness = planValidation.ok ? await agent(
+  `Perform a read-only readiness sweep after integrating this issue:\n${issue}\n\nShared contract: ${plan.contract}\nMain-owned paths: ${JSON.stringify(planValidation.sharedPaths)}\nIntegration report: ${integration.ok ? integration.output : integration.error}\n\nInspect only the remaining work necessary to satisfy the original issue scope. Return zero to four newly dependency-ready, independent leaf tasks. Every task must have unique id, concrete non-overlapping edit paths outside main-owned paths, one objective, context, acceptance, and non-goals. Include adjacent work only when it is required by the original issue; do not expand scope. Return an empty task list when no genuine parallel wave remains. Do not edit.`,
+  { label: "unblock", phase: "Unblock", schema: NEXT_WAVE, ...SOL },
+) : { ok: false, error: planValidation.error };
+const nextCandidate = readiness.ok && readiness.structured
+  ? { tasks: readiness.structured.tasks, sharedPaths: planValidation.sharedPaths }
+  : { tasks: [], sharedPaths: planValidation.ok ? planValidation.sharedPaths : [] };
+const nextValidation = validatePlan(nextCandidate);
+const followUps = planValidation.ok && nextValidation.ok ? await parallel(
+  nextValidation.tasks.map((task) => () => agent(
+    `Implement one newly unblocked issue task.\n\nIssue: ${issue}\nShared contract: ${plan.contract}\nTask id: ${task.id}\nObjective: ${task.objective}\nYou may edit only: ${JSON.stringify(task.editPaths)}\nContext: ${task.context}\nAcceptance: ${task.acceptance}\nNon-goals: ${task.nonGoals}\n\nThis task became ready after integration. Do not edit main-owned paths ${JSON.stringify(planValidation.sharedPaths)}, commit, push, or make external-state changes. Run focused checks and report changed paths, checks, risks, and the next step.`,
+    { label: `follow-up:${task.id}`, phase: "Unblock", ...LUNA },
+  )),
+  { concurrency: 4 },
+) : [];
+
 phase("Audit");
 const audit = planValidation.ok && plan?.needsTerraAudit
   ? await agent(
@@ -144,6 +169,9 @@ return {
   planningBlocker: planValidation.ok ? null : planValidation.error,
   implementations: implementations.map((result) => result.ok ? result.output : result.error),
   integration: integration.ok ? integration.output : integration.error,
+  readiness: readiness.ok ? readiness.structured ?? readiness.output : readiness.error,
+  readinessBlocker: nextValidation.ok ? null : nextValidation.error,
+  followUps: followUps.map((result) => result.ok ? result.output : result.error),
   audit: audit.ok ? audit.output : audit.error,
   verification: verification.ok ? verification.output : verification.error,
 };

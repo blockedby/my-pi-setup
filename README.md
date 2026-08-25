@@ -45,7 +45,7 @@ No extra web-search service key or environment file is required. Pipi does not c
 
 | Template | Usage | Purpose |
 | -------- | ----- | ------- |
-| `solve-issue` | `/solve-issue <issue URL or description>` | Runs a staged workflow: parallel discovery, shared planning, disjoint Luna implementation, Sol integration, conditional Terra audit, and verification. It never commits, pushes, or closes the issue. |
+| `solve-issue` | `/solve-issue <issue URL or description>` | Runs a staged workflow: parallel discovery, shared planning, disjoint Luna implementation, Sol integration, a readiness sweep for newly unblocked scoped work, conditional Terra audit, and verification. It never commits, pushes, or closes the issue. |
 
 Additional documentation:
 
