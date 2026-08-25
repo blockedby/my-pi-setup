@@ -34,10 +34,11 @@ function agent(
 function pipelineRun(
   id: string,
   agents: ReadonlyArray<AgentNodeSnapshot>,
+  definition: PipelineRunSnapshot["definition"] = "feature-pipeline",
 ): PipelineRunSnapshot {
   return {
     id,
-    definition: "feature-pipeline",
+    definition,
     workingDir: "/tmp/work",
     stage: "discover",
     status: "running",
@@ -88,6 +89,36 @@ test("nested UI model is definition to run to root, stages, and child attempts",
       ],
     ],
   );
+});
+
+test("dashboard lists both definitions and nests runs under the selected definition", () => {
+  assert.deepEqual(
+    buildPipelineRows([]).map((row) => [row.kind, row.label]),
+    [
+      ["definition", "feature-pipeline"],
+      ["definition", "plan-pipeline"],
+    ],
+  );
+  const feature = pipelineRun("feature-run", [agent("feature-root")]);
+  const plan = pipelineRun(
+    "plan-run",
+    [agent("plan-root", { scopeId: "plan-run" })],
+    "plan-pipeline",
+  );
+  const rows = buildPipelineRows([plan, feature]);
+  const featureDefinition = rows.findIndex(
+    (row) => row.key === "definition:feature-pipeline",
+  );
+  const planDefinition = rows.findIndex(
+    (row) => row.key === "definition:plan-pipeline",
+  );
+  const featureRun = rows.findIndex((row) => row.key === "run:feature-run");
+  const planRun = rows.findIndex((row) => row.key === "run:plan-run");
+
+  assert.ok(featureDefinition >= 0);
+  assert.ok(planDefinition > featureDefinition);
+  assert.ok(featureRun > featureDefinition && featureRun < planDefinition);
+  assert.ok(planRun > planDefinition);
 });
 
 test("pipeline selection follows a stable nested row and reconciles removal", () => {

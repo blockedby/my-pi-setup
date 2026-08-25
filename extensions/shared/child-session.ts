@@ -31,11 +31,25 @@ export const PIPELINE_ORCHESTRATION_TOOL_NAMES = [
   "pipeline_child_send",
   "pipeline_child_cancel",
   "pipeline_complete",
+  "pipeline_plan_write",
+  "pipeline_plan_validate",
+  "pipeline_git_status",
 ] as const;
 
 export const CHILD_EXCLUDED_TOOL_NAMES = [
   ...PIPELINE_ROOT_EXCLUDED_TOOL_NAMES,
   ...PIPELINE_ORCHESTRATION_TOOL_NAMES,
+] as const;
+
+export const PLAN_PIPELINE_MUTATING_TOOL_NAMES = [
+  "bash",
+  "edit",
+  "write",
+  "apply_patch_codex",
+  "codex_task",
+  "bg_start",
+  "bg_kill",
+  "mcp",
 ] as const;
 
 /** Fresh SDK options avoid turning the denylist into an accidental allowlist. */
@@ -46,6 +60,24 @@ export function childToolPolicy() {
 /** Pipeline roots keep only their run-scoped orchestration tools. */
 export function pipelineRootToolPolicy() {
   return { excludeTools: [...PIPELINE_ROOT_EXCLUDED_TOOL_NAMES] };
+}
+
+export function planPipelineRootToolPolicy() {
+  return {
+    excludeTools: [
+      ...PIPELINE_ROOT_EXCLUDED_TOOL_NAMES,
+      ...PLAN_PIPELINE_MUTATING_TOOL_NAMES,
+    ],
+  };
+}
+
+export function planPipelineChildToolPolicy() {
+  return {
+    excludeTools: [
+      ...CHILD_EXCLUDED_TOOL_NAMES,
+      ...PLAN_PIPELINE_MUTATING_TOOL_NAMES,
+    ],
+  };
 }
 
 export interface ChildResourceOptions {

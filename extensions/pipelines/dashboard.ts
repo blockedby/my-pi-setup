@@ -12,7 +12,7 @@ import {
 import { openAgentTakeover } from "../shared/agent-tree/takeover.ts";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import {
-  FEATURE_PIPELINE_ID,
+  PIPELINE_DEFINITIONS,
   PIPELINE_STAGES,
   type PipelineRunSnapshot,
   type PipelineStage,
@@ -58,71 +58,72 @@ function childStage(role: string): PipelineStage {
 }
 
 export function buildPipelineRows(runs: ReadonlyArray<PipelineRunSnapshot>) {
-  const rows: PipelineRow[] = [
-    {
-      key: `definition:${FEATURE_PIPELINE_ID}`,
+  const rows: PipelineRow[] = [];
+  for (const definition of PIPELINE_DEFINITIONS) {
+    rows.push({
+      key: `definition:${definition.id}`,
       kind: "definition",
       depth: 0,
-      label: FEATURE_PIPELINE_ID,
-    },
-  ];
-  for (const run of runs) {
-    rows.push({
-      key: `run:${run.id}`,
-      kind: "run",
-      depth: 1,
-      label: `${run.id} · ${run.status} · ${run.workingDir}`,
-      runId: run.id,
+      label: definition.id,
     });
-    const root = run.rootId
-      ? run.agents.find((agent) => agent.id === run.rootId)
-      : undefined;
-    const children = run.agents.filter(
-      (agent) => agent.parentId === run.rootId,
-    );
-    if (root) {
+    for (const run of runs.filter((run) => run.definition === definition.id)) {
       rows.push({
-        key: `agent:${run.id}:root:${root.id}`,
-        kind: "agent",
-        depth: 2,
-        label: `${root.title} · ${root.status}`,
+        key: `run:${run.id}`,
+        kind: "run",
+        depth: 1,
+        label: `${run.id} · ${run.status} · ${run.workingDir}`,
         runId: run.id,
-        agentId: root.id,
-        status: root.status,
       });
-    }
-    const currentStageIndex = PIPELINE_STAGES.indexOf(run.stage);
-    for (const [stageIndex, stage] of PIPELINE_STAGES.entries()) {
-      const stageStatus =
-        stageIndex < currentStageIndex
-          ? "done"
-          : stageIndex > currentStageIndex
-            ? "pending"
-            : run.status === "failed" || run.status === "cancelled"
-              ? run.status
-              : run.status === "completed"
-                ? "done"
-                : "current";
-      rows.push({
-        key: `stage:${run.id}:${stage}`,
-        kind: "stage",
-        depth: 2,
-        label: `${stage} · ${stageStatus}`,
-        runId: run.id,
-        stage,
-      });
-      for (const child of children.filter(
-        (agent) => childStage(agent.role) === stage,
-      )) {
+      const root = run.rootId
+        ? run.agents.find((agent) => agent.id === run.rootId)
+        : undefined;
+      const children = run.agents.filter(
+        (agent) => agent.parentId === run.rootId,
+      );
+      if (root) {
         rows.push({
-          key: `agent:${run.id}:${stage}:${child.id}`,
+          key: `agent:${run.id}:root:${root.id}`,
           kind: "agent",
-          depth: 3,
-          label: `${child.role} · attempt ${child.attempt} · ${child.model} · ${child.status}`,
+          depth: 2,
+          label: `${root.title} · ${root.status}`,
           runId: run.id,
-          agentId: child.id,
-          status: child.status,
+          agentId: root.id,
+          status: root.status,
         });
+      }
+      const currentStageIndex = PIPELINE_STAGES.indexOf(run.stage);
+      for (const [stageIndex, stage] of PIPELINE_STAGES.entries()) {
+        const stageStatus =
+          stageIndex < currentStageIndex
+            ? "done"
+            : stageIndex > currentStageIndex
+              ? "pending"
+              : run.status === "failed" || run.status === "cancelled"
+                ? run.status
+                : run.status === "completed"
+                  ? "done"
+                  : "current";
+        rows.push({
+          key: `stage:${run.id}:${stage}`,
+          kind: "stage",
+          depth: 2,
+          label: `${stage} · ${stageStatus}`,
+          runId: run.id,
+          stage,
+        });
+        for (const child of children.filter(
+          (agent) => childStage(agent.role) === stage,
+        )) {
+          rows.push({
+            key: `agent:${run.id}:${stage}:${child.id}`,
+            kind: "agent",
+            depth: 3,
+            label: `${child.role} · attempt ${child.attempt} · ${child.model} · ${child.status}`,
+            runId: run.id,
+            agentId: child.id,
+            status: child.status,
+          });
+        }
       }
     }
   }

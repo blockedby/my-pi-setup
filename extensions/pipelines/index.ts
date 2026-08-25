@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { StringEnum } from "@earendil-works/pi-ai";
 import {
   getMarkdownTheme,
   truncateHead,
@@ -10,15 +11,26 @@ import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { PipelineController } from "./controller.ts";
 import { showPipelineDashboard } from "./dashboard.ts";
-import type { PipelineHandoff } from "./domain.ts";
+import {
+  FEATURE_PIPELINE_ID,
+  PIPELINE_DEFINITION_IDS,
+  type PipelineDefinitionId,
+  type PipelineHandoff,
+} from "./domain.ts";
 import { createPipelineSessionFactory } from "./session.ts";
 
 const HANDOFF_MAX_BYTES = 32 * 1024;
 
 export const PIPELINE_RUN_PARAMETERS = Type.Object({
+  pipeline: Type.Optional(
+    StringEnum(PIPELINE_DEFINITION_IDS, {
+      description:
+        "Known hardcoded pipeline definition; defaults to feature-pipeline when omitted.",
+    }),
+  ),
   task: Type.String({
     description:
-      "Self-contained feature task for the pipeline; include known constraints or acceptance criteria when available.",
+      "Self-contained feature task or planning goal; include known constraints or acceptance criteria when available.",
     minLength: 1,
     maxLength: 64 * 1024,
   }),
@@ -32,6 +44,14 @@ export const PIPELINE_RUN_PARAMETERS = Type.Object({
   ),
 });
 
+export function resolvePipelineDefinition(requested?: string) {
+  if (!requested) return FEATURE_PIPELINE_ID;
+  const definition = PIPELINE_DEFINITION_IDS.find((id) => id === requested);
+  if (!definition)
+    throw new Error(`Unsupported pipeline definition: ${requested}`);
+  return definition;
+}
+
 export function resolvePipelineWorkingDir(
   currentDirectory: string,
   requestedDirectory?: string,
@@ -43,7 +63,9 @@ export function handoffText(handoff: PipelineHandoff) {
   const facts = handoff.facts;
   const sections = [
     `Pipeline ${handoff.runId} ${handoff.status}.`,
+    `Selected pipeline: ${handoff.definition}`,
     `Working directory: ${facts.workingDir}`,
+    ...(facts.planPath ? [`Plan path: ${facts.planPath}`] : []),
     `Outcome:\n${facts.outcome}`,
     `Changed paths:\n${facts.changedPaths.map((item) => `- ${item}`).join("\n") || "- none reported"}`,
     `Checks and evidence:\n${facts.checks.map((item) => `- ${item}`).join("\n") || "- none reported"}`,
@@ -104,6 +126,7 @@ export default function pipelines(pi: ExtensionAPI) {
         details: {
           runId: handoff.runId,
           status: handoff.status,
+          definition: handoff.definition,
           workingDir: handoff.facts.workingDir,
         },
       },
@@ -115,12 +138,13 @@ export default function pipelines(pi: ExtensionAPI) {
     if (controller) return controller;
     let created: PipelineController;
     created = new PipelineController({
-      createSessionFactory: (rootTools) =>
+      createSessionFactory: (rootTools, definitionForRun) =>
         createPipelineSessionFactory({
           modelRegistry: ctx.modelRegistry,
           parentCwd: ctx.cwd,
           parentTrusted: ctx.isProjectTrusted(),
           rootTools,
+          definitionForRun,
         }),
       onHandoff: deliver,
     });
@@ -146,13 +170,13 @@ export default function pipelines(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "pipeline_run",
-    label: "Run Feature Pipeline",
+    label: "Run Pipeline",
     description:
-      "Start the hardcoded feature-pipeline in a caller-provided working directory and return its run id immediately.",
+      "Start one known hardcoded pipeline in a caller-provided working directory and return its run id immediately. Omit pipeline for feature-pipeline.",
     promptSnippet:
-      "Start the background feature-pipeline for a nontrivial new-feature implementation",
+      "Start a background feature implementation or planning-only pipeline",
     promptGuidelines: [
-      "Use pipeline_run automatically for a nontrivial new-feature implementation after choosing the working directory. Do not use it for bugs, refactors, research-only work, or trivial edits. After launch, do not duplicate its work in the same workspace; monitor it through /pipelines while continuing only unrelated work.",
+      "Use pipeline_run with feature-pipeline for a nontrivial new-feature implementation, or plan-pipeline when the requested outcome is a durable audited implementation plan. Omission remains feature-pipeline. Do not use it for bugs, refactors, research-only work, or trivial edits. After launch, do not duplicate its work in the same workspace; monitor it through /pipelines while continuing only unrelated work.",
     ],
     parameters: PIPELINE_RUN_PARAMETERS,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -163,18 +187,20 @@ export default function pipelines(pi: ExtensionAPI) {
       ) {
         throw new Error(`working_dir is not a directory: ${workingDir}`);
       }
+      const definition = resolvePipelineDefinition(params.pipeline);
       const runId = getController(ctx).start({
         task: params.task,
         workingDir,
+        pipeline: definition,
       });
       return {
         content: [
           {
             type: "text",
-            text: `Started feature-pipeline ${runId} in ${workingDir}. It is running in the background; completion will arrive as a follow-up handoff.`,
+            text: `Started ${definition} ${runId} in ${workingDir}. It is running in the background; completion will arrive as a follow-up handoff.`,
           },
         ],
-        details: { runId, definition: "feature-pipeline", workingDir },
+        details: { runId, definition, workingDir },
       };
     },
   });
@@ -185,6 +211,7 @@ export default function pipelines(pi: ExtensionAPI) {
       const details = (message.details ?? {}) as {
         runId?: string;
         status?: string;
+        definition?: PipelineDefinitionId;
         workingDir?: string;
       };
       const failed = details.status !== "completed";
@@ -193,7 +220,9 @@ export default function pipelines(pi: ExtensionAPI) {
         " " +
         theme.fg(
           "accent",
-          theme.bold(`feature-pipeline ${details.runId ?? "?"}`),
+          theme.bold(
+            `${details.definition ?? FEATURE_PIPELINE_ID} ${details.runId ?? "?"}`,
+          ),
         ) +
         theme.fg("muted", ` · ${details.status ?? "unknown"}`);
       const content =
@@ -214,22 +243,21 @@ export default function pipelines(pi: ExtensionAPI) {
   );
 
   pi.registerCommand("pipelines", {
-    description: "Inspect and take over feature-pipeline runs and agents",
+    description: "Inspect and take over pipeline runs and agents",
     handler: async (_args, ctx) => {
       const current = getController(ctx);
-      if (current.list().length === 0) {
-        ctx.ui.notify("No pipeline runs yet.", "info");
-        return;
-      }
       if (ctx.mode !== "tui") {
+        const runs = current.list();
         ctx.ui.notify(
-          current
-            .list()
-            .map(
-              (run) =>
-                `${run.id} [${run.status}] ${run.stage} ${run.workingDir}`,
-            )
-            .join("\n"),
+          PIPELINE_DEFINITION_IDS.flatMap((definition) => [
+            definition,
+            ...runs
+              .filter((run) => run.definition === definition)
+              .map(
+                (run) =>
+                  `  ${run.id} [${run.status}] ${run.stage} ${run.workingDir}`,
+              ),
+          ]).join("\n"),
           "info",
         );
         return;

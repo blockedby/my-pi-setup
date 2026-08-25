@@ -1,13 +1,13 @@
-# Pipelines v1 — working design
+# Hardcoded pipelines — design and runtime contract
 
-_Status: collaborative notes. This file records only confirmed decisions. Open topics stay open; it is not an implementation contract._
+_Status: implemented design record. Historical feature-pipeline v1 decisions remain below; the plan-pipeline addition is specified in its own section._
 
 ## Confirmed starting constraints
 
 - Pipelines are the intended user-facing orchestration feature; do not build a separate raw workflow surface for this proposal.
-- v1 has one hardcoded **feature-pipeline** graph. Future versions may add other graphs for other task types.
+- The package has two hardcoded definitions: **feature-pipeline** and **plan-pipeline**. The public selector accepts only these known definitions; it does not expose arbitrary workflows.
 - The main agent activates a pipeline through a first-class tool, analogous to how it uses `subagent_spawn`. It should do so automatically for a nontrivial new-feature implementation when the workspace is prepared; it should not route bugs, refactors, research-only work, or trivial edits into this v1 feature pipeline.
-- `/pipelines` is a nested UI rather than a flat subagent-style list.
+- `/pipelines` is a nested UI rather than a flat subagent-style list. It always lists both hardcoded definitions and nests each run beneath its selected definition.
 - Git/worktree policy is not hardcoded into the graph. The main agent chooses and prepares the working directory according to project instructions and applicable skills, then passes that workspace to the pipeline; delivery constraints come from the self-contained task and loaded project resources. In the usual local flow this may be a dedicated branch/worktree with commits; other environments may require different behavior.
 - Multiple pipeline runs may be active concurrently, including in the same working directory. v1 has no workspace-conflict gate; the invoking main agent and project policy own that decision. The UI must show each run's working directory clearly. Pipeline sessions use their own Sol=4, Terra=8, and Luna=16 capacity pools, intentionally independent from direct `/subagents` capacity.
 - Pipeline lifecycle matches current direct subagents: runs are session-scoped and in memory. On main-session shutdown/reload/switch/fork, the runtime disposes active pipeline-agent and child sessions; v1 does not resume them. Persisted child session files are diagnostic artifacts, not resumable pipeline state.
@@ -59,7 +59,7 @@ Feature input
 
 ## Runtime architecture
 
-- `pipeline_run` has a minimal v1 input: a self-contained `task` plus optional `working_dir` (defaulting to the caller's current directory). It starts the root Sol session there, returns a run ID immediately, and delivers the eventual handoff to the main session as a follow-up. Run title is derived from the task; delivery/Git constraints come from the task and loaded project resources rather than extra tool fields.
+- `pipeline_run` accepts a self-contained `task`, optional `working_dir` (defaulting to the caller's current directory), and optional enum-like `pipeline`. Omission defaults to `feature-pipeline`; unknown definitions are rejected. It starts the root Sol session there, returns a run ID immediately, and delivers the eventual handoff to the main session as a follow-up. Run title is derived from the task; delivery/Git constraints come from the task and loaded project resources rather than extra tool fields.
 - The Sol session receives normal coding tools plus run-scoped custom tools: stage marking, child spawn/list/check/wait/cancel, and completion.
 - Child spawn accepts a hardcoded feature-pipeline role; the runtime selects the corresponding Luna or Terra model and role prompt. Child sessions do not receive orchestration tools.
 - The prompt owns graph sequencing and the one-retry policy. The host owns session lifecycle, role/model boundaries, hierarchy, subscriptions, cancellation, model admission, and bounded state.
@@ -67,8 +67,54 @@ Feature input
 
 ## Completion handoff
 
-`pipeline_complete` emits facts, not a readiness label. Its structured handoff includes the implemented outcome, changed paths, checks/evidence, commits or observed Git state when applicable, discovery/audit report references or summaries, unresolved items, and the working directory. The main agent alone decides readiness and subsequent Git/PR actions.
+`pipeline_complete` emits facts, not a readiness label. Its structured handoff includes the selected definition, outcome, changed paths, checks/evidence, commits or observed Git state when applicable, discovery/audit report references or summaries, unresolved items, and the working directory. A completed `plan-pipeline` run additionally requires a validated repository-local `docs/plans/*.md` plan path. The main agent alone decides readiness and subsequent Git/PR actions.
 
-## Next discussion topic
+## Plan-pipeline definition
 
-Define the detailed prompts and structured report schemas while the runtime implementation proceeds.
+`plan-pipeline` is planning-only. Its persistent Sol/high root may inspect the repository, write and remediate one Markdown plan under `docs/plans/`, and run read-only validation. Plan roots and children are denied shell/edit/write, delegated patch/task, and background-shell mutation tools. Sol writes only through a bounded plan-artifact tool and uses bounded plan-validation and Git-status tools. It must not implement the requested product goal, modify product code, commit, push, install runtime changes, or deploy.
+
+```text
+Goal
+  → Persistent Sol/high root
+      → Discover (one parallel wave, Luna/medium)
+          ├─ goal/outcomes and candidate acceptance criteria
+          ├─ frontend/UI scope
+          ├─ backend/data/API scope
+          ├─ DevOps/runtime/release scope
+          └─ testing/quality strategy
+      → Sol synthesizes docs/plans/<descriptive-name>.md
+      → Audit (one parallel wave, Luna/medium)
+          ├─ product outcome and AC traceability
+          ├─ decomposition, dependencies, and DAG quality
+          ├─ cross-layer integration
+          └─ test, release, and reliability coverage
+      → Sol resolves actionable Luna findings once
+      → Independent Terra/high final audit
+      → Sol resolves Terra findings once; no re-audit
+  → Factual plan handoff
+```
+
+All children are fixed direct children of the root and receive no orchestration tools, so there are no grandchildren. The controller enforces stage order, definition-specific roles, one valid report per required track before phase transitions/completion, at most one same-session retry for a failed or malformed discovery/Luna audit report, and no Terra retry. A pre-session discovery/Luna spawn failure may create one replacement attempt. A track may explicitly report `not applicable` when supported by repository evidence.
+
+### Plan artifact contract
+
+The artifact has a level-one title and level-two sections for:
+
+- goal and non-goals;
+- repository evidence and explicit assumptions;
+- candidate acceptance criteria;
+- frontend, backend, DevOps, and cross-cutting tasks;
+- a test plan addressing unit, integration, contract, e2e, and operational checks, including evidence-backed `not applicable` entries;
+- dependency-safe implementation waves;
+- risks, rollout, and rollback;
+- unresolved questions.
+
+Implementation tasks use unique stable IDs such as `TASK-001`. Every task records scope, likely paths/components, dependencies, and acceptance/verification evidence, and every task appears in an implementation wave. Frontend/backend/DevOps sections remain present but may state that the layer is not applicable rather than inventing tasks.
+
+The controller validates the completed plan's repository-local path and structural contract. Plan discovery reports use the established `summary`/`evidence`/`unknowns`/`constraints` object. Luna audits use `track`/`findings`/`unprovenChecks`. Contract warnings are returned to Sol so a failed or malformed Luna track can receive its one bounded retry. Terra follows the canonical code-review skill in initial mode, adapted to concrete plan-quality defects, and does not receive prior Luna findings or their resolutions.
+
+### Plan handoff and limitations
+
+The factual handoff identifies `plan-pipeline`, plan path, changed paths, checks and fresh evidence, assumptions, report summaries/references, unresolved questions/items, working directory, and observed Git state. It deliberately omits a READY/readiness decision.
+
+Runs remain in-memory and session-scoped, are not resumable, and use the same independent Sol/Luna/Terra capacity pools and transcript/steer/cancel/takeover behavior as `feature-pipeline`. Multiple runs may target the same workspace because conflict prevention remains the caller's responsibility. Artifact validation proves plan structure, not product feasibility, stakeholder approval, or correctness of a future implementation.

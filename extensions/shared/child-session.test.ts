@@ -19,6 +19,8 @@ import {
   childToolPolicy,
   createChildResources,
   pipelineRootToolPolicy,
+  planPipelineChildToolPolicy,
+  planPipelineRootToolPolicy,
   resolveStandaloneChildProjectTrust,
   shutdownAndDisposeChildSession,
   type DisposableChildSession,
@@ -116,6 +118,9 @@ test("child denylist keeps extension and workflow structured tools available", a
         "pipeline_child_send",
         "pipeline_child_cancel",
         "pipeline_complete",
+        "pipeline_plan_write",
+        "pipeline_plan_validate",
+        "pipeline_git_status",
       ],
     );
     const allTools = new Set(session.getAllTools().map((tool) => tool.name));
@@ -205,6 +210,30 @@ test("pipeline root policy denies outer orchestration but keeps run-scoped tools
     assert.equal(active.has("pipeline_run"), false);
     await shutdownAndDisposeChildSession(session);
   });
+});
+
+test("plan pipeline policies deny mutators and keep bounded root plan tools", () => {
+  const rootDenied = new Set<string>(planPipelineRootToolPolicy().excludeTools);
+  const childDenied = new Set<string>(
+    planPipelineChildToolPolicy().excludeTools,
+  );
+  for (const mutator of [
+    "bash",
+    "edit",
+    "write",
+    "apply_patch_codex",
+    "codex_task",
+    "bg_start",
+    "bg_kill",
+    "mcp",
+  ]) {
+    assert.equal(rootDenied.has(mutator), true);
+    assert.equal(childDenied.has(mutator), true);
+  }
+  assert.equal(rootDenied.has("read"), false);
+  assert.equal(rootDenied.has("pipeline_plan_write"), false);
+  assert.equal(childDenied.has("pipeline_plan_write"), true);
+  assert.equal(childDenied.has("pipeline_child_spawn"), true);
 });
 
 test("resource loading gates project extensions but retains global extensions", async () => {

@@ -12,10 +12,13 @@ import {
   childToolPolicy,
   createChildResources,
   pipelineRootToolPolicy,
+  planPipelineChildToolPolicy,
+  planPipelineRootToolPolicy,
   resolveStandaloneChildProjectTrust,
   shutdownAndDisposeChildSession,
 } from "../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
+import { PLAN_PIPELINE_ID, type PipelineDefinitionId } from "./domain.ts";
 import type {
   AgentNodeSpec,
   AgentTreeSessionEvent,
@@ -29,6 +32,7 @@ interface PipelineSessionFactoryOptions {
   readonly parentCwd: string;
   readonly parentTrusted: boolean;
   readonly rootTools: (runId: string) => ReadonlyArray<ToolDefinition>;
+  readonly definitionForRun: (runId: string) => PipelineDefinitionId;
 }
 
 function textContent(message: Message) {
@@ -201,6 +205,8 @@ export function createPipelineSessionFactory(
         }),
       });
       const isRoot = !spec.parentId;
+      const definition = options.definitionForRun(spec.scopeId ?? "");
+      const isPlan = definition === PLAN_PIPELINE_ID;
       const customTools = isRoot
         ? options.rootTools(spec.scopeId ?? "")
         : undefined;
@@ -216,7 +222,13 @@ export function createPipelineSessionFactory(
         settingsManager: resources.settingsManager,
         resourceLoader: resources.loader,
         ...(customTools ? { customTools: [...customTools] } : {}),
-        ...(isRoot ? pipelineRootToolPolicy() : childToolPolicy()),
+        ...(isRoot
+          ? isPlan
+            ? planPipelineRootToolPolicy()
+            : pipelineRootToolPolicy()
+          : isPlan
+            ? planPipelineChildToolPolicy()
+            : childToolPolicy()),
       });
       try {
         await bindChildSessionExtensions(session);

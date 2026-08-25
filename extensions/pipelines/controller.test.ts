@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type {
@@ -11,6 +14,9 @@ import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
   LUNA_MODEL,
   PIPELINE_CHILD_ROLES,
+  PLAN_PIPELINE_AUDIT_ROLES,
+  PLAN_PIPELINE_CHILD_ROLES,
+  PLAN_PIPELINE_DISCOVERY_ROLES,
   SOL_MODEL,
   TERRA_MODEL,
   type PipelineChildRole,
@@ -115,6 +121,113 @@ const request = (workingDir = "/tmp/work") => ({
 async function settleInitialization() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
+}
+
+function reportForRole(role: string) {
+  if (role.startsWith("discover-")) {
+    return JSON.stringify({
+      summary: role,
+      evidence: ["repository evidence"],
+      unknowns: [],
+      constraints: [],
+    });
+  }
+  if (role === "final-audit") {
+    return JSON.stringify({
+      mode: "initial",
+      base_sha: "1234567",
+      head_sha: "WORKTREE",
+      verdict: "READY",
+      findings: [],
+      summary: "No actionable findings",
+    });
+  }
+  return JSON.stringify({ track: role, findings: [], unprovenChecks: [] });
+}
+
+function settleRole(run: ReturnType<typeof harness>, role: string) {
+  const session = run.sessions.find(
+    (candidate) => candidate.spec.role === role,
+  );
+  assert.ok(session);
+  session.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: reportForRole(role) },
+  });
+}
+
+async function advancePlanToComplete(
+  run: ReturnType<typeof harness>,
+  runId: string,
+  planPath: string,
+) {
+  await Promise.all(
+    PLAN_PIPELINE_DISCOVERY_ROLES.map((role) =>
+      run.controller.spawnChild(runId, role),
+    ),
+  );
+  PLAN_PIPELINE_DISCOVERY_ROLES.forEach((role) => settleRole(run, role));
+  run.controller.setStage(runId, "build");
+  run.controller.writePlan(runId, planPath, validPlan());
+  run.controller.setStage(runId, "audit");
+  await Promise.all(
+    PLAN_PIPELINE_AUDIT_ROLES.map((role) =>
+      run.controller.spawnChild(runId, role),
+    ),
+  );
+  PLAN_PIPELINE_AUDIT_ROLES.forEach((role) => settleRole(run, role));
+  run.controller.setStage(runId, "audit-resolve");
+  run.controller.setStage(runId, "final-audit");
+  await run.controller.spawnChild(runId, "final-audit");
+  settleRole(run, "final-audit");
+  run.controller.setStage(runId, "final-resolve");
+  run.controller.setStage(runId, "complete");
+}
+
+function validPlan() {
+  return `# Implementation plan
+
+## Goal and non-goals
+Goal; non-goal.
+
+## Evidence and assumptions
+Evidence; assumption.
+
+## Candidate acceptance criteria
+- AC1
+
+## Frontend tasks
+Not applicable.
+
+## Backend tasks
+Not applicable.
+
+## DevOps tasks
+Not applicable.
+
+## Cross-cutting tasks
+### TASK-001: Update the package
+- **Scope:** Make the bounded change.
+- **Likely paths/components:** src/example.ts
+- **Dependencies:** None.
+- **Acceptance/verification evidence:** Focused test passes.
+
+## Test plan
+- Unit checks apply.
+- Integration checks are not applicable.
+- Contract checks are not applicable.
+- E2E checks are not applicable.
+- Operational checks are not applicable.
+
+## Implementation waves
+- Wave 1: TASK-001
+
+## Risks, rollout, and rollback
+Low risk; revert TASK-001 if needed.
+
+## Unresolved questions
+None.
+`;
 }
 
 test("start is fire-and-forget and multiple same-cwd runs are admitted", async () => {
@@ -241,6 +354,90 @@ test("roles select fixed models, remain direct root children, and record attempt
   await run.controller.dispose();
 });
 
+test("plan-pipeline has fixed staged direct Luna/Terra roles and rejects feature roles", async () => {
+  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-roles-"));
+  const run = harness();
+  const runId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "plan-pipeline",
+  });
+  await settleInitialization();
+  const snapshot = run.controller.get(runId);
+  assert.equal(snapshot?.definition, "plan-pipeline");
+  assert.equal(snapshot?.agents[0]?.model, SOL_MODEL);
+  assert.equal(snapshot?.agents[0]?.title, "Plan pipeline Sol");
+  assert.deepEqual(run.rootToolNames.slice(0, 4), [
+    "pipeline_stage",
+    "pipeline_plan_write",
+    "pipeline_plan_validate",
+    "pipeline_git_status",
+  ]);
+
+  const discovery = await Promise.all(
+    PLAN_PIPELINE_DISCOVERY_ROLES.map((role) =>
+      run.controller.spawnChild(runId, role),
+    ),
+  );
+  PLAN_PIPELINE_DISCOVERY_ROLES.forEach((role) => settleRole(run, role));
+  run.controller.setStage(runId, "build");
+  run.controller.writePlan(runId, "docs/plans/roles.md", validPlan());
+  run.controller.setStage(runId, "audit");
+  const audits = await Promise.all(
+    PLAN_PIPELINE_AUDIT_ROLES.map((role) =>
+      run.controller.spawnChild(runId, role),
+    ),
+  );
+  PLAN_PIPELINE_AUDIT_ROLES.forEach((role) => settleRole(run, role));
+  run.controller.setStage(runId, "audit-resolve");
+  run.controller.setStage(runId, "final-audit");
+  const terra = await run.controller.spawnChild(runId, "final-audit");
+  const children = [...discovery, ...audits, terra];
+  assert.deepEqual(
+    children.map((child) => child.role),
+    [...PLAN_PIPELINE_CHILD_ROLES],
+  );
+  assert.equal(
+    children.every((child) => child.parentId === snapshot?.rootId),
+    true,
+  );
+  assert.equal(
+    children.slice(0, 9).every((child) => child.model === LUNA_MODEL),
+    true,
+  );
+  assert.equal(children[9]?.model, TERRA_MODEL);
+  await assert.rejects(
+    run.controller.spawnChild(runId, "discover-problem"),
+    /Unsupported plan-pipeline child role/,
+  );
+  await assert.rejects(
+    run.controller.spawnChild(runId, "final-audit"),
+    /already has its allowed child session/,
+  );
+  const terraSession = run.sessions.find(
+    (candidate) => candidate.spec.role === "final-audit",
+  );
+  assert.ok(terraSession);
+  terraSession.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: JSON.stringify({
+        mode: "initial",
+        verdict: "anything",
+        findings: [],
+        summary: "Incomplete canonical result",
+      }),
+    },
+  });
+  assert.throws(
+    () => run.controller.setStage(runId, "final-resolve"),
+    /missing valid reports: final-audit/,
+  );
+
+  await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
+});
+
 test("children run in parallel and wait returns reports in caller order", async () => {
   const run = harness();
   const runId = run.controller.start(request());
@@ -304,6 +501,41 @@ test("a settled child can be retried in its existing session", async () => {
     1,
   );
   assert.equal(run.controller.getAgent(runId, child.id).status, "running");
+  await run.controller.dispose();
+});
+
+test("plan-pipeline enforces stage order and one Luna retry", async () => {
+  const run = harness();
+  const runId = run.controller.start({
+    ...request(),
+    pipeline: "plan-pipeline",
+  });
+  await settleInitialization();
+  await assert.rejects(
+    run.controller.spawnChild(runId, "audit-decomposition-dag"),
+    /can only start during plan-pipeline stage audit/,
+  );
+  const child = await run.controller.spawnChild(
+    runId,
+    "discover-goal-outcomes",
+  );
+  const session = run.sessions.find(
+    (candidate) => candidate.spec.role === child.role,
+  );
+  assert.ok(session);
+  session.emit({
+    type: "settled",
+    outcome: { type: "failed", error: "transient failure" },
+  });
+  await run.controller.sendChild(runId, child.id, "Retry once.");
+  await assert.rejects(
+    run.controller.sendChild(runId, child.id, "Retry twice."),
+    /already used its retry/,
+  );
+  assert.throws(
+    () => run.controller.setStage(runId, "audit"),
+    /Invalid plan-pipeline stage transition/,
+  );
   await run.controller.dispose();
 });
 
@@ -426,6 +658,66 @@ test("structured completion delivers one factual handoff without readiness statu
   );
 
   await run.controller.dispose();
+});
+
+test("plan completion requires and validates a repository-local plan artifact", async () => {
+  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-pipeline-"));
+  const run = harness();
+  const runId = run.controller.start({
+    task: "Plan the approved goal",
+    workingDir,
+    pipeline: "plan-pipeline",
+  });
+  await settleInitialization();
+  await advancePlanToComplete(run, runId, "docs/plans/example.md");
+  const facts = {
+    outcome: "Implementation plan written and audited",
+    changedPaths: [],
+    checks: ["plan contract passed"],
+    assumptions: ["No UI layer exists"],
+    git: ["working tree contains the plan artifact"],
+    reports: ["five discovery and five audit reports summarized"],
+    unresolvedItems: ["Owner assignment remains open"],
+    workingDir,
+  };
+
+  assert.throws(
+    () => run.controller.complete(runId, facts),
+    /requires plan_path/,
+  );
+  const artifactPath = path.join(workingDir, "docs", "plans", "example.md");
+  const replacementPath = path.join(
+    workingDir,
+    "docs",
+    "plans",
+    "replacement.md",
+  );
+  fs.writeFileSync(
+    replacementPath,
+    validPlan().replace("# Implementation plan", "# Replacement plan"),
+  );
+  fs.renameSync(replacementPath, artifactPath);
+  assert.throws(
+    () =>
+      run.controller.complete(runId, {
+        ...facts,
+        planPath: "docs/plans/example.md",
+      }),
+    /changed after this plan-pipeline run wrote it/,
+  );
+  run.controller.writePlan(runId, "docs/plans/example.md", validPlan());
+  run.controller.complete(runId, {
+    ...facts,
+    planPath: "docs/plans/example.md",
+  });
+  assert.equal(run.handoffs[0]?.definition, "plan-pipeline");
+  assert.equal(run.handoffs[0]?.facts.planPath, "docs/plans/example.md");
+  assert.deepEqual(run.handoffs[0]?.facts.changedPaths, [
+    "docs/plans/example.md",
+  ]);
+
+  await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
 test("unknown IDs fail closed and cancellation/disposal stop active sessions", async () => {
