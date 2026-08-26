@@ -3,6 +3,7 @@ import test from "node:test";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import {
   buildPipelineRows,
+  glyphStatusForPipelineRow,
   reconcilePipelineSelection,
   type PipelineSelection,
 } from "./dashboard.ts";
@@ -81,7 +82,7 @@ test("nested UI model is definition to run to root, stages, and child attempts",
       .slice(discoverStage, discoverStage + 2)
       .map((row) => [row.kind, row.depth, row.label]),
     [
-      ["stage", 2, "discover · current"],
+      ["stage", 2, "discover · running"],
       [
         "agent",
         3,
@@ -89,6 +90,35 @@ test("nested UI model is definition to run to root, stages, and child attempts",
       ],
     ],
   );
+});
+
+test("running glyph follows the active stage instead of the persistent root", () => {
+  const root = agent("root-1");
+  const child = agent("child-1", {
+    parentId: root.id,
+    role: "discover-problem",
+    status: "done",
+  });
+  const rows = buildPipelineRows([
+    { ...pipelineRun("run-1", [root, child]), stage: "build" },
+  ]);
+  const rootRow = rows.find(
+    (row) => row.kind === "agent" && row.agentId === root.id,
+  );
+  const childRow = rows.find(
+    (row) => row.kind === "agent" && row.agentId === child.id,
+  );
+  const buildRow = rows.find(
+    (row) => row.kind === "stage" && row.stage === "build",
+  );
+  assert.ok(rootRow);
+  assert.ok(childRow);
+  assert.ok(buildRow);
+
+  assert.equal(glyphStatusForPipelineRow(rootRow), undefined);
+  assert.equal(glyphStatusForPipelineRow(childRow), "done");
+  assert.equal(glyphStatusForPipelineRow(buildRow), "running");
+  assert.equal(buildRow.label, "build · running");
 });
 
 test("dashboard lists both definitions and nests runs under the selected definition", () => {

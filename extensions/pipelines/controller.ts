@@ -310,6 +310,40 @@ export class PipelineController {
     }
   }
 
+  private advanceStageAfterFanIn(
+    run: MutableRun,
+    waitedChildren: ReadonlyArray<AgentNodeSnapshot>,
+  ) {
+    const roles = rolesForDefinition(run.definition).filter((role) =>
+      run.stage === "discover"
+        ? role.startsWith("discover-")
+        : run.stage === "audit"
+          ? role.startsWith("audit-")
+          : run.stage === "final-audit"
+            ? role === "final-audit"
+            : false,
+    );
+    const nextStage =
+      run.stage === "discover"
+        ? "build"
+        : run.stage === "audit"
+          ? "audit-resolve"
+          : run.stage === "final-audit"
+            ? "final-resolve"
+            : undefined;
+    if (
+      !nextStage ||
+      !waitedChildren.some((child) =>
+        roles.some((role) => role === child.role),
+      ) ||
+      roles.some((role) => !this.roleHasValidReport(run, role))
+    ) {
+      return;
+    }
+    run.stage = nextStage;
+    this.notify();
+  }
+
   setStage(runId: string, stage: PipelineStage) {
     const run = this.requireActiveRun(runId);
     if (run.definition === PLAN_PIPELINE_ID) {
@@ -421,7 +455,12 @@ export class PipelineController {
       if (!agent.parentId)
         throw new Error(`Agent "${id}" is the pipeline root.`);
     }
-    return this.tree.wait(ids, signal);
+    const children = await this.tree.wait(ids, signal);
+    const run = this.requireRun(runId);
+    if (run.status === "starting" || run.status === "running") {
+      this.advanceStageAfterFanIn(run, children);
+    }
+    return children;
   }
 
   async sendChild(runId: string, id: string, text: string) {
@@ -715,7 +754,7 @@ export class PipelineController {
         name: "pipeline_child_wait",
         label: "Wait for Pipeline Children",
         description:
-          "Wait for known children and return their reports in this Sol context.",
+          "Wait for known children, return their reports in this Sol context, and atomically enter the next stage when the full current-stage fan-in is valid.",
         parameters: Type.Object({
           ids: Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
         }),

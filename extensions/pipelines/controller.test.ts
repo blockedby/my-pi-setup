@@ -469,7 +469,78 @@ test("children run in parallel and wait returns reports in caller order", async 
     reports.map((child) => child.finalText),
     ["report-0", "report-1", "report-2", "report-3", "report-4"],
   );
+  assert.equal(run.controller.get(runId)?.stage, "build");
 
+  await run.controller.dispose();
+});
+
+test("successful audit fan-in atomically enters audit-resolve", async () => {
+  const run = harness();
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  run.controller.setStage(runId, "audit");
+  const auditRoles = PIPELINE_CHILD_ROLES.filter((role) =>
+    role.startsWith("audit-"),
+  );
+  const children = await Promise.all(
+    auditRoles.map((role) => run.controller.spawnChild(runId, role)),
+  );
+  auditRoles.forEach((role) => settleRole(run, role));
+
+  await run.controller.waitForChildren(
+    runId,
+    children.map((child) => child.id),
+  );
+
+  const snapshot = run.controller.get(runId);
+  assert.equal(snapshot?.stage, "audit-resolve");
+  const rows = buildPipelineRows(snapshot ? [snapshot] : []);
+  assert.equal(
+    rows.find((row) => row.kind === "stage" && row.stage === "audit-resolve")
+      ?.label,
+    "audit-resolve · running",
+  );
+
+  run.controller.setStage(runId, "final-audit");
+  const finalAudit = await run.controller.spawnChild(runId, "final-audit");
+  settleRole(run, "final-audit");
+  await run.controller.waitForChildren(runId, [finalAudit.id]);
+  assert.equal(run.controller.get(runId)?.stage, "final-resolve");
+
+  await run.controller.dispose();
+});
+
+test("fan-in does not advance when a required plan report is invalid", async () => {
+  const run = harness();
+  const runId = run.controller.start({
+    ...request(),
+    pipeline: "plan-pipeline",
+  });
+  await settleInitialization();
+  const children = await Promise.all(
+    PLAN_PIPELINE_DISCOVERY_ROLES.map((role) =>
+      run.controller.spawnChild(runId, role),
+    ),
+  );
+  PLAN_PIPELINE_DISCOVERY_ROLES.slice(0, -1).forEach((role) =>
+    settleRole(run, role),
+  );
+  const invalidRole = PLAN_PIPELINE_DISCOVERY_ROLES.at(-1);
+  const invalidSession = run.sessions.find(
+    (session) => session.spec.role === invalidRole,
+  );
+  assert.ok(invalidSession);
+  invalidSession.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "not valid report JSON" },
+  });
+
+  await run.controller.waitForChildren(
+    runId,
+    children.map((child) => child.id),
+  );
+
+  assert.equal(run.controller.get(runId)?.stage, "discover");
   await run.controller.dispose();
 });
 

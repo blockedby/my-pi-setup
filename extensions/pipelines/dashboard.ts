@@ -40,6 +40,7 @@ export type PipelineRow =
       readonly label: string;
       readonly runId: string;
       readonly stage: PipelineStage;
+      readonly status: "pending" | "running" | "done" | "failed" | "cancelled";
     }
   | {
       readonly key: string;
@@ -102,7 +103,7 @@ export function buildPipelineRows(runs: ReadonlyArray<PipelineRunSnapshot>) {
                 ? run.status
                 : run.status === "completed"
                   ? "done"
-                  : "current";
+                  : "running";
         rows.push({
           key: `stage:${run.id}:${stage}`,
           kind: "stage",
@@ -110,6 +111,7 @@ export function buildPipelineRows(runs: ReadonlyArray<PipelineRunSnapshot>) {
           label: `${stage} · ${stageStatus}`,
           runId: run.id,
           stage,
+          status: stageStatus,
         });
         for (const child of children.filter(
           (agent) => childStage(agent.role) === stage,
@@ -164,6 +166,16 @@ export function reconcilePipelineSelection(
       ? stable
       : Math.min(Math.max(0, selection.index), Math.max(0, rows.length - 1));
   selection.key = rows[selection.index]?.key;
+}
+
+export function glyphStatusForPipelineRow(row: PipelineRow) {
+  if (row.kind === "stage") {
+    if (row.status === "failed") return "error";
+    if (row.status === "running" || row.status === "cancelled")
+      return row.status;
+  }
+  if (row.kind === "agent" && row.depth === 3) return row.status;
+  return undefined;
 }
 
 function statusGlyph(status: AgentNodeSnapshot["status"], theme: Theme) {
@@ -279,8 +291,10 @@ class PipelineDashboard implements Component {
       const marker =
         index === this.selection.index ? this.theme.fg("accent", "❯") : " ";
       const branch = row.depth === 0 ? "" : `${"  ".repeat(row.depth - 1)}└─ `;
-      const glyph =
-        row.kind === "agent" ? `${statusGlyph(row.status, this.theme)} ` : "";
+      const glyphStatus = glyphStatusForPipelineRow(row);
+      const glyph = glyphStatus
+        ? `${statusGlyph(glyphStatus, this.theme)} `
+        : "";
       const label =
         index === this.selection.index
           ? this.theme.fg("accent", row.label)
