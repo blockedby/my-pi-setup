@@ -60,6 +60,25 @@ import {
 
 const FEATURE_DISCOVERY_REPORT_MAX_BYTES = 32 * 1024;
 
+export function pipelineAuditSubmissionAllowed(
+  definition: PipelineDefinitionId,
+  role: string,
+  segmentActive: boolean,
+) {
+  const definitionUsesSegment =
+    definition === AUDIT_PIPELINE_ID ||
+    definition === FEATURE_PIPELINE_ID ||
+    definition === PLAN_PIPELINE_ID;
+  if (!definitionUsesSegment) return false;
+  if (role === AUDIT_SYNTHESIS_ROLE) {
+    return definition === AUDIT_PIPELINE_ID || segmentActive;
+  }
+  return (
+    segmentActive &&
+    PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)
+  );
+}
+
 function isFeatureDiscoveryRole(
   role: string,
 ): role is FeaturePipelineDiscoveryRole {
@@ -106,6 +125,14 @@ export interface PipelineControllerOptions {
   readonly createSessionFactory: (
     rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
     definitionForRun: (runId: string) => PipelineDefinitionId,
+    auditSubmit?: (
+      runId: string,
+      role: string,
+      sessionToken: string,
+      value: unknown,
+    ) => void,
+    auditSessionCreated?: (runId: string, role: string, token: string) => void,
+    auditToolAllowed?: (runId: string, role: string) => boolean,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
   readonly makeRunId?: () => string;
@@ -145,6 +172,8 @@ export class PipelineController {
   private readonly handoffs = new Set<string>();
   private readonly childContinuations = new Map<string, number>();
   private readonly auditPumps = new Set<string>();
+  private readonly auditCorrections = new Map<string, number>();
+  private readonly auditSessionTokens = new Map<string, string>();
   private readonly tree: AgentTreeController;
   private readonly onHandoff: PipelineControllerOptions["onHandoff"];
   private readonly makeRunId: () => string;
@@ -159,6 +188,18 @@ export class PipelineController {
       factory: options.createSessionFactory(
         (runId) => this.createRootTools(runId),
         (runId) => this.requireRun(runId).definition,
+        (runId, role, token, value) =>
+          this.submitAuditReport(runId, role, token, value),
+        (runId, role, token) =>
+          this.registerAuditSessionToken(runId, role, token),
+        (runId, role) => {
+          const run = this.requireRun(runId);
+          return pipelineAuditSubmissionAllowed(
+            run.definition,
+            role,
+            Boolean(run.auditSegment),
+          );
+        },
       ),
       // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
       // intentionally do not apply to pipeline roots or children.
@@ -174,6 +215,36 @@ export class PipelineController {
   subscribe(listener: () => void) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  private registerAuditSessionToken(
+    runId: string,
+    role: string,
+    token: string,
+  ) {
+    const node = this.agentsFor(runId)
+      .filter((agent) => agent.role === role && agent.status === "starting")
+      .at(-1);
+    if (node) this.auditSessionTokens.set(token, node.id);
+  }
+
+  private submitAuditReport(
+    runId: string,
+    role: string,
+    token: string,
+    value: unknown,
+  ) {
+    const run = this.requireActiveRun(runId);
+    const segment = run.auditSegment;
+    if (!segment) throw new Error("No audit segment is active.");
+    const sessionId = this.auditSessionTokens.get(token);
+    const registeredRole = sessionId
+      ? segment.roleForSession(sessionId)
+      : undefined;
+    if (!sessionId || registeredRole !== role) {
+      throw new Error("Audit submission session is not registered.");
+    }
+    segment.submit(sessionId, value);
   }
 
   private notify() {
@@ -707,6 +778,28 @@ export class PipelineController {
     }
   }
 
+  private async auditCorrection(
+    run: MutableRun,
+    sessionId: string,
+    error: unknown,
+  ) {
+    const count = (this.auditCorrections.get(sessionId) ?? 0) + 1;
+    this.auditCorrections.set(sessionId, count);
+    if (count >= 4) {
+      this.failRun(
+        run,
+        error instanceof Error ? error.message : String(error),
+        true,
+      );
+      return;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    await this.tree.send(
+      sessionId,
+      `Your audit submission was rejected (correction ${count}/3): ${detail} Use pipeline_audit_submit with the complete strict report object, correcting the reported fields, then stop. Do not rerun other tracks.`,
+    );
+  }
+
   private async pumpAuditSegment(run: MutableRun) {
     const segment = run.auditSegment;
     if (
@@ -730,7 +823,15 @@ export class PipelineController {
         if (child.status === "error" || child.status === "cancelled") {
           throw new Error(`Audit track ${role} failed before a valid report.`);
         }
-        segment.accept(role, child.finalText, child.attempt);
+        try {
+          const submitted = segment.takeSubmission(id);
+          if (submitted !== undefined)
+            segment.acceptSubmitted(role, submitted, child.attempt);
+          else segment.accept(role, child.finalText, child.attempt);
+        } catch (error) {
+          await this.auditCorrection(run, id, error);
+          if (run.status !== "running" && run.status !== "starting") return;
+        }
       }
 
       const synthesisId = segment.synthesizerId;
@@ -743,7 +844,14 @@ export class PipelineController {
         segment.progress().reducerStatus === "busy" &&
         synthesizer.status === "idle"
       ) {
-        segment.settle(synthesizer.finalText);
+        try {
+          const submitted = segment.takeSubmission(synthesisId);
+          if (submitted !== undefined) segment.settleSubmitted(submitted);
+          else segment.settle(synthesizer.finalText);
+        } catch (error) {
+          await this.auditCorrection(run, synthesisId, error);
+          if (run.status !== "running" && run.status !== "starting") return;
+        }
       } else if (
         segment.progress().reducerStatus === "busy" &&
         (synthesizer.status === "error" || synthesizer.status === "cancelled")

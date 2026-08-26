@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -7,6 +8,11 @@ import {
   type ModelRegistry,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { defineTool } from "@earendil-works/pi-coding-agent";
+import {
+  AUDIT_SYNTHESIS_REPORT_SCHEMA,
+  auditTrackReportSchema,
+} from "./audit-segment.ts";
 import {
   bindChildSessionExtensions,
   childToolPolicy,
@@ -30,6 +36,7 @@ import {
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
   type PipelineDefinitionId,
+  type PipelineLunaAuditRole,
 } from "./domain.ts";
 import type {
   AgentNodeSpec,
@@ -45,6 +52,18 @@ interface PipelineSessionFactoryOptions {
   readonly parentTrusted: boolean;
   readonly rootTools: (runId: string) => ReadonlyArray<ToolDefinition>;
   readonly definitionForRun: (runId: string) => PipelineDefinitionId;
+  readonly auditSubmit?: (
+    runId: string,
+    role: string,
+    sessionToken: string,
+    value: unknown,
+  ) => void;
+  readonly auditSessionCreated?: (
+    runId: string,
+    role: string,
+    token: string,
+  ) => void;
+  readonly auditToolAllowed?: (runId: string, role: string) => boolean;
 }
 
 function textContent(message: Message) {
@@ -118,6 +137,40 @@ function lastAssistant(session: AgentSession) {
 
 export function pipelineThinkingLevel(model: string) {
   return model === LUNA_MODEL ? "medium" : "high";
+}
+
+function auditSubmissionRole(role: string) {
+  if (role === AUDIT_SYNTHESIS_ROLE) return role;
+  return PIPELINE_4_LUNA_AUDIT_ROLES.find((candidate) => candidate === role);
+}
+
+export function createPipelineAuditSubmitTool(
+  role: typeof AUDIT_SYNTHESIS_ROLE | PipelineLunaAuditRole,
+  submit: (value: unknown) => void,
+) {
+  return defineTool({
+    name: "pipeline_audit_submit",
+    label: "Submit Audit Report",
+    description:
+      "Submit the complete validated audit report to the host and stop this turn.",
+    parameters:
+      role === AUDIT_SYNTHESIS_ROLE
+        ? AUDIT_SYNTHESIS_REPORT_SCHEMA
+        : auditTrackReportSchema(role),
+    async execute(_toolCallId, params) {
+      submit(params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Audit report recorded. Stop this turn.",
+          },
+        ],
+        details: params,
+        terminate: true,
+      };
+    },
+  });
 }
 
 export function pipelineSessionToolPolicy(
@@ -251,10 +304,37 @@ export function createPipelineSessionFactory(
       });
       const isRoot = !spec.parentId;
       const definition = options.definitionForRun(spec.scopeId ?? "");
+      const submissionRole = auditSubmissionRole(spec.role);
+      const auditToolAllowed =
+        submissionRole &&
+        options.auditSubmit &&
+        options.auditToolAllowed?.(spec.scopeId ?? "", spec.role);
+      const auditSessionToken = auditToolAllowed ? randomUUID() : undefined;
+      if (auditSessionToken)
+        options.auditSessionCreated?.(
+          spec.scopeId ?? "",
+          spec.role,
+          auditSessionToken,
+        );
+      const auditTool =
+        auditToolAllowed && auditSessionToken && submissionRole
+          ? createPipelineAuditSubmitTool(submissionRole, (value) =>
+              options.auditSubmit!(
+                spec.scopeId ?? "",
+                spec.role,
+                auditSessionToken,
+                value,
+              ),
+            )
+          : undefined;
       const customTools =
         isRoot && definition !== AUDIT_PIPELINE_ID
           ? options.rootTools(spec.scopeId ?? "")
           : undefined;
+      const sessionTools = [
+        ...(customTools ?? []),
+        ...(auditTool ? [auditTool] : []),
+      ];
       const { session } = await createAgentSession({
         cwd: spec.cwd,
         model,
@@ -262,7 +342,7 @@ export function createPipelineSessionFactory(
         sessionManager: SessionManager.create(spec.cwd),
         settingsManager: resources.settingsManager,
         resourceLoader: resources.loader,
-        ...(customTools ? { customTools: [...customTools] } : {}),
+        ...(sessionTools.length > 0 ? { customTools: sessionTools } : {}),
         ...pipelineSessionToolPolicy(definition, isRoot, spec.role),
       });
       try {

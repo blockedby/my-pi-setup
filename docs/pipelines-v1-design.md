@@ -25,7 +25,7 @@ Pipeline graphs predeclare their roots and children and therefore do not consume
    - functional correctness, contracts, integrations, tests, edge cases, and data handling;
    - reliability, retries, partial success, stale state, concurrency, and regressions;
 2. one persistent Luna/medium synthesis session;
-3. strict bounded track, intermediate synthesis, and final synthesis contracts;
+3. strict bounded track, intermediate synthesis, and final synthesis contracts, exposed to audit sessions through the typed `pipeline_audit_submit` tool;
 4. provenance records containing role, attempt, report digest, and validated report data;
 5. a privacy-safe progress projection.
 
@@ -52,7 +52,7 @@ The reducer owns:
 
 When the first valid report settles, the controller immediately starts the deferred synthesis session. Reports arriving during an active turn enter the pending queue. The controller never steers or interrupts a busy synthesis session; embedded roots cannot cancel segment tracks or synthesis individually, while whole-run/session lifecycle cancellation remains authoritative. When that session becomes safely idle, all pending reports are sent as one next revision. Each role appears in one batch exactly once. A synthesis output is validated as final only when its turn integrates the complete expected set; intermediate output can update inspection state but can never deliver the automatic completion handoff.
 
-A malformed, oversized, missing, failed, or cancelled track report fails the segment. A malformed synthesis revision or invalid final report also fails it. Standalone completion requires all four validated reports, all four integrations, and one valid final report. Embedded final-audit advancement to `final-resolve` has the same gate.
+Audit sessions call `pipeline_audit_submit` during their turn; the host consumes each recorded submission only after that same turn settles, while validated final text remains a compatibility fallback. A malformed or missing settled submission gets three correction turns in that same concrete session; the fourth fails the run and cancels remaining sessions. Track counters are independent, while the single persistent synthesizer counter is cumulative across reducer revisions and batches. Provider failure or cancellation still fails immediately. Dynamic host checks remain authoritative for roles, revision-integrated order, Git identity, and closure references. Standalone completion requires all four validated reports, all four integrations, and one valid final report. Embedded final-audit advancement to `final-resolve` has the same gate.
 
 ## Initial and closure audit contracts
 
