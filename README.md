@@ -18,14 +18,14 @@ Included resources:
 
 ## Agents
 
-| Agent/profile    | Short purpose                              |
-| ---------------- | ------------------------------------------ |
-| Pi subagent      | General delegated Pi task                  |
-| `luna-explore`   | Read-only exploration with Luna at max reasoning |
-| `luna-worker`    | Scoped implementation and testing with Luna at max reasoning |
-| `terra-audit`    | Prompt-guided read-only audit with Terra    |
-| Claude subagent  | General delegated Claude task              |
-| Codex subagent   | General delegated Codex task               |
+| Agent/profile   | Short purpose                                                |
+| --------------- | ------------------------------------------------------------ |
+| Pi subagent     | General delegated Pi task                                    |
+| `luna-explore`  | Read-only exploration with Luna at max reasoning             |
+| `luna-worker`   | Scoped implementation and testing with Luna at max reasoning |
+| `terra-audit`   | Prompt-guided read-only audit with Terra                     |
+| Claude subagent | General delegated Claude task                                |
+| Codex subagent  | General delegated Codex task                                 |
 
 ## Skills
 
@@ -75,6 +75,8 @@ Select the planning-only pipeline explicitly when the desired artifact is an imp
 ```
 
 Unknown definition names are rejected; this is not a raw-workflow API. `/pipelines` always shows all three definitions and nests each session-scoped run beneath the selected definition, with transcript/takeover, steer, and cancel controls.
+
+The main agent can use `pipeline_list({})` to list its session-scoped runs newest-first and `pipeline_check({ "id": "pipeline-1" })` for a synchronous, nonblocking snapshot of one run. Checks show bounded stage progress, status counts, every root/child attempt, active model-visible previews, and an open tool name without exposing prompts, thinking, tool data, raw report/completion collections, or session paths. Completed runs show only compact completion counts and an optional plan path. These tools are unavailable inside pipeline agents, direct subagents, and workflow children. They are for occasional inspection, not polling: completion still arrives automatically as a follow-up handoff, while full transcripts and controls remain in `/pipelines`.
 
 Automatic routing uses `small-feature-pipeline` for bounded, well-specified implementation work that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Broader nontrivial feature work that needs discovery and multi-concern audit uses `feature-pipeline`. `plan-pipeline` is selected only when the requested deliverable is a durable audited plan, task breakdown, dependency waves, or test/release plan and the goal has a complexity signal: multiple frontend/backend/data/DevOps/runtime layers; migration, rollout, rollback, operational-readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies that require repository discovery. Explicit pipeline selection overrides automatic routing. Bugs, refactors, research-only work, and trivial edits use no pipeline; a small feature is bounded work that still benefits from independent audit, not a synonym for a trivial edit. The main agent asks when plan versus implementation is ambiguous.
 
