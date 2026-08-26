@@ -67,6 +67,7 @@ process.stdout.write(JSON.stringify({
   sessionDir: process.env.PI_CODING_AGENT_SESSION_DIR,
   pipiAgentDir: process.env.PIPI_CODING_AGENT_DIR,
   pipiSessionDir: process.env.PIPI_CODING_AGENT_SESSION_DIR,
+  herdrAgent: process.env.HERDR_AGENT,
   codex,
   args: process.argv.slice(2),
 }));
@@ -126,12 +127,15 @@ if (args[0] === "install") {
   );
 
   const herdrLog = join(home, "herdr-install.jsonl");
-  const env = {
-    ...process.env,
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("HERDR_")) delete env[key];
+  }
+  Object.assign(env, {
     HOME: home,
     HERDR_TEST_LOG: herdrLog,
     PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`,
-  };
+  });
 
   return {
     home,
@@ -334,6 +338,30 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     readFileSync(join(regularAgentDir, "mcp.json"), "utf8"),
     regularMcp,
   );
+});
+
+test("launcher scopes the Pi process hint to Herdr panes", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const result = install(fixture);
+  assert.equal(result.status, 0, result.stderr);
+  const launcherPath = join(fixture.home, ".local", "bin", "pipi");
+  const outsideHerdr = JSON.parse(
+    execFileSync(launcherPath, [], {
+      env: fixture.env,
+      encoding: "utf8",
+    }),
+  );
+  assert.equal("herdrAgent" in outsideHerdr, false);
+
+  const insideHerdr = JSON.parse(
+    execFileSync(launcherPath, [], {
+      env: { ...fixture.env, HERDR_ENV: "1" },
+      encoding: "utf8",
+    }),
+  );
+  assert.equal(insideHerdr.herdrAgent, "pi");
 });
 
 test("install adds the official Pi integration when Herdr is available", async (t) => {
