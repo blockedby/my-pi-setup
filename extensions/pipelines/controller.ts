@@ -225,7 +225,7 @@ export class PipelineController {
         role: "pipeline-root",
         attempt: 1,
         title: definitionFor(run.definition).rootTitle,
-        model: SOL_MODEL,
+        model: definitionFor(run.definition).rootModel,
         cwd: run.request.workingDir,
         prompt: buildPipelinePrompt(run.definition, run.request),
         persistent: true,

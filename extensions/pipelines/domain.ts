@@ -157,6 +157,7 @@ export interface PipelineDefinition {
   readonly id: PipelineDefinitionId;
   readonly title: string;
   readonly rootTitle: string;
+  readonly rootModel: typeof SOL_MODEL | typeof LUNA_MODEL;
   readonly childRoles: ReadonlyArray<PipelineChildRole>;
 }
 
@@ -165,18 +166,21 @@ export const PIPELINE_DEFINITIONS: ReadonlyArray<PipelineDefinition> = [
     id: FEATURE_PIPELINE_ID,
     title: "Feature pipeline",
     rootTitle: "Feature pipeline Sol",
+    rootModel: SOL_MODEL,
     childRoles: FEATURE_PIPELINE_CHILD_ROLES,
   },
   {
     id: SMALL_FEATURE_PIPELINE_ID,
     title: "Small feature pipeline",
-    rootTitle: "Small feature pipeline Sol",
+    rootTitle: "Small feature pipeline Luna",
+    rootModel: LUNA_MODEL,
     childRoles: SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   },
   {
     id: PLAN_PIPELINE_ID,
     title: "Plan pipeline",
     rootTitle: "Plan pipeline Sol",
+    rootModel: SOL_MODEL,
     childRoles: PLAN_PIPELINE_CHILD_ROLES,
   },
 ];

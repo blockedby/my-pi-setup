@@ -5,7 +5,7 @@ Pipi installs the creator's Pi extensions, skills, workflows, GitHub Dark Defaul
 Included resources:
 
 - Codex, Claude, and Pi subagents, including Luna exploration and Terra audit profiles
-- three built-in hardcoded pipelines: `small-feature-pipeline` for bounded Luna implementation/audit/remediation, `feature-pipeline` for broader implementation, and `plan-pipeline` for durable audited implementation plans, all with persistent Sol orchestration and nested `/pipelines` control
+- three built-in hardcoded pipelines: `small-feature-pipeline` for bounded Luna implementation/audit/remediation, `feature-pipeline` for broader implementation, and `plan-pipeline` for durable audited implementation plans, with fixed persistent orchestration and nested `/pipelines` control
 - background terminals and workflows
 - `fd` file discovery and `rg` content search
 - summaries, Git/model status UI, ask-user, and copy-all tools
@@ -44,7 +44,7 @@ No extra web-search service key or environment file is required. Pipi does not c
 
 ## Pipelines
 
-A pipeline keeps one big task from turning into one giant, opaque prompt. Sol drives a fixed route, Luna explores, builds, or checks focused concerns, and the broader pipelines add an independent Terra final audit—so implementation, review, and fixes happen in clear stages.
+A pipeline keeps one big task from turning into one giant, opaque prompt. A persistent Luna or Sol drives a fixed route, Luna explores, builds, or checks focused concerns, and the broader pipelines add an independent Terra final audit—so implementation, review, and fixes happen in clear stages.
 
 Use `small-feature-pipeline` for a focused build → audit → fix cycle, `feature-pipeline` for broader work with parallel discovery and review, and `plan-pipeline` when you need an audited plan instead of code. Open `/pipelines` for a compact live view: `Enter` expands a run or opens the agent handling a stage, and green/yellow/red status shows how it is going at a glance.
 
@@ -82,10 +82,10 @@ Automatic routing uses `small-feature-pipeline` for bounded, well-specified impl
 
 Implementation pipeline audits receive host-collected, read-only Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start. In `feature-pipeline`, every Luna audit receives the captured base and current status/diff, while Terra receives a fresh snapshot after Luna remediation without receiving prior Luna findings. The same four Luna audit roles receive captured-base evidence plus the implementation report in `small-feature-pipeline`; untracked paths remain visible through status and can be inspected with read-only file tools.
 
-`small-feature-pipeline` runs this fixed graph. Sol and all audit children are read-only; the persistent Luna session owns both implementation and remediation. All four audits run in parallel, and there is no re-audit after Luna fixes:
+`small-feature-pipeline` runs this fixed graph. Its Luna coordinator and all audit children are read-only; the persistent Luna implementer session owns both implementation and remediation. All four audits run in parallel, and there is no re-audit after Luna fixes:
 
 ```text
-Persistent Sol/high root
+Persistent read-only Luna/medium root
   ├─ one persistent Luna/medium implementer
   ├─ four parallel read-only Luna/medium audit tracks
   ├─ the same implementer session fixes or resolves all findings

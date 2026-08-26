@@ -32,7 +32,7 @@ If a Discover or Luna Audit child fails, use pipeline_child_send to retry that s
 }
 
 export function buildSmallFeaturePipelinePrompt(request: PipelineRunRequest) {
-  return `You are the persistent Sol/high orchestrator for one small-feature-pipeline run.
+  return `You are the persistent Luna/medium orchestrator for one small-feature-pipeline run.
 
 Task:
 ${request.task}
@@ -46,7 +46,7 @@ Run only this fixed graph. Do not implement, edit files, commit, push, invoke an
 3. Send all four complete audit reports to the existing implement-small-feature child with pipeline_child_send. Instruct that same Luna session to fix every actionable finding or reject it with specific evidence, rerun appropriate checks, and return a fresh structured implementation report. Do not spawn a replacement or second implementer. Wait for that same child. Successful fan-in enters complete.
 4. Call pipeline_complete with factual structured facts only. Include changed paths, checks/evidence, assumptions, Git observations, all report summaries or references, unresolved items, and the exact working_dir. Do not state READY or make the main agent's Git/merge decision.
 
-There is no discovery fan-out, Sol implementation, Terra audit, audit-child retry/replacement, or audit after Luna remediation. If any child fails or violates its report contract, complete as failed rather than changing the graph. The host enforces role cardinality, four-report fan-in, stages, same-session remediation, report contracts, and read-only boundaries for Sol and audit children.`;
+There is no discovery fan-out, root implementation, Terra audit, audit-child retry/replacement, or audit after Luna remediation. If any child fails or violates its report contract, complete as failed rather than changing the graph. The host enforces role cardinality, four-report fan-in, stages, same-session remediation, report contracts, and read-only boundaries for the Luna root and audit children.`;
 }
 
 export function buildPlanPipelinePrompt(request: PipelineRunRequest) {

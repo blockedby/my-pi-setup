@@ -12,7 +12,7 @@ import type {
 } from "../shared/agent-tree/domain.ts";
 import { PipelineController } from "./controller.ts";
 import { inspectPipeline, PIPELINE_CHECK_MAX_BYTES } from "./inspection.ts";
-import { pipelineSessionToolPolicy } from "./session.ts";
+import { pipelineSessionToolPolicy, pipelineThinkingLevel } from "./session.ts";
 import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
   PIPELINE_4_LUNA_AUDIT_ROLES,
@@ -367,7 +367,7 @@ test("definition role policies centralize child context requirements", () => {
   );
 });
 
-test("small-feature Sol and audit Lunas are read-only while the implementer keeps coding tools", () => {
+test("small-feature Luna root and audit Lunas are read-only while the implementer keeps coding tools", () => {
   const rootDenied = new Set<string>(
     pipelineSessionToolPolicy("small-feature-pipeline", true, "pipeline-root")
       .excludeTools,
@@ -432,6 +432,8 @@ test("roles select fixed models, remain direct root children, and record attempt
   assert.equal(retry.attempt, 2);
   assert.equal(terra.attempt, 1);
   assert.equal(run.controller.get(runId)?.agents[0]?.model, SOL_MODEL);
+  assert.equal(pipelineThinkingLevel(SOL_MODEL), "high");
+  assert.equal(pipelineThinkingLevel(TERRA_MODEL), "high");
   await assert.rejects(
     run.controller.spawnChild(runId, "not-a-role" as PipelineChildRole),
     /Unsupported feature-pipeline child role/,
@@ -534,7 +536,12 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
 
   const initial = run.controller.get(runId);
   assert.equal(initial?.stage, "build");
-  assert.equal(initial?.agents[0]?.title, "Small feature pipeline Sol");
+  assert.equal(initial?.agents[0]?.title, "Small feature pipeline Luna");
+  assert.equal(initial?.agents[0]?.model, LUNA_MODEL);
+  assert.equal(
+    pipelineThinkingLevel(initial?.agents[0]?.model ?? ""),
+    "medium",
+  );
   assert.deepEqual(SMALL_FEATURE_PIPELINE_CHILD_ROLES, [
     SMALL_FEATURE_IMPLEMENTER_ROLE,
     ...PIPELINE_4_LUNA_AUDIT_ROLES,
