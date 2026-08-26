@@ -113,6 +113,8 @@ test("child denylist keeps extension and workflow structured tools available", a
         "workflow",
         "ask_user",
         "pipeline_run",
+        "pipeline_check",
+        "pipeline_list",
         "pipeline_stage",
         "pipeline_child_spawn",
         "pipeline_child_list",
@@ -168,7 +170,13 @@ test("pipeline root policy denies outer orchestration but keeps run-scoped tools
       settingsManager,
       extensionFactories: [
         (pi) => {
-          for (const name of ["subagent_spawn", "workflow", "pipeline_run"]) {
+          for (const name of [
+            "subagent_spawn",
+            "workflow",
+            "pipeline_run",
+            "pipeline_check",
+            "pipeline_list",
+          ]) {
             pi.registerTool({
               name,
               label: name,
@@ -211,6 +219,8 @@ test("pipeline root policy denies outer orchestration but keeps run-scoped tools
     assert.equal(active.has("subagent_spawn"), false);
     assert.equal(active.has("workflow"), false);
     assert.equal(active.has("pipeline_run"), false);
+    assert.equal(active.has("pipeline_check"), false);
+    assert.equal(active.has("pipeline_list"), false);
     await shutdownAndDisposeChildSession(session);
   });
 });
@@ -243,6 +253,11 @@ test("small-feature policies isolate read-only roles and keep Luna workspace too
   }
   assert.equal(rootDenied.has("pipeline_child_spawn"), false);
   assert.equal(auditorDenied.has("pipeline_child_spawn"), true);
+  for (const mainOnlyTool of ["pipeline_check", "pipeline_list"]) {
+    assert.equal(rootDenied.has(mainOnlyTool), true);
+    assert.equal(auditorDenied.has(mainOnlyTool), true);
+    assert.equal(implementerDenied.has(mainOnlyTool), true);
+  }
 });
 
 test("plan pipeline policies deny mutators and keep bounded root plan tools", () => {
@@ -267,6 +282,10 @@ test("plan pipeline policies deny mutators and keep bounded root plan tools", ()
   assert.equal(rootDenied.has("pipeline_plan_write"), false);
   assert.equal(childDenied.has("pipeline_plan_write"), true);
   assert.equal(childDenied.has("pipeline_child_spawn"), true);
+  for (const mainOnlyTool of ["pipeline_check", "pipeline_list"]) {
+    assert.equal(rootDenied.has(mainOnlyTool), true);
+    assert.equal(childDenied.has(mainOnlyTool), true);
+  }
 });
 
 test("resource loading gates project extensions but retains global extensions", async () => {

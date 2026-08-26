@@ -11,6 +11,7 @@ import type {
   AgentTreeSessionEvent,
 } from "../shared/agent-tree/domain.ts";
 import { PipelineController } from "./controller.ts";
+import { inspectPipeline, PIPELINE_CHECK_MAX_BYTES } from "./inspection.ts";
 import { pipelineSessionToolPolicy } from "./session.ts";
 import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
@@ -332,6 +333,8 @@ test("root tools are run-scoped and children have coding tools without orchestra
   ]);
   for (const forbidden of [
     "pipeline_run",
+    "pipeline_check",
+    "pipeline_list",
     "pipeline_child_spawn",
     "workflow",
     "subagent_spawn",
@@ -402,6 +405,11 @@ test("small-feature Sol and audit Lunas are read-only while the implementer keep
   assert.equal(rootDenied.has("pipeline_child_spawn"), false);
   assert.equal(implementerDenied.has("pipeline_child_spawn"), true);
   assert.equal(auditorDenied.has("pipeline_child_spawn"), true);
+  for (const mainOnlyTool of ["pipeline_check", "pipeline_list"]) {
+    assert.equal(rootDenied.has(mainOnlyTool), true);
+    assert.equal(implementerDenied.has(mainOnlyTool), true);
+    assert.equal(auditorDenied.has(mainOnlyTool), true);
+  }
 });
 
 test("roles select fixed models, remain direct root children, and record attempts", async () => {
@@ -1184,6 +1192,66 @@ test("plan completion requires and validates a repository-local plan artifact", 
 
   await run.controller.dispose();
   fs.rmSync(workingDir, { recursive: true, force: true });
+});
+
+test("pipeline inspection does not mutate lifecycle state or consume the automatic handoff", async () => {
+  const run = harness();
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  const facts = {
+    outcome: "Feature behavior implemented",
+    changedPaths: ["src/feature.ts"],
+    checks: ["focused test passed"],
+    assumptions: [],
+    git: [],
+    reports: [],
+    unresolvedItems: [],
+    workingDir: "/tmp/work",
+  };
+  run.controller.complete(runId, facts);
+  await settleInitialization();
+  const before = structuredClone(run.controller.get(runId));
+  assert.equal(run.handoffs.length, 1);
+
+  const inspected = inspectPipeline(run.controller, runId, 123_456);
+
+  assert.equal(inspected.details.pipeline.id, runId);
+  assert.deepEqual(run.controller.get(runId), before);
+  assert.equal(run.handoffs.length, 1);
+  assert.deepEqual(run.handoffs[0]?.facts, facts);
+  await run.controller.dispose();
+});
+
+test("pipeline inspection compactly represents every controller-reachable settled attempt", async () => {
+  const run = harness();
+  const runId = run.controller.start(request());
+  await settleInitialization();
+
+  for (let attempt = 1; attempt <= 300; attempt++) {
+    await run.controller.spawnChild(runId, "discover-problem");
+    const session = run.sessions.at(-1);
+    assert.ok(session);
+    session.emit({
+      type: "settled",
+      outcome: {
+        type: "completed",
+        finalText: reportForRole("discover-problem"),
+      },
+    });
+  }
+
+  const inspected = inspectPipeline(run.controller, runId, 123_456);
+  const text = inspected.content[0]?.text ?? "";
+  assert.equal(inspected.details.pipeline.agents.length, 301);
+  assert.equal(inspected.details.pipeline.agents[0]?.id, "node-1");
+  assert.equal(inspected.details.pipeline.agents.at(-1)?.id, "node-301");
+  assert.ok(Buffer.byteLength(text, "utf8") <= PIPELINE_CHECK_MAX_BYTES);
+  assert.match(
+    text,
+    /discover-problem · attempts 1–300 .* · done · 300 agents/,
+  );
+  assert.match(text, /- node-1 · pipeline-root/);
+  await run.controller.dispose();
 });
 
 test("unknown IDs fail closed and cancellation/disposal stop active sessions", async () => {

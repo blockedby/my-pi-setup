@@ -1,11 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
-import {
+import pipelinesExtension, {
   PIPELINE_RUN_PARAMETERS,
   resolvePipelineDefinition,
   resolvePipelineWorkingDir,
 } from "./index.ts";
+
+test("pipeline extension registers run plus main-agent check/list without status/wait aliases", () => {
+  const tools: string[] = [];
+  const api = {
+    on: () => {},
+    registerTool: (tool: { name: string }) => tools.push(tool.name),
+    registerMessageRenderer: () => {},
+    registerCommand: () => {},
+  } as unknown as ExtensionAPI;
+
+  pipelinesExtension(api);
+
+  assert.deepEqual(tools, ["pipeline_run", "pipeline_check", "pipeline_list"]);
+  assert.equal(tools.includes("pipeline_status"), false);
+  assert.equal(tools.includes("pipeline_wait"), false);
+});
 
 test("pipeline_run accepts a task with an optional working directory", () => {
   assert.equal(
