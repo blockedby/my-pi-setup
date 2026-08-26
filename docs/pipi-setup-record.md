@@ -925,3 +925,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Post-rebase verification:** Fresh checks passed 30/30 installer tests, 187/187 deterministic extension tests, 22/22 file-search tests, exact submodule validation, aligned Pipi 0.84.3 metadata, TypeScript, formatting, and `git diff --check`.
 - **Publish:** Committed the post-rebase evidence and force-pushed the rebased branch with lease; PR #29 now targets current `main` with a clean worktree and the verified graph implementation.
 - **Pending:** Review PR #29. Do not merge or install unless separately requested.
+
+## Operation entry: explain small-pipeline Git evidence collection
+
+- **Request:** Explain how the programmatic Git tools added for `small-feature-pipeline` work.
+- **Action:** Clarified that the change adds internal host-side read-only Git evidence collection rather than a new public agent tool. At run start the controller captures `git rev-parse HEAD` as the review base. Before Terra starts, it collects bounded `git status --short --branch` and `git diff --no-ext-diff --no-color <captured-base> --`, then injects the base identity, `WORKTREE` head label, status, diff, and Luna's implementation report into Terra's context. Failures degrade to explicit unavailable evidence without mutating Git or aborting startup. Terra remains denied shell/edit/write/MCP/delegated mutation tools and can inspect reported or untracked paths with read-only repository tools.
+- **Affected paths or values:** This operation record only. PR #29 source, Git state, installed Pipi state, credentials, model overrides, dependencies, and submodule pins are unchanged.
+- **Verification:** Compared the explanation against `extensions/pipelines/controller.ts`, `session.ts`, and the deterministic captured-base/diff and tool-policy regressions in `controller.test.ts`. The implementation exposes no small-feature `git add`, commit, reset, checkout, merge, rebase, or push operation; the existing bounded `pipeline_git_status` tool remains specific to `plan-pipeline` roots.
+- **Pending:** Review PR #29. No merge, install, or live pipeline run was requested.
