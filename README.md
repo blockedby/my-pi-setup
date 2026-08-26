@@ -1,6 +1,6 @@
 # Pipi: an isolated Pi setup
 
-Pipi installs the creator's Pi extensions, skills, workflows, GitHub Dark Default theme, and a pinned Pi runtime beside regular `pi`. It keeps its runtime, settings, and sessions under `~/.pipi` without replacing or modifying regular Pi. When the [official Herdr](https://github.com/herdrdev/herdr) CLI is available, the installer adds Herdr's official Pi integration so branded Pipi panes remain visible in its Agents list.
+Pipi installs the creator's Pi extensions, skills, workflows, GitHub Dark Default theme, and a pinned Pi runtime beside regular `pi`. It keeps its runtime, settings, and sessions under `~/.pipi` without replacing or modifying regular Pi. When the [official Herdr](https://github.com/herdrdev/herdr) CLI is available, the installer adds Herdr's official Pi integration and the launcher applies its scoped Pi process hint so branded Pipi panes remain visible in the Agents list.
 
 Included resources:
 

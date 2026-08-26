@@ -108,6 +108,14 @@ for (const variable of [
     throw new Error(`Pipi launcher does not export ${variable}.`);
   }
 }
+if (
+  !launcherSource.includes('[ "${HERDR_ENV:-}" = "1" ]') ||
+  !launcherSource.includes("export HERDR_AGENT=pi")
+) {
+  throw new Error(
+    "Pipi launcher does not scope the Pi detection hint to Herdr.",
+  );
+}
 const launcherVersion = execFileSync(launcher, ["--version"], {
   encoding: "utf8",
 }).trim();
