@@ -67,6 +67,21 @@ Feature input
 - The prompt owns graph sequencing and the one-retry policy. The host owns session lifecycle, role/model boundaries, hierarchy, subscriptions, cancellation, model admission, and bounded state.
 - Shared `agent-tree` infrastructure models root/children/attempts and supplies transcript, steer, cancel, and takeover behavior. Pipeline-specific graph/state and `/pipelines` composition stay in the pipelines extension.
 
+## Planned parent inspection tools
+
+Pipelines should preserve the established direct-subagent inspection semantics instead of introducing a differently shaped `pipeline_status` tool:
+
+- `pipeline_check({ id })` is the nonblocking, read-only analogue of `subagent_check`. It inspects exactly one session-scoped pipeline run and never waits for, cancels, steers, or consumes its eventual handoff. An unknown ID fails clearly and includes the currently known run IDs.
+- `pipeline_list({})` is the analogue of `subagent_list`. It lists every pipeline run still tracked by the current main session in newest-first order. If no controller or runs exist, it returns `No pipelines.` without starting a run.
+
+`pipeline_check` text reports the run ID, selected definition, run status, current stage and definition-relative stage progress, elapsed time, working directory, root status, agent-status counts, and a compact role/attempt/model/status line for each root or child. It includes bounded run/agent errors and, after settlement, only a compact completion summary such as plan path and changed/check/unresolved counts. The full completion facts remain in the automatic handoff, and full transcripts remain in `/pipelines`.
+
+Structured details use an explicit projection rather than returning `PipelineRunSnapshot` directly. Run details may include IDs, definition, stage/status, timestamps, working directory, per-status counts, and compact agent identity/status metadata. They must exclude the original task/prompt, transcripts, live assistant text or thinking, final model output, session-file paths, active tool names, raw reports, Git evidence, and unbounded completion arrays. `pipeline_list` details contain only compact run summaries: ID, definition, stage/status, timestamps, and working directory.
+
+Both tools are main-agent inspection capabilities. Pipeline Sol roots, Luna/Terra children, ordinary direct subagents, and workflow children must not receive them. Model guidance permits a single check when progress is relevant but prohibits polling or using either tool as a wait primitive; completion continues to arrive automatically as a factual follow-up. There is no `pipeline_wait`, and `/pipelines` remains the human transcript, takeover, steer, and cancellation surface.
+
+Implementation should keep projection/formatting helpers pure and cover observable contracts: exact parameter schemas, empty/list/detail/error behavior, stage progress for all definitions, all run and agent statuses, bounded text, exclusion of sensitive/heavy snapshot fields, no lifecycle mutation or handoff consumption, and child-session tool-policy denial. Tests must not assert exact model-facing prose.
+
 ## Completion handoff
 
 `pipeline_complete` emits facts, not a readiness label. Its structured handoff includes the selected definition, outcome, changed paths, checks/evidence, commits or observed Git state when applicable, discovery/audit report references or summaries, unresolved items, and the working directory. A completed `plan-pipeline` run additionally requires a validated repository-local `docs/plans/*.md` plan path. The main agent alone decides readiness and subsequent Git/PR actions.
