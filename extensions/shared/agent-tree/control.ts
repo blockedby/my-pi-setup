@@ -22,6 +22,7 @@ interface MutableNode {
   model: string;
   cwd: string;
   persistent: boolean;
+  deferredPrompt: boolean;
   status: AgentNodeSnapshot["status"];
   createdAt: number;
   settledAt?: number;
@@ -43,6 +44,7 @@ interface Entry {
 
 export interface AgentTreeControllerOptions {
   readonly factory: AgentTreeSessionFactory;
+  /** Capacity is a direct-subagent concern; pipeline controllers must omit it. */
   readonly capacity?: Readonly<Record<string, number>>;
   readonly makeId?: () => string;
 }
@@ -206,6 +208,7 @@ export class AgentTreeController {
       model: spec.model,
       cwd: spec.cwd,
       persistent: spec.persistent ?? false,
+      deferredPrompt: spec.deferPrompt ?? false,
       status: "starting",
       createdAt: Date.now(),
       finalText: "",
@@ -236,18 +239,20 @@ export class AgentTreeController {
       entry.unsubscribe = session.subscribe((event) =>
         this.onEvent(entry, event),
       );
-      node.status = "running";
+      node.status = spec.deferPrompt ? "idle" : "running";
       this.notify(id);
-      void session.prompt(spec.prompt).catch((error) => {
-        if (node.status !== "starting" && node.status !== "running") return;
-        this.settle(entry, {
-          type: "settled",
-          outcome: {
-            type: "failed",
-            error: error instanceof Error ? error.message : String(error),
-          },
+      if (!spec.deferPrompt) {
+        void session.prompt(spec.prompt).catch((error) => {
+          if (node.status !== "starting" && node.status !== "running") return;
+          this.settle(entry, {
+            type: "settled",
+            outcome: {
+              type: "failed",
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
         });
-      });
+      }
       return node as AgentNodeSnapshot;
     } catch (error) {
       node.status = "error";
@@ -262,10 +267,28 @@ export class AgentTreeController {
     }
   }
 
+  async startDeferred(id: string, text: string) {
+    const entry = this.entries.get(id);
+    if (!entry?.session) throw new Error(`Unknown agent id "${id}".`);
+    if (!entry.node.deferredPrompt) {
+      throw new Error(`Agent "${id}" has no deferred prompt.`);
+    }
+    entry.node.deferredPrompt = false;
+    try {
+      await this.send(id, text);
+    } catch (error) {
+      entry.node.deferredPrompt = true;
+      throw error;
+    }
+  }
+
   async send(id: string, text: string) {
     if (!text.trim()) throw new Error("Steering text must not be empty.");
     const entry = this.entries.get(id);
     if (!entry?.session) throw new Error(`Unknown agent id "${id}".`);
+    if (entry.node.deferredPrompt) {
+      throw new Error(`Agent "${id}" is waiting for controller bootstrap.`);
+    }
     if (entry.node.status === "cancelled") {
       throw new Error(`Agent "${id}" was cancelled.`);
     }

@@ -41,6 +41,8 @@ export const FEATURE_PIPELINE_DISCOVERY_ROLES = [
   "discover-user-scenarios",
   "discover-product-precedents",
 ] as const;
+export type FeaturePipelineDiscoveryRole =
+  (typeof FEATURE_PIPELINE_DISCOVERY_ROLES)[number];
 
 export const FEATURE_OUTCOME_AUDIT_ROLE = "audit-feature-outcome" as const;
 export const FEATURE_LOGIC_AUDIT_ROLE = "audit-logic-invariants" as const;

@@ -6,6 +6,8 @@ import type {
   SubagentModelRegistry,
 } from "./domain.ts";
 
+// These quotas govern direct subagent admission only. Fixed pipeline graphs
+// must not import or apply them to pipeline roots or children.
 export const PI_MODEL_QUOTAS = {
   "openai-codex/gpt-5.6-sol": 4,
   "openai-codex/gpt-5.6-terra": 8,

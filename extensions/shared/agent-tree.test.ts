@@ -133,6 +133,37 @@ test("agent tree preserves parent, role, attempt, controls, and bounded transcri
   assert.equal(fake.created[1]!.session.disposed, 1);
 });
 
+test("deferred roots stay idle until their first programmatic send", async () => {
+  const fake = fakeFactory();
+  const tree = new AgentTreeController({ factory: fake.factory });
+  const root = await tree.spawn({
+    role: "root",
+    attempt: 1,
+    title: "root",
+    model: "sol",
+    cwd: "/tmp",
+    prompt: "unused initial prompt",
+    persistent: true,
+    deferPrompt: true,
+  });
+  const session = fake.created[0]!.session;
+
+  assert.equal(tree.view.get(root.id)?.status, "idle");
+  assert.deepEqual(session.prompts, []);
+  assert.deepEqual(session.sends, []);
+
+  await assert.rejects(
+    tree.send(root.id, "start too early"),
+    /waiting for controller bootstrap/,
+  );
+  await tree.startDeferred(root.id, "start after bootstrap");
+  assert.equal(tree.view.get(root.id)?.status, "running");
+  assert.deepEqual(session.prompts, []);
+  assert.deepEqual(session.sends, ["start after bootstrap"]);
+
+  await tree.dispose();
+});
+
 test("persistent roots become idle and accept additional remediation turns", async () => {
   const fake = fakeFactory();
   const tree = new AgentTreeController({ factory: fake.factory });

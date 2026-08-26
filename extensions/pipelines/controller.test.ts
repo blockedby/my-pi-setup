@@ -42,10 +42,16 @@ class FakePipelineSession implements AgentTreeSession {
 
   readonly activeTools: ReadonlyArray<string>;
   readonly spec: AgentNodeSpec;
+  readonly autoReport?: string;
 
-  constructor(activeTools: ReadonlyArray<string>, spec: AgentNodeSpec) {
+  constructor(
+    activeTools: ReadonlyArray<string>,
+    spec: AgentNodeSpec,
+    autoReport?: string,
+  ) {
     this.activeTools = activeTools;
     this.spec = spec;
+    this.autoReport = autoReport;
     this.sessionFile = `/tmp/${spec.scopeId}-${spec.role}-${spec.attempt}.jsonl`;
   }
 
@@ -63,6 +69,14 @@ class FakePipelineSession implements AgentTreeSession {
   async prompt(text: string) {
     this.prompts.push(text);
     this.isStreaming = true;
+    if (this.autoReport) {
+      queueMicrotask(() =>
+        this.emit({
+          type: "settled",
+          outcome: { type: "completed", finalText: this.autoReport! },
+        }),
+      );
+    }
   }
 
   async send(text: string) {
@@ -81,7 +95,12 @@ class FakePipelineSession implements AgentTreeSession {
   }
 }
 
-function harness(options: { rootGate?: Promise<void> } = {}) {
+function harness(
+  options: {
+    rootGate?: Promise<void>;
+    autoCompleteFeatureDiscovery?: boolean;
+  } = {},
+) {
   const sessions: FakePipelineSession[] = [];
   const handoffs: PipelineHandoff[] = [];
   let agentSequence = 0;
@@ -92,6 +111,7 @@ function harness(options: { rootGate?: Promise<void> } = {}) {
     makeAgentId: () => `node-${++agentSequence}`,
     createSessionFactory: (
       rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
+      definitionForRun,
     ) => ({
       async create(spec) {
         if (!spec.parentId && options.rootGate) await options.rootGate;
@@ -99,9 +119,17 @@ function harness(options: { rootGate?: Promise<void> } = {}) {
           ? rootTools(spec.scopeId ?? "").map((tool) => tool.name)
           : [];
         if (!spec.parentId) rootToolNames = orchestration;
+        const autoReport =
+          options.autoCompleteFeatureDiscovery !== false &&
+          spec.parentId &&
+          definitionForRun(spec.scopeId ?? "") === "feature-pipeline" &&
+          spec.role.startsWith("discover-")
+            ? reportForRole(spec.role)
+            : undefined;
         const session = new FakePipelineSession(
           ["read", "bash", "edit", "write", ...orchestration],
           spec,
+          autoReport,
         );
         sessions.push(session);
         return session;
@@ -264,9 +292,166 @@ test("start is fire-and-forget and multiple same-cwd runs are admitted", async (
   await settleInitialization();
   assert.equal(gated.controller.get(firstId)?.status, "running");
   assert.equal(gated.controller.get(secondId)?.status, "running");
-  assert.equal(gated.sessions.length, 2);
+  assert.equal(gated.sessions.length, 12);
+  assert.equal(
+    gated.sessions
+      .filter((session) => session.spec.role === "pipeline-root")
+      .every(
+        (session) => session.prompts.length === 0 && session.sends.length === 1,
+      ),
+    true,
+  );
 
   await gated.controller.dispose();
+});
+
+test("feature discovery runs programmatically before the deferred Sol prompt", async () => {
+  const run = harness({ autoCompleteFeatureDiscovery: false });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+
+  const before = run.controller.get(runId);
+  const root = run.sessions.find(
+    (session) => session.spec.role === "pipeline-root",
+  );
+  assert.equal(before?.status, "running");
+  assert.equal(before?.stage, "discover");
+  assert.equal(before?.agents[0]?.status, "idle");
+  assert.deepEqual(root?.prompts, []);
+  assert.deepEqual(root?.sends, []);
+  assert.deepEqual(
+    before?.agents.slice(1).map((agent) => agent.role),
+    [
+      "discover-problem",
+      "discover-outcome",
+      "discover-context",
+      "discover-user-scenarios",
+      "discover-product-precedents",
+    ],
+  );
+
+  for (const role of [
+    "discover-problem",
+    "discover-outcome",
+    "discover-context",
+    "discover-user-scenarios",
+    "discover-product-precedents",
+  ]) {
+    settleRole(run, role);
+  }
+  await settleInitialization();
+
+  const started = run.controller.get(runId);
+  assert.equal(started?.stage, "build");
+  assert.equal(started?.agents[0]?.status, "running");
+  assert.deepEqual(root?.prompts, []);
+  assert.equal(root?.sends.length, 1);
+  assert.match(root?.sends[0] ?? "", /host completed the Discover stage/);
+  assert.match(root?.sends[0] ?? "", /discover-product-precedents/);
+  assert.match(root?.sends[0] ?? "", /repository evidence/);
+  assert.throws(
+    () => run.controller.setStage(runId, "discover"),
+    /cannot return to controller-owned discovery after bootstrap/,
+  );
+  await assert.rejects(
+    run.controller.spawnChild(runId, "discover-problem"),
+    /controller-owned and unavailable to feature-pipeline Sol/,
+  );
+  const discovery = started?.agents.find(
+    (agent) => agent.role === "discover-problem",
+  );
+  assert.ok(discovery);
+  await assert.rejects(
+    run.controller.sendChild(runId, discovery.id, "Retry discovery"),
+    /controller-owned and unavailable to Sol/,
+  );
+
+  await run.controller.dispose();
+});
+
+test("programmatic feature discovery retries one malformed report in the same session", async () => {
+  const run = harness({ autoCompleteFeatureDiscovery: false });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+
+  for (const role of [
+    "discover-outcome",
+    "discover-context",
+    "discover-user-scenarios",
+    "discover-product-precedents",
+  ]) {
+    settleRole(run, role);
+  }
+  const problem = run.sessions.find(
+    (session) => session.spec.role === "discover-problem",
+  );
+  assert.ok(problem);
+  problem.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "not-json" },
+  });
+  await settleInitialization();
+
+  assert.equal(run.controller.get(runId)?.stage, "discover");
+  assert.equal(problem.sends.length, 1);
+  assert.match(problem.sends[0] ?? "", /Retry this same role once/);
+  problem.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: reportForRole("discover-problem"),
+    },
+  });
+  await settleInitialization();
+
+  assert.equal(run.controller.get(runId)?.stage, "build");
+  assert.equal(
+    run.sessions.find((session) => session.spec.role === "pipeline-root")?.sends
+      .length,
+    1,
+  );
+  await run.controller.dispose();
+});
+
+test("programmatic feature discovery fails closed after its one retry", async () => {
+  const run = harness({ autoCompleteFeatureDiscovery: false });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+
+  for (const role of [
+    "discover-outcome",
+    "discover-context",
+    "discover-user-scenarios",
+    "discover-product-precedents",
+  ]) {
+    settleRole(run, role);
+  }
+  const problem = run.sessions.find(
+    (session) => session.spec.role === "discover-problem",
+  );
+  assert.ok(problem);
+  problem.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "not-json" },
+  });
+  await settleInitialization();
+  problem.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "still-not-json" },
+  });
+  await settleInitialization();
+
+  assert.equal(run.controller.get(runId)?.status, "failed");
+  assert.match(
+    run.controller.get(runId)?.error ?? "",
+    /no valid discover-problem report/,
+  );
+  assert.equal(
+    run.sessions.find((session) => session.spec.role === "pipeline-root")?.sends
+      .length,
+    0,
+  );
+  await run.controller.dispose();
 });
 
 test("dashboard cancellation of a starting run prevents its root prompt", async () => {
@@ -310,7 +495,7 @@ test("root tools are run-scoped and children have coding tools without orchestra
   const runId = run.controller.start(request());
   await settleInitialization();
 
-  assert.equal(run.controller.get(runId)?.agents.length, 1);
+  assert.equal(run.controller.get(runId)?.agents.length, 6);
   assert.deepEqual(run.rootToolNames, [
     "pipeline_stage",
     "pipeline_child_spawn",
@@ -321,9 +506,8 @@ test("root tools are run-scoped and children have coding tools without orchestra
     "pipeline_child_cancel",
     "pipeline_complete",
   ]);
-  const child = await run.controller.spawnChild(runId, "discover-problem");
   const childSession = run.sessions.find(
-    (session) => session.spec.role === child.role,
+    (session) => session.spec.role === "discover-problem",
   );
   assert.deepEqual(childSession?.activeTools, [
     "read",
@@ -419,8 +603,10 @@ test("roles select fixed models, remain direct root children, and record attempt
   const rootId = run.controller.get(runId)?.rootId;
   assert.ok(rootId);
 
-  const first = await run.controller.spawnChild(runId, "discover-problem");
-  const retry = await run.controller.spawnChild(runId, "discover-problem");
+  run.controller.setStage(runId, "audit");
+  const first = await run.controller.spawnChild(runId, "audit-feature-outcome");
+  const retry = await run.controller.spawnChild(runId, "audit-feature-outcome");
+  run.controller.setStage(runId, "final-audit");
   const terra = await run.controller.spawnChild(runId, "final-audit");
   assert.equal(first.model, LUNA_MODEL);
   assert.equal(retry.model, LUNA_MODEL);
@@ -846,9 +1032,12 @@ test("small-feature-pipeline fails closed on a malformed Luna audit report", asy
 
 test("children run in parallel and wait returns reports in caller order", async () => {
   const run = harness();
-  const runId = run.controller.start(request());
+  const runId = run.controller.start({
+    ...request(),
+    pipeline: "plan-pipeline",
+  });
   await settleInitialization();
-  const roles = PIPELINE_CHILD_ROLES.slice(0, 5);
+  const roles = PLAN_PIPELINE_DISCOVERY_ROLES;
   const children = await Promise.all(
     roles.map((role) => run.controller.spawnChild(runId, role)),
   );
@@ -861,19 +1050,22 @@ test("children run in parallel and wait returns reports in caller order", async 
     runId,
     children.map((child) => child.id),
   );
-  for (const [index, child] of children.entries()) {
+  for (const child of children) {
     const session = run.sessions.find(
       (candidate) => candidate.spec.role === child.role,
     );
     session?.emit({
       type: "settled",
-      outcome: { type: "completed", finalText: `report-${index}` },
+      outcome: {
+        type: "completed",
+        finalText: reportForRole(child.role),
+      },
     });
   }
   const reports = await wait;
   assert.deepEqual(
-    reports.map((child) => child.finalText),
-    ["report-0", "report-1", "report-2", "report-3", "report-4"],
+    reports.map((child) => child.role),
+    [...roles],
   );
   assert.equal(run.controller.get(runId)?.stage, "build");
 
@@ -957,7 +1149,11 @@ test("a settled child can be retried in its existing session", async () => {
   const run = harness();
   const runId = run.controller.start(request());
   await settleInitialization();
-  const child = await run.controller.spawnChild(runId, "discover-problem");
+  run.controller.setStage(runId, "audit");
+  const child = await run.controller.spawnChild(
+    runId,
+    "audit-logic-invariants",
+  );
   const childSession = run.sessions.find(
     (session) => session.spec.role === child.role,
   );
@@ -977,7 +1173,8 @@ test("a settled child can be retried in its existing session", async () => {
   assert.equal(
     run.controller
       .get(runId)
-      ?.agents.filter((agent) => agent.role === "discover-problem").length,
+      ?.agents.filter((agent) => agent.role === "audit-logic-invariants")
+      .length,
     1,
   );
   assert.equal(run.controller.getAgent(runId, child.id).status, "running");
@@ -1034,7 +1231,8 @@ test("persistent Sol session survives idle remediation turns", async () => {
 
   run.controller.agentView.requestSend(rootId, "Resolve the audit reports");
   await settleInitialization();
-  assert.deepEqual(rootSession.sends, ["Resolve the audit reports"]);
+  assert.equal(rootSession.sends.length, 2);
+  assert.equal(rootSession.sends.at(-1), "Resolve the audit reports");
   assert.equal(
     run.sessions.filter((session) => !session.spec.parentId).length,
     1,
@@ -1234,28 +1432,29 @@ test("pipeline inspection compactly represents every controller-reachable settle
   const runId = run.controller.start(request());
   await settleInitialization();
 
+  run.controller.setStage(runId, "audit");
   for (let attempt = 1; attempt <= 300; attempt++) {
-    await run.controller.spawnChild(runId, "discover-problem");
+    await run.controller.spawnChild(runId, "audit-feature-outcome");
     const session = run.sessions.at(-1);
     assert.ok(session);
     session.emit({
       type: "settled",
       outcome: {
         type: "completed",
-        finalText: reportForRole("discover-problem"),
+        finalText: reportForRole("audit-feature-outcome"),
       },
     });
   }
 
   const inspected = inspectPipeline(run.controller, runId, 123_456);
   const text = inspected.content[0]?.text ?? "";
-  assert.equal(inspected.details.pipeline.agents.length, 301);
+  assert.equal(inspected.details.pipeline.agents.length, 306);
   assert.equal(inspected.details.pipeline.agents[0]?.id, "node-1");
-  assert.equal(inspected.details.pipeline.agents.at(-1)?.id, "node-301");
+  assert.equal(inspected.details.pipeline.agents.at(-1)?.id, "node-306");
   assert.ok(Buffer.byteLength(text, "utf8") <= PIPELINE_CHECK_MAX_BYTES);
   assert.match(
     text,
-    /discover-problem · attempts 1–300 .* · done · 300 agents/,
+    /audit-feature-outcome · attempts 1–300 .* · done · 300 agents/,
   );
   assert.match(text, /- node-1 · pipeline-root/);
   await run.controller.dispose();
@@ -1290,7 +1489,7 @@ test("unknown IDs fail closed and cancellation/disposal stop active sessions", a
   );
 });
 
-test("normal Sol capacity admission limits concurrent roots", async () => {
+test("pipeline roots and children do not apply direct-subagent capacity limits", async () => {
   let releaseRoot = () => {};
   const rootGate = new Promise<void>((resolve) => {
     releaseRoot = resolve;
@@ -1298,14 +1497,17 @@ test("normal Sol capacity admission limits concurrent roots", async () => {
   const run = harness({ rootGate });
   const ids = Array.from({ length: 5 }, () => run.controller.start(request()));
   await settleInitialization();
-  assert.equal(run.controller.get(ids[4]!)?.status, "failed");
-  assert.match(run.controller.get(ids[4]!)?.error ?? "", /Capacity.*max 4/);
+  assert.equal(
+    ids.every((id) => run.controller.get(id)?.status === "starting"),
+    true,
+  );
   releaseRoot();
   await settleInitialization();
   assert.equal(
-    ids.slice(0, 4).every((id) => run.controller.get(id)?.status === "running"),
+    ids.every((id) => run.controller.get(id)?.status === "running"),
     true,
   );
+  assert.equal(run.sessions.length, 30);
 
   await run.controller.dispose();
 });

@@ -97,6 +97,8 @@ export interface AgentNodeSpec {
   readonly cwd: string;
   readonly prompt: string;
   readonly persistent?: boolean;
+  /** Create and subscribe to the session without sending its first prompt yet. */
+  readonly deferPrompt?: boolean;
   /** Recheck after asynchronous session creation, immediately before prompt. */
   readonly shouldStart?: () => boolean;
 }
