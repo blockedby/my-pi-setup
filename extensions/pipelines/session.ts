@@ -22,6 +22,7 @@ import {
 } from "../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
 import {
+  LUNA_MODEL,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
@@ -110,6 +111,10 @@ function lastAssistant(session: AgentSession) {
     if (message.role === "assistant") return message;
   }
   return undefined;
+}
+
+export function pipelineThinkingLevel(model: string) {
+  return model === LUNA_MODEL ? "medium" : "high";
 }
 
 export function pipelineSessionToolPolicy(
@@ -241,11 +246,7 @@ export function createPipelineSessionFactory(
       const { session } = await createAgentSession({
         cwd: spec.cwd,
         model,
-        thinkingLevel: isRoot
-          ? "high"
-          : spec.model.includes("terra")
-            ? "high"
-            : "medium",
+        thinkingLevel: pipelineThinkingLevel(spec.model),
         sessionManager: SessionManager.create(spec.cwd),
         settingsManager: resources.settingsManager,
         resourceLoader: resources.loader,
