@@ -1035,7 +1035,8 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Post-remediation verification:** The fresh full deterministic suite passes 35/35 installer tests, 211/211 extension tests, and 22/22 file-search tests; focused checks remain 82/82, and TypeScript, formatting, exact submodule validation, and `git diff --check` pass.
 - **Closure review:** Canonical closure review returned `READY`, marked `REV-001` fixed, and found no remediation regression in the directly touched invariants. It confirmed post-bootstrap `discover` transitions, public discovery spawns, and discovery continuations are all rejected while only the private controller bootstrap path retains authority.
 - **Pull request:** Committed as `0188c2a`, pushed `feat/feature-programmatic-discovery`, and opened [PR #48](https://github.com/blockedby/my-pi-setup/pull/48) against current `main`; target preparation reported no rebase was needed.
-- **Pending:** User review of PR #48; do not merge, install, or reload until requested.
+- **Merge:** At the user's request, squash-merged [PR #48](https://github.com/blockedby/my-pi-setup/pull/48) as `2302727`, then synchronized primary `main` through the newer documentation-only `63810f0`. Removed the feature worktree/local branch after deinitializing its exact shared submodules and restored primary submodule registrations. Fresh merged-main focused checks pass 82/82, exact submodule validation and `git diff --check` pass, and direct-subagent quota behavior remains covered separately from unlimited fixed pipeline graphs. No install or reload was requested or run.
+- **Pending:** Reload or restart an existing Pipi session before using the merged programmatic feature discovery; no repository merge or installer action remains pending.
 
 ## Operation entry: research model-visible context budgets and deferred semantic compaction
 
