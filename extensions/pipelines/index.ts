@@ -205,13 +205,22 @@ export default function pipelines(pi: ExtensionAPI) {
     if (controller) return controller;
     let created: PipelineController;
     created = new PipelineController({
-      createSessionFactory: (rootTools, definitionForRun) =>
+      createSessionFactory: (
+        rootTools,
+        definitionForRun,
+        auditSubmit,
+        auditSessionCreated,
+        auditToolAllowed,
+      ) =>
         createPipelineSessionFactory({
           modelRegistry: ctx.modelRegistry,
           parentCwd: ctx.cwd,
           parentTrusted: ctx.isProjectTrusted(),
           rootTools,
           definitionForRun,
+          auditSubmit,
+          auditSessionCreated,
+          auditToolAllowed,
         }),
       onHandoff: deliver,
     });
