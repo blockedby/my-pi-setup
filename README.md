@@ -60,7 +60,8 @@ Select the bounded implementation pipeline for a clear, localized feature that b
 {
   "pipeline": "small-feature-pipeline",
   "task": "Add a focused export option with tests",
-  "working_dir": "/repo/worktree"
+  "working_dir": "/repo/worktree",
+  "git_commit": true
 }
 ```
 
@@ -96,7 +97,9 @@ The main agent can use `pipeline_list({})` to list its session-scoped runs newes
 
 Automatic routing uses `audit-pipeline` for routine repository initial or closure audits; direct `terra-audit` remains available only for explicit manual escalation. It uses `small-feature-pipeline` for bounded, well-specified implementation work that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Broader nontrivial feature work that needs discovery and multi-concern audit uses `feature-pipeline`. `plan-pipeline` is selected only when the requested deliverable is a durable audited plan, task breakdown, dependency waves, or test/release plan and the goal has a complexity signal: multiple frontend/backend/data/DevOps/runtime layers; migration, rollout, rollback, operational-readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies that require repository discovery. Explicit pipeline selection overrides automatic routing. Bug fixes, refactors, research-only work, and trivial edits do not use implementation/planning pipelines unless the requested outcome is explicitly a bounded audit; a small feature is bounded work that still benefits from independent audit, not a synonym for a trivial edit. The main agent asks when plan versus implementation is ambiguous.
 
-Pipeline audits receive host-collected, bounded, read-only Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start and resolves current head, branch, status, and base-relative diff with argument-array Git commands. `feature-pipeline` and `plan-pipeline` now reuse the same four-track Luna audit segment for final audit; `small-feature-pipeline` retains its existing implementation-report evidence and same-session remediation graph.
+Pipeline audits receive host-collected, bounded, read-only Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start and resolves current head, branch/status, base ancestry, bounded base-to-head commits, committed diff, dirty HEAD-to-worktree diff, and combined base-to-worktree diff with argument-array Git commands. Each item explicitly reports available, truncated, or unavailable evidence. `feature-pipeline`, `plan-pipeline`, `audit-pipeline`, and `small-feature-pipeline` reuse this evidence where their audit tracks apply.
+
+`git_commit` is optional and defaults to false. It is accepted only by `small-feature-pipeline`; true grants only the same persistent `implement-small-feature` Luna session permission to make ordinary commits in the supplied current branch. It never permits push, merge, rebase, reset/history rewriting, branch or worktree operations. The permission is authoritative and is never inferred from task prose; false leaves implementation changes uncommitted.
 
 `feature-pipeline` creates its persistent Sol session without sending a model prompt, then the controller launches and validates all five Luna discovery tracks programmatically. Failed or malformed discovery gets at most one controller-owned same-session retry. Only after complete fan-in does Sol receive its first message, containing the task and bounded discovery reports, and begin implementation from `build`. Pipeline roots and children are fixed by their graph and do not consume or enforce direct-subagent capacity quotas.
 

@@ -16,14 +16,23 @@ const AUDIT_SYNTHESIS_MAX_BYTES = 64 * 1024;
 const MAX_COLLECTION = 128;
 const MAX_TEXT = 16 * 1024;
 
+export interface AuditGitEvidence {
+  readonly state: "available" | "unavailable" | "truncated";
+  readonly value: string;
+}
+
 export interface AuditGitIdentity {
   readonly baseSha: string;
   readonly headSha: string;
   readonly worktreeLabel: "WORKTREE";
   readonly workingDir: string;
   readonly branch: string;
-  readonly status: string;
-  readonly diff: string;
+  readonly status: AuditGitEvidence;
+  readonly baseIsAncestor: "yes" | "no" | "unavailable";
+  readonly commits: AuditGitEvidence;
+  readonly committedDiff: AuditGitEvidence;
+  readonly dirtyDiff: AuditGitEvidence;
+  readonly combinedDiff: AuditGitEvidence;
 }
 
 export interface AuditSegmentContext {

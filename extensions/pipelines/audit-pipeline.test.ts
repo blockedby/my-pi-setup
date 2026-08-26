@@ -250,8 +250,12 @@ test("final audit findings are canonicalized, deduplicated, and assigned IDs hos
       worktreeLabel: "WORKTREE",
       workingDir: "/tmp/work",
       branch: "main",
-      status: "",
-      diff: "",
+      status: { state: "available", value: "" },
+      baseIsAncestor: "yes",
+      commits: { state: "available", value: "" },
+      committedDiff: { state: "available", value: "" },
+      dirtyDiff: { state: "available", value: "" },
+      combinedDiff: { state: "available", value: "" },
     },
   });
   for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {

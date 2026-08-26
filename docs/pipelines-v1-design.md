@@ -134,6 +134,12 @@ Deferred persistent Luna/medium synthesis root
 
 No pipeline agent or child may mutate the repository, remediate findings, make readiness claims, or decide Git actions.
 
+## Commit permission and audit evidence
+
+`pipeline_run` accepts optional `git_commit`, defaulting to false. It is valid only for `small-feature-pipeline`; unsupported definitions reject true rather than ignoring it. The value is an explicit host contract, never inferred from task text. When enabled, only the persistent `implement-small-feature` Luna session may create ordinary commits in the supplied current branch. Push, merge, rebase, reset/history rewriting, branch changes, and worktree creation remain prohibited. The root, all four audit tracks, and every other pipeline agent remain read-only for Git delivery.
+
+Audit tracks receive reusable host-collected evidence captured with argument-array Git commands: base and current HEAD, branch/status, base ancestry, bounded base-to-head commit list, committed base-to-head diff, dirty HEAD-to-worktree diff, and combined base-to-worktree diff. Every bounded item identifies whether evidence is available, truncated, or unavailable. This evidence is injected into standalone and applicable feature, plan, and small-feature audits. Remediation stays in the same persistent implementer session and is not re-audited; final Git facts remain the main agent's responsibility.
+
 ## Tooling, inspection, and completion
 
 Feature and plan roots receive `pipeline_audit_start`, a definition-specific tool that accepts only the bounded acceptance contract, assumptions, and check evidence. It starts the fixed shared segment and returns the five controller-owned agent IDs for normal run-scoped waiting/inspection. It is not a generic fan-in or workflow API. Pipeline children cannot call it.

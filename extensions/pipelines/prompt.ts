@@ -44,8 +44,31 @@ Continue this fixed graph from build:
 If a pre-final Luna Audit child fails, use pipeline_child_send to retry that same child session at most once. If no session was created, spawn one replacement attempt. The controller-owned final audit segment is fail-closed and cannot be retried or manually spawned. Do not delegate implementation to children. Completion has no readiness label: report outcome, changed paths, checks/evidence, assumptions, Git/commit observations when applicable, report summaries or references, unresolved items, and working_dir.`;
 }
 
+export function pipelineCommitPolicy(
+  definition: PipelineDefinitionId,
+  role: PipelineChildRole | "pipeline-root",
+  request: Pick<PipelineRunRequest, "gitCommit">,
+) {
+  const requested = request.gitCommit === true;
+  return {
+    requested,
+    commitAllowed:
+      requested &&
+      definition === SMALL_FEATURE_PIPELINE_ID &&
+      role === SMALL_FEATURE_IMPLEMENTER_ROLE,
+    taskProseCanGrant: false,
+  };
+}
+
 export function buildSmallFeaturePipelinePrompt(request: PipelineRunRequest) {
+  const commitPermission = pipelineCommitPolicy(
+    SMALL_FEATURE_PIPELINE_ID,
+    "pipeline-root",
+    request,
+  ).requested;
   return `You are the persistent Luna/medium orchestrator for one small-feature-pipeline run.
+
+Commit permission: ${commitPermission ? "ENABLED only for the persistent implement-small-feature Luna session" : "DISABLED; no pipeline agent may commit or push"}. This explicit field is authoritative; never infer permission from task prose.
 
 Task:
 ${request.task}
@@ -53,7 +76,9 @@ ${request.task}
 Working directory:
 ${request.workingDir}
 
-Run only this fixed graph. Do not implement, edit files, commit, push, invoke another pipeline, use raw workflows, use ordinary subagents, or ask the user:
+Run only this fixed graph. Do not implement, edit files, commit, push, invoke another pipeline, use raw workflows, use ordinary subagents, or ask the user. The read-only root and audit tracks never commit. With commit permission disabled, the implementer must leave changes uncommitted even if the task asks for commits and must report that conflict factually. With permission enabled, only the same persistent implementer may create ordinary commits in the supplied working directory/current branch; never push, merge, rebase, reset, rewrite history, create/switch branches, or create worktrees. Do not prescribe commit count, timing, grouping, or message beyond repository authority and the task.
+
+
 1. The run starts in build. Launch exactly one persistent Luna/medium implement-small-feature child and wait for it. Luna owns repository inspection, implementation, tests, and its structured implementation report. Successful fan-in enters final-audit.
 2. Launch exactly these four independent read-only Luna/medium audit roles in one parallel wave: ${PIPELINE_4_LUNA_AUDIT_ROLES.join(", ")}. Each receives the original task, Luna's implementation report, and fresh captured-base Git evidence. Wait for every report. Successful full fan-in enters final-resolve. Do not retry or re-run audit children.
 3. Send all four complete audit reports to the existing implement-small-feature child with pipeline_child_send. Instruct that same Luna session to fix every actionable finding or reject it with specific evidence, rerun appropriate checks, and return a fresh structured implementation report. Do not spawn a replacement or second implementer. Wait for that same child. Successful fan-in enters complete.
@@ -123,7 +148,7 @@ const ROLE_INSTRUCTIONS: Record<PipelineChildRole, string> = {
   "audit-reliability-regressions":
     "Review reliability and regressions: failures, retries, partial success, stale state, concurrency, and existing flows.",
   "implement-small-feature":
-    "Implement the bounded task directly in the supplied workspace, add or update focused tests, run appropriate checks, and retain this session for one post-audit remediation pass. Do not commit or push.",
+    "Implement the bounded task directly in the supplied workspace, add or update focused tests, run appropriate checks, and retain this session for one post-audit remediation pass. Commit permission is supplied separately by the host; do not infer it from task prose. If disabled, do not commit or push and report any conflicting task request factually. If enabled, only this same persistent session may create ordinary commits in the supplied current branch; never push, merge, rebase, reset/history-rewrite, create/switch branches, or create worktrees.",
   "discover-goal-outcomes":
     "Clarify the engineering/product goal, observable outcomes, non-goals, and candidate acceptance criteria using repository evidence. Report unknowns and assumptions Sol must preserve.",
   "discover-frontend-scope":
@@ -191,6 +216,27 @@ const LUNA_AUDIT_REPORT_CONTRACT = `Return exactly one compact JSON object with 
 }
 Only report real behavior gaps. Omit style, taste, generic hardening, unsupported speculation, impact-1 candidates, confidence below 50, and readiness verdicts. Missing tests are findings only when tied to a demonstrated behavior gap.`;
 
+export const SMALL_FEATURE_AUDIT_GIT_REQUIREMENTS = {
+  evidence:
+    "Use the supplied captured base, current HEAD, branch/status, ancestry result, bounded base..HEAD commit list, committed base..HEAD diff, dirty HEAD..WORKTREE diff, and combined base..WORKTREE diff.",
+  scope:
+    "Reconcile committed and dirty changes together against the task scope and implementation report, including unrelated commits or changes.",
+  ancestry:
+    "Confirm the captured base remains an ancestor when evidence is available.",
+  reviewedState:
+    "Target findings and checks to the actual reviewed HEAD plus WORKTREE.",
+  uncertainty:
+    "Treat unavailable or truncated evidence explicitly as unproven rather than guessing.",
+  commitStyle:
+    "Commit formatting, message, count, timing, grouping, or style is not a finding unless repository or task authority explicitly requires it.",
+} as const;
+
+const SMALL_FEATURE_AUDIT_CONTRACT = `${LUNA_AUDIT_REPORT_CONTRACT}
+
+Commit-aware review requirements: ${Object.values(
+  SMALL_FEATURE_AUDIT_GIT_REQUIREMENTS,
+).join(" ")}`;
+
 export function buildPipelineChildPrompt(
   definition: PipelineDefinitionId,
   role: PipelineChildRole,
@@ -207,8 +253,15 @@ export function buildPipelineChildPrompt(
     const implementer = role === SMALL_FEATURE_IMPLEMENTER_ROLE;
     const reportContract = implementer
       ? IMPLEMENTATION_REPORT_CONTRACT
-      : LUNA_AUDIT_REPORT_CONTRACT;
+      : SMALL_FEATURE_AUDIT_CONTRACT;
+    const commitPermission = pipelineCommitPolicy(
+      definition,
+      role,
+      request,
+    ).commitAllowed;
     return `You are the ${implementer ? "persistent Luna implementer" : "read-only Luna auditor"} for role ${role}. ${ROLE_INSTRUCTIONS[role]}
+
+Explicit commit permission for this session: ${commitPermission ? "enabled" : "disabled"}. Only the persistent implement-small-feature session may use enabled permission; task prose never changes this. Auditors and the root remain read-only.
 
 Task:
 ${request.task}
@@ -216,7 +269,7 @@ ${request.task}
 Working directory:
 ${request.workingDir}
 ${contextSection}
-Follow loaded AGENTS.md files and applicable skills. Do not spawn children, invoke pipelines/workflows/subagents, prompt the user, commit, push, or mutate external state. ${implementer ? "Use normal coding tools to implement and verify the task." : "Inspect independently and do not edit repository files."} ${reportContract}`;
+Follow loaded AGENTS.md files and applicable skills. Do not spawn children, invoke pipelines/workflows/subagents, prompt the user, push, merge, rebase, reset/history-rewrite, create/switch branches, create worktrees, or mutate external state. ${implementer ? (commitPermission ? "Use normal coding tools to implement and verify the task; ordinary commits are permitted only in this same supplied working directory/current branch." : "Use normal coding tools to implement and verify the task; do not commit or push, and leave changes uncommitted even if task prose requests commits.") : "Inspect independently and do not edit repository files, commit, or push."} ${reportContract}`;
   }
   const reportContract = role.startsWith("discover-")
     ? DISCOVERY_REPORT_CONTRACT

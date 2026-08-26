@@ -227,6 +227,14 @@ export class PipelineController {
     if (this.shuttingDown)
       throw new Error("Pipeline controller is shutting down.");
     const definition = request.pipeline ?? FEATURE_PIPELINE_ID;
+    if (
+      request.gitCommit === true &&
+      definition !== SMALL_FEATURE_PIPELINE_ID
+    ) {
+      throw new Error(
+        `git_commit is only supported for small-feature-pipeline; received ${definition}.`,
+      );
+    }
     if (request.audit && definition !== AUDIT_PIPELINE_ID) {
       throw new Error("Audit input is only valid for audit-pipeline.");
     }
@@ -251,7 +259,10 @@ export class PipelineController {
     const run: MutableRun = {
       id,
       definition,
-      request: normalizedRequest,
+      request: {
+        ...normalizedRequest,
+        gitCommit: normalizedRequest.gitCommit === true,
+      },
       baseSha: gitHead(request.workingDir),
       stage: initialStageForDefinition(definition),
       status: "starting",
@@ -426,11 +437,51 @@ export class PipelineController {
   }
 
   private auditGitIdentity(run: MutableRun): AuditGitIdentity {
+    const workingDir = run.request.workingDir;
+    const headSha = gitHead(workingDir);
+    const bounded = (args: ReadonlyArray<string>, label: string) => {
+      try {
+        const value = execFileSync("git", [...args], {
+          cwd: workingDir,
+          encoding: "utf8",
+          maxBuffer: 256 * 1024,
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
+        const maxBytes = 64 * 1024;
+        if (Buffer.byteLength(value, "utf8") > maxBytes) {
+          const marker = `\n[${label} truncated at ${maxBytes} bytes.]`;
+          const payload = Buffer.from(value, "utf8")
+            .subarray(0, maxBytes - Buffer.byteLength(marker, "utf8"))
+            .toString("utf8");
+          return {
+            state: "truncated" as const,
+            value: `${payload}${marker}`,
+          };
+        }
+        return { state: "available" as const, value };
+      } catch (error) {
+        const partial =
+          error && typeof error === "object"
+            ? Reflect.get(error, "stdout")
+            : undefined;
+        if (typeof partial === "string" && partial.length > 0) {
+          const marker = `\n[${label} truncated after the Git output limit.]`;
+          const payload = Buffer.from(partial, "utf8")
+            .subarray(0, 64 * 1024 - Buffer.byteLength(marker, "utf8"))
+            .toString("utf8");
+          return { state: "truncated" as const, value: `${payload}${marker}` };
+        }
+        return {
+          state: "unavailable" as const,
+          value: `${label} unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    };
     let branch = "UNAVAILABLE";
     try {
       branch =
         execFileSync("git", ["branch", "--show-current"], {
-          cwd: run.request.workingDir,
+          cwd: workingDir,
           encoding: "utf8",
           maxBuffer: 16 * 1024,
           stdio: ["ignore", "pipe", "pipe"],
@@ -438,14 +489,104 @@ export class PipelineController {
     } catch {
       // Explicit unavailable evidence is safer than guessing repository state.
     }
+    const status = bounded(["status", "--short", "--branch"], "Git status");
+    const baseAvailable =
+      run.baseSha !== "UNAVAILABLE" && headSha !== "UNAVAILABLE";
+    let baseIsAncestor: AuditGitIdentity["baseIsAncestor"] = "unavailable";
+    if (baseAvailable) {
+      try {
+        execFileSync(
+          "git",
+          ["merge-base", "--is-ancestor", run.baseSha, headSha],
+          {
+            cwd: workingDir,
+            stdio: "ignore",
+          },
+        );
+        baseIsAncestor = "yes";
+      } catch (error) {
+        const status =
+          error && typeof error === "object"
+            ? Reflect.get(error, "status")
+            : undefined;
+        baseIsAncestor = status === 1 ? "no" : "unavailable";
+      }
+    }
+    const rawCommits = baseAvailable
+      ? bounded(
+          [
+            "log",
+            "--oneline",
+            "--no-decorate",
+            "--max-count=201",
+            `${run.baseSha}..${headSha}`,
+          ],
+          "Commit list",
+        )
+      : {
+          state: "unavailable" as const,
+          value:
+            "Commit list unavailable: captured base or current HEAD is unavailable.",
+        };
+    const commitLines = rawCommits.value
+      .split("\n")
+      .filter((line) => line.length > 0);
+    const commits =
+      rawCommits.state === "available" && commitLines.length > 200
+        ? {
+            state: "truncated" as const,
+            value: `${commitLines.slice(0, 200).join("\n")}\n[Commit list truncated at 200 entries.]`,
+          }
+        : rawCommits;
+    const committedDiff = baseAvailable
+      ? bounded(
+          [
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            `${run.baseSha}..${headSha}`,
+            "--",
+          ],
+          "Committed diff",
+        )
+      : {
+          state: "unavailable" as const,
+          value:
+            "Committed diff unavailable: captured base or current HEAD is unavailable.",
+        };
+    const dirtyDiff =
+      headSha !== "UNAVAILABLE"
+        ? bounded(
+            ["diff", "--no-ext-diff", "--no-color", headSha, "--"],
+            "Dirty working-tree diff",
+          )
+        : {
+            state: "unavailable" as const,
+            value:
+              "Dirty working-tree diff unavailable: current HEAD is unavailable.",
+          };
+    const combinedDiff = baseAvailable
+      ? bounded(
+          ["diff", "--no-ext-diff", "--no-color", run.baseSha, "--"],
+          "Combined base-to-worktree diff",
+        )
+      : {
+          state: "unavailable" as const,
+          value:
+            "Combined base-to-worktree diff unavailable: captured base or current HEAD is unavailable.",
+        };
     return {
       baseSha: run.baseSha,
-      headSha: gitHead(run.request.workingDir),
+      headSha,
       worktreeLabel: "WORKTREE",
-      workingDir: run.request.workingDir,
+      workingDir,
       branch,
-      status: this.gitStatus(run.id).slice(0, 64 * 1024),
-      diff: this.gitDiff(run.id).slice(0, 64 * 1024),
+      status,
+      baseIsAncestor,
+      commits,
+      committedDiff,
+      dirtyDiff,
+      combinedDiff,
     };
   }
 
@@ -1278,38 +1419,23 @@ export class PipelineController {
   }
 
   private gitEvidence(runId: string) {
-    const run = this.requireActiveRun(runId);
-    return [
-      "Workspace review base:",
-      run.baseSha,
-      "Workspace review head:",
-      "WORKTREE",
-      "Workspace Git status:",
-      this.gitStatus(runId),
-      "Workspace Git diff:",
-      this.gitDiff(runId),
-    ].join("\n");
+    return `Captured host-side Git evidence (read-only):\n${JSON.stringify(this.auditGitIdentity(this.requireActiveRun(runId)), null, 2)}`;
   }
 
-  private gitDiff(runId: string) {
-    const run = this.requireActiveRun(runId);
-    try {
-      const revision = run.baseSha === "UNAVAILABLE" ? [] : [run.baseSha];
-      return execFileSync(
-        "git",
-        ["diff", "--no-ext-diff", "--no-color", ...revision, "--"],
-        {
-          cwd: run.request.workingDir,
-          encoding: "utf8",
-          maxBuffer: 128 * 1024,
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      )
-        .trim()
-        .slice(0, 64 * 1024);
-    } catch (error) {
-      return `Git diff unavailable: ${error instanceof Error ? error.message : String(error)}`;
-    }
+  private finalGitFacts(run: MutableRun) {
+    const evidence = this.auditGitIdentity(run);
+    const compact = (value: string) => value.slice(0, 2_048);
+    return [
+      `Final captured Git base: ${evidence.baseSha}`,
+      `Final Git HEAD: ${evidence.headSha}`,
+      `Final Git branch: ${evidence.branch}`,
+      `Final base ancestry: ${evidence.baseIsAncestor}`,
+      `Final Git status (${evidence.status.state}): ${compact(evidence.status.value)}`,
+      `Final base..HEAD commits (${evidence.commits.state}): ${compact(evidence.commits.value)}`,
+      `Final committed diff (${evidence.committedDiff.state}): ${compact(evidence.committedDiff.value)}`,
+      `Final dirty HEAD..WORKTREE diff (${evidence.dirtyDiff.state}): ${compact(evidence.dirtyDiff.value)}`,
+      `Final combined base..WORKTREE diff (${evidence.combinedDiff.state}): ${compact(evidence.combinedDiff.value)}`,
+    ];
   }
 
   complete(runId: string, facts: PipelineCompletionFacts) {
@@ -1346,6 +1472,10 @@ export class PipelineController {
         SMALL_FEATURE_PIPELINE_CHILD_ROLES,
         "complete",
       );
+      completion = {
+        ...facts,
+        git: [...facts.git, ...this.finalGitFacts(run)],
+      };
     } else if (run.definition === PLAN_PIPELINE_ID) {
       if (run.stage !== "complete") {
         throw new Error("plan-pipeline must enter complete before completion.");
