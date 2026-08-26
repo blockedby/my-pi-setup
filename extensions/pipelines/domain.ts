@@ -304,6 +304,8 @@ export interface PipelineRunRequest {
   readonly workingDir: string;
   readonly task: string;
   readonly pipeline?: PipelineDefinitionId;
+  /** Commit permission is opt-in and is only valid for small-feature-pipeline. */
+  readonly gitCommit?: boolean;
   readonly audit?: AuditPipelineInput;
 }
 

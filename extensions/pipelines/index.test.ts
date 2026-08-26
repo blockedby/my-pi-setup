@@ -34,6 +34,7 @@ test("pipeline_run accepts a task with an optional working directory", () => {
       pipeline: "small-feature-pipeline",
       task: "Implement a bounded feature",
       working_dir: ".worktrees/small-feature",
+      git_commit: true,
     }),
     true,
   );

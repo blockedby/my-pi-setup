@@ -90,6 +90,12 @@ export const PIPELINE_RUN_PARAMETERS = Type.Object(
         maxLength: 16 * 1024,
       }),
     ),
+    git_commit: Type.Optional(
+      Type.Boolean({
+        description:
+          "Opt-in permission for ordinary commits by the persistent small-feature implementer only; defaults to false.",
+      }),
+    ),
     audit: Type.Optional(
       Type.Union([AUDIT_INITIAL_PARAMETERS, AUDIT_CLOSURE_PARAMETERS], {
         description:
@@ -251,6 +257,14 @@ export default function pipelines(pi: ExtensionAPI) {
         throw new Error(`working_dir is not a directory: ${workingDir}`);
       }
       const definition = resolvePipelineDefinition(params.pipeline);
+      if (
+        params.git_commit === true &&
+        definition !== "small-feature-pipeline"
+      ) {
+        throw new Error(
+          `git_commit is only supported for small-feature-pipeline; received ${definition}.`,
+        );
+      }
       if (params.audit && definition !== AUDIT_PIPELINE_ID) {
         throw new Error(
           "The audit input contract is only valid for audit-pipeline.",
@@ -276,6 +290,9 @@ export default function pipelines(pi: ExtensionAPI) {
         task: params.task,
         workingDir,
         pipeline: definition,
+        ...(params.git_commit !== undefined
+          ? { gitCommit: params.git_commit }
+          : {}),
         ...(audit ? { audit } : {}),
       });
       return {

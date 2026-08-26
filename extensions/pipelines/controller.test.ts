@@ -154,6 +154,22 @@ const request = (workingDir = "/tmp/work") => ({
   workingDir,
 });
 
+test("git_commit rejects every pipeline except small-feature-pipeline", () => {
+  const { controller } = harness();
+  for (const pipeline of [
+    "feature-pipeline",
+    "plan-pipeline",
+    "audit-pipeline",
+  ] as const) {
+    assert.throws(
+      () => controller.start({ ...request(), pipeline, gitCommit: true }),
+      new RegExp(
+        `git_commit is only supported for small-feature-pipeline.*${pipeline}`,
+      ),
+    );
+  }
+});
+
 async function settleInitialization() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
@@ -938,7 +954,14 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     workingDir: "/tmp/work",
   };
   run.controller.complete(runId, facts);
+  const finalFacts = run.controller.get(runId)?.completion;
   assert.equal(run.controller.get(runId)?.status, "completed");
+  assert.ok(finalFacts?.git.some((item) => item.startsWith("Final Git HEAD:")));
+  assert.ok(
+    finalFacts?.git.some((item) =>
+      item.includes("Final dirty HEAD..WORKTREE diff"),
+    ),
+  );
   assert.equal(run.handoffs[0]?.definition, "small-feature-pipeline");
   assert.deepEqual(
     run.controller
@@ -1044,7 +1067,15 @@ test("small-feature Luna audits receive the captured base, implementation report
     pipeline: "small-feature-pipeline",
   });
   await settleInitialization();
-  fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "after\n");
+  fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "committed\n");
+  execFileSync("git", ["add", "src/feature.ts"], { cwd: workingDir });
+  execFileSync("git", ["commit", "-qm", "implementation commit"], {
+    cwd: workingDir,
+  });
+  fs.writeFileSync(
+    path.join(workingDir, "src", "feature.ts"),
+    `after\n${"x".repeat(300 * 1024)}`,
+  );
   const implementer = await run.controller.spawnChild(
     runId,
     "implement-small-feature",
@@ -1063,8 +1094,22 @@ test("small-feature Luna audits receive the captured base, implementation report
     );
     assert.ok(auditorSession);
     assert.equal(auditorSession.prompts[0]?.includes(baseSha), true);
+    assert.equal(
+      auditorSession.prompts[0]?.includes("implementation commit"),
+      true,
+    );
     assert.equal(auditorSession.prompts[0]?.includes("-before"), true);
+    assert.equal(auditorSession.prompts[0]?.includes("+committed"), true);
+    assert.equal(auditorSession.prompts[0]?.includes("-committed"), true);
     assert.equal(auditorSession.prompts[0]?.includes("+after"), true);
+    assert.equal(
+      auditorSession.prompts[0]?.includes('"baseIsAncestor": "yes"'),
+      true,
+    );
+    assert.equal(
+      auditorSession.prompts[0]?.includes('"state": "truncated"'),
+      true,
+    );
     assert.equal(
       auditorSession.prompts[0]?.includes(
         reportForRole(SMALL_FEATURE_IMPLEMENTER_ROLE),
