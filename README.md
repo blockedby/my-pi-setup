@@ -44,7 +44,11 @@ No extra web-search service key or environment file is required. Pipi does not c
 
 ## Pipelines
 
-`pipeline_run` selects one of three bounded definitions. Omitting `pipeline` remains backward-compatible and starts `feature-pipeline`:
+Pipelines are fixed, bounded multi-agent recipes for work that benefits from staged implementation, review, or planning. A persistent Sol orchestrator advances each run through a predefined graph, launches Luna and Terra roles with limited permissions, validates their reports, and returns a factual handoff instead of letting agents invent their own workflow.
+
+Pipi includes `small-feature-pipeline` for one focused Luna implementation → Terra audit → same-Luna fix cycle, `feature-pipeline` for broader work with parallel discovery and audits, and `plan-pipeline` for producing an audited implementation plan without changing product code. Open `/pipelines` to see their runs: summaries stay collapsed with green/yellow/red textual status, while `Enter` expands a run or opens the agent responsible for a stage.
+
+`pipeline_run` selects one of these three definitions. Omitting `pipeline` remains backward-compatible and starts `feature-pipeline`:
 
 ```json
 { "task": "Implement export support", "working_dir": "/repo/worktree" }
