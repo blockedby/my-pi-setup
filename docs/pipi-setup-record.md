@@ -20,9 +20,9 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | MCP adapter                             | `npm:pi-mcp-adapter@2.15.0`                              |
 | Isolated MCP package files              | `/home/kcnc/.pipi/agent/npm/node_modules/pi-mcp-adapter` |
 | Browser Chrome skill                    | `/home/kcnc/.pipi/agent/skills/browser-chrome`           |
-| Evidence-driven reviewer submodule      | `vendor/gpt5.6-reviewer` at `81053d6`                    |
+| Evidence-driven reviewer submodule      | `vendor/gpt5.6-reviewer` at `5c446e5`                    |
 | Canonical code-review skill             | `vendor/gpt5.6-reviewer/skills/code-review`              |
-| Backlog planning submodule              | `vendor/plan-gh-backlog` at `2913620`                    |
+| Backlog planning submodule              | `vendor/plan-gh-backlog` at `5a179fb`                    |
 | Canonical plan-gh-backlog skill         | `vendor/plan-gh-backlog`                                 |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
@@ -904,3 +904,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Merge and rollout:** At the user's request, squash-merged [PR #27](https://github.com/blockedby/my-pi-setup/pull/27) as `e66caa9`, synchronized primary `main`, and ran the optimized rollout from the merged primary package. The target sync helper fast-forwarded `main` but could not remove the feature worktree while Git still treated it as containing submodules; after deinitializing those unchanged pinned submodules, the verified clean worktree required Git's double-force worktree removal. Deleted the merged local branch, removed its stale local Pipi package registration, and retained the remote branch.
 - **Post-merge verification:** GitHub reports PR #27 merged; local `HEAD` equals `origin/main`; the branding feature worktree and local branch are absent; `npm run check:pipi-install` verifies Pipi 0.84.3, the branded launcher/resume command, MCP 2.15.0, install-script policy, and unchanged model overrides; and `pipi list` resolves this repository from the merged primary checkout rather than the removed feature worktree. No credential or auth-file content was accessed.
 - **Pending:** Reload or restart this current Pipi session before visually checking the new PIPI welcome header.
+
+## Operation entry: resolve plan-gh-backlog collision and pin latest source
+
+- **Request:** Resolve the `plan-gh-backlog` skill collision between the primary checkout and `.worktrees/update-plan-gh-backlog`, and pin the latest upstream version.
+- **Action:** Confirmed upstream `plan-gh-backlog` `main` currently ends at `5a179fb453c6b97ce5c93723319e691dac27bc18`, the already reviewed safe pin in open parent [PR #17](https://github.com/blockedby/my-pi-setup/pull/17). Removed the temporary update-worktree package registration that caused the duplicate skill, initialized the canonical primary submodules, and reinstalled Pipi from the primary checkout so only one package supplies `plan-gh-backlog` while PR #17 is refreshed onto current `main`. Preserved the read-only submodule source and unchanged `.gitmodules`/`config/submodules.json` URL and branch metadata.
+- **Affected paths or values:** Parent gitlink `vendor/plan-gh-backlog` advances from `29136202437149b477e5d21317d82219fcc011bb` to `5a179fb453c6b97ce5c93723319e691dac27bc18`; this record also corrects the installation table to the existing reviewer pin `5c446e5`. Pipi runtime 0.84.3, MCP 2.15.0, model overrides, credentials, auth isolation, profiles, and quotas are unchanged.
+- **Verification:** Upstream `refs/heads/main` resolves exactly to `5a179fb`; the child passed 16/16 unit tests, validated the bundled example, and produced its JSON implementation plan. Canonical closure review previously returned `READY`. After resolving operation-record conflicts during the rebase onto current `main`, fresh parent checks passed 30/30 installer tests, 180/180 deterministic extension tests, 22/22 file-search tests, exact submodule validation, TypeScript, formatting, and `git diff --check`. Current `pipi list` contains only the primary `pipi-alias` package and no update-worktree package registration.
+- **Pending:** Force-push refreshed PR #17 with lease, then merge, synchronize `main`, reinstall the canonical latest pin, and reload or restart Pipi.
