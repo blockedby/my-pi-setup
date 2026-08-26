@@ -453,6 +453,46 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
   assert.equal(readFileSync(launcherPath, "utf8"), launcher);
 });
 
+test("repository dependency skip still installs isolated runtime dependencies", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      installScript,
+      "--skip-repository-dependencies",
+      "--codex-tools",
+      fixture.codexTools,
+    ],
+    { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    result.stdout.includes(`Installing dependencies in ${repositoryRoot}`),
+    false,
+  );
+
+  const pipiNpm = join(fixture.home, ".pipi", "agent", "npm");
+  assert.equal(
+    readJson(
+      join(
+        pipiNpm,
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "package.json",
+      ),
+    ).version,
+    runtimePiVersion,
+  );
+  assert.equal(
+    readJson(join(pipiNpm, "node_modules", "pi-mcp-adapter", "package.json"))
+      .version,
+    "2.15.0",
+  );
+});
+
 test("install repairs non-exact isolated package metadata", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));

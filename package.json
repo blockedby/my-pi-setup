@@ -38,7 +38,7 @@
     "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"scripts/**/*.mjs\" \"tests/**/*.mjs\" \"config/*.json\" \"*.json\"",
     "install:dependencies": "node scripts/install-dependencies.mjs",
     "install:pipi": "node scripts/install.mjs",
-    "rollout:pipi-upgrade": "npm run install:pipi && npm run check:pipi-install",
+    "rollout:pipi-upgrade": "npm run install:pipi -- --skip-repository-dependencies && npm run check:pipi-install",
     "test": "npm run test:deterministic",
     "test:deterministic": "npm run test:installer && npm run test:extensions && npm --prefix extensions/file-search test",
     "test:extensions": "node scripts/run-deterministic-tests.mjs",

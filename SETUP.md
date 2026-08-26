@@ -154,7 +154,7 @@ npm run update:pipi -- <version>
 npm run complete:pipi-upgrade
 ```
 
-The first command uses `curl` to show relevant coding-agent changelog entries before a minor or major upgrade and highlights a `Breaking Changes` section; patch upgrades skip that fetch. Inspect its output before continuing. The updater then checks that the aligned Pi AI, coding-agent, and TUI packages are published, pins lockfile resolution to the requested release while retaining caret declarations, and rolls back the manifest and lockfile if the update fails. The completion command runs deterministic source verification, installs the isolated runtime, and verifies the runtime, MCP pin, install-script policy, and model overrides.
+The first command uses `curl` to show relevant coding-agent changelog entries before a minor or major upgrade and highlights a `Breaking Changes` section; patch upgrades skip that fetch. Inspect its output before continuing. The updater then checks that the aligned Pi AI, coding-agent, and TUI packages are published, pins lockfile resolution to the requested release while retaining caret declarations, and rolls back the manifest and lockfile if the update fails. The completion command runs deterministic source verification, then reuses those verified repository dependencies while installing the isolated runtime and checking its runtime version, MCP pin, install-script policy, and model overrides.
 
 ## Development checks
 
