@@ -520,27 +520,29 @@ export class PipelineController {
       }
     }
     const attempt = priorAttempts.length + 1;
-    const promptContext =
-      run.definition === SMALL_FEATURE_PIPELINE_ID &&
+    const receivesGitEvidence =
+      (run.definition === FEATURE_PIPELINE_ID &&
+        (role.startsWith("audit-") || role === "final-audit")) ||
+      (run.definition === SMALL_FEATURE_PIPELINE_ID &&
+        role === "audit-small-feature");
+    const gitEvidence = receivesGitEvidence
+      ? this.gitEvidence(runId)
+      : undefined;
+    const promptContext = [
+      ...(run.definition === SMALL_FEATURE_PIPELINE_ID &&
       role === "audit-small-feature"
         ? [
             "Luna implementation report:",
             this.agentsFor(runId).find(
               (agent) => agent.role === "implement-small-feature",
             )?.finalText ?? "",
-            "Workspace review base:",
-            run.baseSha,
-            "Workspace review head:",
-            "WORKTREE",
-            "Workspace Git status:",
-            this.gitStatus(runId),
-            "Workspace Git diff:",
-            this.gitDiff(runId),
-            additionalContext,
           ]
-            .filter((item) => item.trim())
-            .join("\n")
-        : additionalContext;
+        : []),
+      gitEvidence ?? "",
+      additionalContext,
+    ]
+      .filter((item) => item.trim())
+      .join("\n");
     return this.tree.spawn({
       scopeId: runId,
       parentId: run.rootId,
@@ -730,6 +732,20 @@ export class PipelineController {
     } catch (error) {
       return `Git status unavailable: ${error instanceof Error ? error.message : String(error)}`;
     }
+  }
+
+  private gitEvidence(runId: string) {
+    const run = this.requireActiveRun(runId);
+    return [
+      "Workspace review base:",
+      run.baseSha,
+      "Workspace review head:",
+      "WORKTREE",
+      "Workspace Git status:",
+      this.gitStatus(runId),
+      "Workspace Git diff:",
+      this.gitDiff(runId),
+    ].join("\n");
   }
 
   private gitDiff(runId: string) {
