@@ -125,13 +125,50 @@ if (args[0] === "install") {
     JSON.stringify({ name: "pi-codex-tools" }),
   );
 
+  const herdrLog = join(home, "herdr-install.jsonl");
   const env = {
     ...process.env,
     HOME: home,
-    PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+    HERDR_TEST_LOG: herdrLog,
+    PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`,
   };
 
-  return { home, fakeBin, piPath, codexPath, codexTools, env };
+  return {
+    home,
+    fakeBin,
+    piPath,
+    codexPath,
+    codexTools,
+    herdrLog,
+    env,
+  };
+};
+
+const addFakeHerdr = (
+  fixture,
+  { fail = false, writeIntegration = true } = {},
+) => {
+  const herdrPath = join(fixture.fakeBin, "herdr");
+  writeFileSync(
+    herdrPath,
+    `#!/usr/bin/env node
+const { appendFileSync, mkdirSync, writeFileSync } = require("node:fs");
+const { dirname, join } = require("node:path");
+const record = {
+  args: process.argv.slice(2),
+  agentDir: process.env.PI_CODING_AGENT_DIR,
+};
+appendFileSync(process.env.HERDR_TEST_LOG, JSON.stringify(record) + "\\n");
+if (${JSON.stringify(fail)}) process.exit(23);
+if (${JSON.stringify(writeIntegration)}) {
+  const integrationPath = join(process.env.PI_CODING_AGENT_DIR, "extensions", "herdr-agent-state.ts");
+  mkdirSync(dirname(integrationPath), { recursive: true });
+  writeFileSync(integrationPath, "// fake official Herdr Pi integration\\n");
+}
+`,
+  );
+  chmodSync(herdrPath, 0o755);
+  return herdrPath;
 };
 
 const install = (fixture, extraArgs = []) =>
@@ -296,6 +333,95 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   assert.equal(
     readFileSync(join(regularAgentDir, "mcp.json"), "utf8"),
     regularMcp,
+  );
+});
+
+test("install adds the official Pi integration when Herdr is available", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  addFakeHerdr(fixture);
+
+  const first = install(fixture);
+  assert.equal(first.status, 0, first.stderr);
+  const integrationPath = join(
+    fixture.home,
+    ".pipi",
+    "agent",
+    "extensions",
+    "herdr-agent-state.ts",
+  );
+  assert.equal(existsSync(integrationPath), true);
+  assert.match(
+    first.stdout,
+    new RegExp(`Herdr Pi integration: ${integrationPath}`),
+  );
+
+  const second = install(fixture);
+  assert.equal(second.status, 0, second.stderr);
+  const records = readFileSync(fixture.herdrLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(records, [
+    {
+      args: ["integration", "install", "pi"],
+      agentDir: join(fixture.home, ".pipi", "agent"),
+    },
+    {
+      args: ["integration", "install", "pi"],
+      agentDir: join(fixture.home, ".pipi", "agent"),
+    },
+  ]);
+});
+
+test("install skips the optional integration when Herdr is unavailable", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const result = install(fixture);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /Herdr CLI not found; skipped the optional Pi integration\./,
+  );
+  assert.equal(existsSync(fixture.herdrLog), false);
+});
+
+test("install fails clearly when the detected Herdr integration fails", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  addFakeHerdr(fixture, { fail: true });
+
+  const result = install(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /Failed to install the official Herdr Pi integration/,
+  );
+  assert.equal(
+    existsSync(
+      join(
+        fixture.home,
+        ".pipi",
+        "agent",
+        "extensions",
+        "herdr-agent-state.ts",
+      ),
+    ),
+    false,
+  );
+});
+
+test("install rejects a false-success Herdr integration result", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  addFakeHerdr(fixture, { writeIntegration: false });
+
+  const result = install(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /Herdr reported a successful Pi integration install but did not create/,
   );
 });
 

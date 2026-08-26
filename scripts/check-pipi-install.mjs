@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getDeclaredPipiVersion, readJson } from "./pipi-version.mjs";
 
@@ -23,6 +23,20 @@ const isolatedManifest = readJson(join(isolatedPrefix, "package.json"));
 const expectedAllowScripts = {
   "@google/genai@1.52.0": true,
   "protobufjs@7.6.5": true,
+};
+
+const findExecutable = (command) => {
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    const candidate = join(directory, command);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return resolve(candidate);
+    } catch {
+      // Try the next PATH entry.
+    }
+  }
+  return undefined;
 };
 
 if (installedPackage.version !== expectedVersion) {
@@ -65,6 +79,20 @@ const installedOverrides = readFileSync(
 if (!trackedOverrides.equals(installedOverrides)) {
   throw new Error(
     "Installed Pipi model overrides differ from the tracked copy.",
+  );
+}
+
+const herdrExecutable = findExecutable("herdr");
+const herdrIntegrationPath = join(
+  home,
+  ".pipi",
+  "agent",
+  "extensions",
+  "herdr-agent-state.ts",
+);
+if (herdrExecutable && !existsSync(herdrIntegrationPath)) {
+  throw new Error(
+    `Herdr is installed at ${herdrExecutable}, but its Pipi integration is missing: ${herdrIntegrationPath}`,
   );
 }
 
@@ -131,6 +159,9 @@ if (
   throw new Error(`Unexpected Pipi resume command: ${resumeCommand}`);
 }
 
+const herdrStatus = herdrExecutable
+  ? " The Herdr Pi integration is installed."
+  : " Herdr CLI was not detected.";
 console.log(
-  `Installed Pipi ${expectedVersion}, branded launcher/resume command, MCP 2.15.0, install-script policy, and model overrides are verified.`,
+  `Installed Pipi ${expectedVersion}, branded launcher/resume command, MCP 2.15.0, install-script policy, and model overrides are verified.${herdrStatus}`,
 );
