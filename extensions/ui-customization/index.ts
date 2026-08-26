@@ -42,13 +42,13 @@ const PALETTE: Rgb[] = [
   [93, 171, 255],
   [48, 129, 247],
 ];
-const TITLE_LINES = [
-  "  ██████╗  ██╗ ",
-  "  ██╔══██╗ ██║ ",
-  "  ██████╔╝ ██║ ",
-  "  ██╔═══╝  ██║ ",
-  "  ██║      ██║ ",
-  "  ╚═╝      ╚═╝ ",
+export const PIPI_TITLE_LINES = [
+  "  ██████╗  ██╗ ██████╗  ██╗ ",
+  "  ██╔══██╗ ██║ ██╔══██╗ ██║ ",
+  "  ██████╔╝ ██║ ██████╔╝ ██║ ",
+  "  ██╔═══╝  ██║ ██╔═══╝  ██║ ",
+  "  ██║      ██║ ██║      ██║ ",
+  "  ╚═╝      ╚═╝ ╚═╝      ╚═╝ ",
 ];
 const ANSI_PATTERN =
   /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
@@ -184,8 +184,18 @@ function columns(left: string, right: string, width: number) {
   );
 }
 
+export function pipiLogoLines(width: number) {
+  return width < visibleWidth(PIPI_TITLE_LINES[0]!)
+    ? ["PIPI"]
+    : PIPI_TITLE_LINES;
+}
+
+export function pipiWindowTitle(title: string) {
+  return `pipi · ${title}`;
+}
+
 export default function uiCustomization(pi: ExtensionAPI) {
-  let title = "pi";
+  let title = "pipi";
   let modelInfo = emptyModelInfoState();
   let gitInfo = emptyGitInfoState();
   let requestRender: (() => void) | undefined;
@@ -227,7 +237,7 @@ export default function uiCustomization(pi: ExtensionAPI) {
 
       return {
         render(width: number) {
-          const art = TITLE_LINES.map((line, row) =>
+          const art = pipiLogoLines(width).map((line, row) =>
             center(gradientText(line, row * 0.045), width),
           );
           const subtitle = center(
@@ -298,7 +308,7 @@ export default function uiCustomization(pi: ExtensionAPI) {
       };
     });
 
-    ctx.ui.setTitle(`pi · ${title}`);
+    ctx.ui.setTitle(pipiWindowTitle(title));
     pi.events.emit(REFRESH_CHANNEL, undefined);
   }
 

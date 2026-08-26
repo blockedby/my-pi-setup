@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { getDeclaredPipiVersion, readJson } from "./pipi-version.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -29,6 +29,12 @@ if (installedPackage.version !== expectedVersion) {
   throw new Error(
     `Installed Pipi runtime is ${installedPackage.version}; expected ${expectedVersion}.`,
   );
+}
+if (
+  installedPackage.piConfig?.name !== "pipi" ||
+  installedPackage.piConfig?.configDir !== ".pi"
+) {
+  throw new Error("The installed Pi runtime is not branded as Pipi.");
 }
 if (
   isolatedManifest.dependencies?.["@earendil-works/pi-coding-agent"] !==
@@ -63,6 +69,17 @@ if (!trackedOverrides.equals(installedOverrides)) {
 }
 
 const launcher = join(home, ".local", "bin", "pipi");
+const launcherSource = readFileSync(launcher, "utf8");
+for (const variable of [
+  "PIPI_CODING_AGENT_DIR",
+  "PIPI_CODING_AGENT_SESSION_DIR",
+  "PI_CODING_AGENT_DIR",
+  "PI_CODING_AGENT_SESSION_DIR",
+]) {
+  if (!launcherSource.includes(`export ${variable}=`)) {
+    throw new Error(`Pipi launcher does not export ${variable}.`);
+  }
+}
 const launcherVersion = execFileSync(launcher, ["--version"], {
   encoding: "utf8",
 }).trim();
@@ -71,7 +88,49 @@ if (launcherVersion !== expectedVersion) {
     `Pipi launcher reports ${launcherVersion}; expected ${expectedVersion}.`,
   );
 }
+const launcherHelp = execFileSync(launcher, ["--help"], {
+  encoding: "utf8",
+});
+if (!launcherHelp.includes("pipi - AI coding assistant")) {
+  throw new Error("Pipi launcher help is not branded as pipi.");
+}
+
+const interactiveModule = pathToFileURL(
+  join(
+    isolatedPrefix,
+    "node_modules",
+    "@earendil-works",
+    "pi-coding-agent",
+    "dist",
+    "modes",
+    "interactive",
+    "interactive-mode.js",
+  ),
+).href;
+const resumeCommand = execFileSync(
+  process.execPath,
+  [
+    "--input-type=module",
+    "--eval",
+    `Object.defineProperty(process.stdout, "isTTY", { value: true });
+const { formatResumeCommand } = await import(${JSON.stringify(interactiveModule)});
+process.stdout.write(formatResumeCommand({
+  isPersisted: () => true,
+  getSessionFile: () => "/dev/null",
+  getSessionId: () => "test-session",
+  usesDefaultSessionDir: () => false,
+  getSessionDir: () => "/tmp/pipi sessions",
+}) ?? "");`,
+  ],
+  { encoding: "utf8" },
+);
+if (
+  resumeCommand !==
+  "pipi --session-dir '/tmp/pipi sessions' --session test-session"
+) {
+  throw new Error(`Unexpected Pipi resume command: ${resumeCommand}`);
+}
 
 console.log(
-  `Installed Pipi ${expectedVersion}, MCP 2.15.0, install-script policy, and model overrides are verified.`,
+  `Installed Pipi ${expectedVersion}, branded launcher/resume command, MCP 2.15.0, install-script policy, and model overrides are verified.`,
 );
