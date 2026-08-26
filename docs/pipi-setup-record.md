@@ -981,4 +981,5 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Verification:** Reviewed the wording against the three current pipeline definitions and merged dashboard behavior; `git diff --check` passes.
 - **Pull request:** Committed as `67e7a0f`, pushed `docs/readme-pipelines-overview`, and opened [PR #36](https://github.com/blockedby/my-pi-setup/pull/36) against current `main`; target preparation reported no rebase was needed.
 - **Review refinement:** In response to the user's PR feedback, replaced the dry implementation-oriented introduction with two shorter, more direct paragraphs: why pipelines help, who does what, when to choose each definition, and how to read/control `/pipelines` at a glance.
-- **Pending:** User review of the refreshed PR #36; do not install or reload Pipi.
+- **Target refresh:** After the user's merge approval, rebased PR #36 onto the latest `main`. The only conflict was the append-only operation record; resolution preserves the complete merged Herdr rollout history followed by this README entry. The documentation diff and `git diff --check` pass.
+- **Pending:** Force-push the refreshed branch with lease, merge PR #36, and synchronize `main`; do not reinstall or reload Pipi.
