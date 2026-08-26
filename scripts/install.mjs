@@ -305,6 +305,32 @@ const installBrowserChromeAssets = (agentDir) => {
   return browserSkillDir;
 };
 
+const installHerdrPiIntegration = (herdrExecutable, agentDir) => {
+  if (!herdrExecutable) return undefined;
+
+  const integrationPath = join(agentDir, "extensions", "herdr-agent-state.ts");
+  try {
+    execFileSync(herdrExecutable, ["integration", "install", "pi"], {
+      env: {
+        ...process.env,
+        PI_CODING_AGENT_DIR: agentDir,
+      },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    throw new Error(
+      `Failed to install the official Herdr Pi integration: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!existsSync(integrationPath)) {
+    throw new Error(
+      `Herdr reported a successful Pi integration install but did not create ${integrationPath}`,
+    );
+  }
+  return integrationPath;
+};
+
 const installBrowserChromeMcp = (mcpPath, browserSkillDir) => {
   const current = readSettings(mcpPath, true);
   const existingServers = current.mcpServers ?? {};
@@ -377,6 +403,7 @@ const install = () => {
     );
 
   const codexExecutable = findExecutable("codex");
+  const herdrExecutable = findExecutable("herdr");
   const agentDir = join(home, ".pipi", "agent");
   const sessionDir = join(home, ".pipi", "sessions");
   const binDir = options.binDir ?? join(home, ".local", "bin");
@@ -494,6 +521,10 @@ const install = () => {
   const browserSkillDir = installBrowserChromeAssets(agentDir);
   installBrowserChromeMcp(pipiMcpPath, browserSkillDir);
   writeJson(pipiSettingsPath, nextSettings);
+  const herdrIntegrationPath = installHerdrPiIntegration(
+    herdrExecutable,
+    agentDir,
+  );
 
   if (options.shareAuth && !existsSync(pipiAuthPath)) {
     symlinkSync(regularAuthPath, pipiAuthPath);
@@ -511,6 +542,9 @@ const install = () => {
   console.log(`Evidence-driven code-review skill: ${reviewerSkillDir}`);
   console.log(`Plan GitHub backlog skill: ${backlogSkillDir}`);
   console.log(`Browser Chrome MCP config: ${pipiMcpPath}`);
+  if (herdrIntegrationPath)
+    console.log(`Herdr Pi integration: ${herdrIntegrationPath}`);
+  else console.log("Herdr CLI not found; skipped the optional Pi integration.");
   if (codexExecutable) console.log(`Codex CLI: ${codexExecutable}`);
   else
     console.warn(
