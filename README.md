@@ -82,6 +82,8 @@ Automatic routing uses `small-feature-pipeline` for bounded, well-specified impl
 
 Implementation pipeline audits receive host-collected, read-only Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start. In `feature-pipeline`, every Luna audit receives the captured base and current status/diff, while Terra receives a fresh snapshot after Luna remediation without receiving prior Luna findings. The same four Luna audit roles receive captured-base evidence plus the implementation report in `small-feature-pipeline`; untracked paths remain visible through status and can be inspected with read-only file tools.
 
+`feature-pipeline` creates its persistent Sol session without sending a model prompt, then the controller launches and validates all five Luna discovery tracks programmatically. Failed or malformed discovery gets at most one controller-owned same-session retry. Only after complete fan-in does Sol receive its first message, containing the task and bounded discovery reports, and begin implementation from `build`. Pipeline roots and children are fixed by their graph and do not consume or enforce direct-subagent capacity quotas.
+
 `small-feature-pipeline` runs this fixed graph. Its Luna coordinator and all audit children are read-only; the persistent Luna implementer session owns both implementation and remediation. All four audits run in parallel, and there is no re-audit after Luna fixes:
 
 ```text

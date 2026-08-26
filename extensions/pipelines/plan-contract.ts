@@ -536,12 +536,6 @@ export function validatePipelineReport(
   role: string,
   text: string,
 ) {
-  if (
-    definition !== PLAN_PIPELINE_ID &&
-    definition !== SMALL_FEATURE_PIPELINE_ID
-  ) {
-    return [];
-  }
   const report = parseJsonReport(text);
   if (!isRecord(report)) return ["Report must be exactly one JSON object."];
 

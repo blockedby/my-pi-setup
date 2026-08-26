@@ -11,8 +11,8 @@ import type {
   AgentTreeSessionFactory,
 } from "../shared/agent-tree/domain.ts";
 import {
+  FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
-  LUNA_MODEL,
   PIPELINE_4_LUNA_AUDIT_ROLES,
   PIPELINE_STAGES,
   PLAN_PIPELINE_AUDIT_ROLES,
@@ -22,8 +22,6 @@ import {
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SMALL_FEATURE_PIPELINE_ID,
-  SOL_MODEL,
-  TERRA_MODEL,
   childContextPolicyFor,
   definitionFor,
   initialStageForDefinition,
@@ -32,6 +30,7 @@ import {
   rolesForDefinition,
   stagesForDefinition,
   titleForRole,
+  type FeaturePipelineDiscoveryRole,
   type PipelineChildRole,
   type PipelineCompletionFacts,
   type PipelineDefinitionId,
@@ -45,7 +44,21 @@ import {
   validatePipelineReport,
   writePlanArtifact,
 } from "./plan-contract.ts";
-import { buildPipelineChildPrompt, buildPipelinePrompt } from "./prompt.ts";
+import {
+  buildPipelineChildPrompt,
+  buildPipelinePrompt,
+  type FeatureDiscoveryReportContext,
+} from "./prompt.ts";
+
+const FEATURE_DISCOVERY_REPORT_MAX_BYTES = 32 * 1024;
+
+function isFeatureDiscoveryRole(
+  role: string,
+): role is FeaturePipelineDiscoveryRole {
+  return (FEATURE_PIPELINE_DISCOVERY_ROLES as ReadonlyArray<string>).includes(
+    role,
+  );
+}
 
 interface MutableRun {
   id: string;
@@ -58,6 +71,7 @@ interface MutableRun {
   finishedAt?: number;
   error?: string;
   rootId?: string;
+  featureDiscoveryBootstrapped: boolean;
   completion?: PipelineCompletionFacts;
   planArtifactsWritten: Map<
     string,
@@ -135,11 +149,8 @@ export class PipelineController {
         (runId) => this.createRootTools(runId),
         (runId) => this.requireRun(runId).definition,
       ),
-      capacity: {
-        [SOL_MODEL]: 4,
-        [TERRA_MODEL]: 8,
-        [LUNA_MODEL]: 16,
-      },
+      // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
+      // intentionally do not apply to pipeline roots or children.
       makeId: options.makeAgentId,
     });
     this.tree.view.subscribe(() => this.onTreeChange());
@@ -210,6 +221,7 @@ export class PipelineController {
       stage: initialStageForDefinition(request.pipeline ?? FEATURE_PIPELINE_ID),
       status: "starting",
       startedAt: Date.now(),
+      featureDiscoveryBootstrapped: false,
       planArtifactsWritten: new Map(),
     };
     this.runs.set(id, run);
@@ -229,6 +241,7 @@ export class PipelineController {
         cwd: run.request.workingDir,
         prompt: buildPipelinePrompt(run.definition, run.request),
         persistent: true,
+        deferPrompt: run.definition === FEATURE_PIPELINE_ID,
         shouldStart: () => run.status === "starting",
       });
       run.rootId = root.id;
@@ -247,10 +260,119 @@ export class PipelineController {
       } else {
         run.status = "running";
         this.notify();
+        if (run.definition === FEATURE_PIPELINE_ID) {
+          const discoveryReports = await this.bootstrapFeatureDiscovery(run);
+          if (run.status !== "running") return;
+          await this.tree.startDeferred(
+            root.id,
+            buildPipelinePrompt(run.definition, run.request, discoveryReports),
+          );
+        }
       }
     } catch (error) {
-      this.failRun(run, error instanceof Error ? error.message : String(error));
+      this.failRun(
+        run,
+        error instanceof Error ? error.message : String(error),
+        Boolean(run.rootId),
+      );
     }
+  }
+
+  private async spawnFeatureDiscoveryAttempt(
+    run: MutableRun,
+    role: FeaturePipelineDiscoveryRole,
+  ) {
+    try {
+      return await this.spawnChildForRun(run, role, "", true);
+    } catch (error) {
+      if (run.status !== "running") throw error;
+      const attempts = this.agentsFor(run.id).filter(
+        (agent) => agent.role === role,
+      );
+      const failedBeforeSession =
+        attempts.length === 1 &&
+        attempts[0]?.status === "error" &&
+        !attempts[0].sessionFile;
+      if (!failedBeforeSession) throw error;
+      return this.spawnChildForRun(run, role, "", true);
+    }
+  }
+
+  private featureDiscoveryReportAgent(
+    run: MutableRun,
+    role: FeaturePipelineDiscoveryRole,
+  ) {
+    return this.agentsFor(run.id)
+      .filter(
+        (agent) =>
+          agent.role === role &&
+          (agent.status === "done" || agent.status === "idle") &&
+          Buffer.byteLength(agent.finalText, "utf8") <=
+            FEATURE_DISCOVERY_REPORT_MAX_BYTES &&
+          validatePipelineReport(run.definition, role, agent.finalText)
+            .length === 0,
+      )
+      .at(-1);
+  }
+
+  private featureDiscoveryReports(run: MutableRun) {
+    return FEATURE_PIPELINE_DISCOVERY_ROLES.map((role) => {
+      const agent = this.featureDiscoveryReportAgent(run, role);
+      if (!agent) {
+        throw new Error(
+          `feature-pipeline programmatic discovery has no valid ${role} report.`,
+        );
+      }
+      return {
+        role,
+        report: agent.finalText,
+      } satisfies FeatureDiscoveryReportContext;
+    });
+  }
+
+  private async bootstrapFeatureDiscovery(run: MutableRun) {
+    const initial = await Promise.all(
+      FEATURE_PIPELINE_DISCOVERY_ROLES.map((role) =>
+        this.spawnFeatureDiscoveryAttempt(run, role),
+      ),
+    );
+    await this.waitForChildren(
+      run.id,
+      initial.map((agent) => agent.id),
+    );
+    if (run.status !== "running") return [];
+
+    const retryIds: string[] = [];
+    for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) {
+      if (this.featureDiscoveryReportAgent(run, role)) continue;
+      const attempts = this.agentsFor(run.id).filter(
+        (agent) => agent.role === role,
+      );
+      const latest = attempts.at(-1);
+      if (!latest || latest.status === "cancelled" || attempts.length >= 2) {
+        throw new Error(
+          `feature-pipeline programmatic discovery failed for ${role}.`,
+        );
+      }
+      await this.tree.send(
+        latest.id,
+        `Your discovery report was missing, malformed, failed, or exceeded ${FEATURE_DISCOVERY_REPORT_MAX_BYTES} UTF-8 bytes. Retry this same role once. Return only one corrected compact JSON object matching the original report contract.`,
+      );
+      retryIds.push(latest.id);
+    }
+
+    if (retryIds.length > 0) {
+      await this.waitForChildren(run.id, retryIds);
+    }
+    if (run.status !== "running") return [];
+    const reports = this.featureDiscoveryReports(run);
+    if (run.stage !== "build") {
+      throw new Error(
+        "feature-pipeline programmatic discovery did not advance to build.",
+      );
+    }
+    run.featureDiscoveryBootstrapped = true;
+    return reports;
   }
 
   private onTreeChange() {
@@ -313,6 +435,12 @@ export class PipelineController {
   }
 
   private roleHasValidReport(run: MutableRun, role: PipelineChildRole) {
+    if (
+      run.definition === FEATURE_PIPELINE_ID &&
+      isFeatureDiscoveryRole(role)
+    ) {
+      return Boolean(this.featureDiscoveryReportAgent(run, role));
+    }
     return this.agentsFor(run.id).some(
       (agent) =>
         agent.role === role &&
@@ -445,6 +573,14 @@ export class PipelineController {
           stage,
         );
       }
+    } else if (
+      run.definition === FEATURE_PIPELINE_ID &&
+      stage === "discover" &&
+      run.featureDiscoveryBootstrapped
+    ) {
+      throw new Error(
+        "feature-pipeline cannot return to controller-owned discovery after bootstrap.",
+      );
     } else if (run.definition === PLAN_PIPELINE_ID) {
       const currentIndex = PIPELINE_STAGES.indexOf(run.stage);
       const nextIndex = PIPELINE_STAGES.indexOf(stage);
@@ -480,7 +616,21 @@ export class PipelineController {
     role: PipelineChildRole,
     additionalContext = "",
   ) {
-    const run = this.requireActiveRun(runId);
+    return this.spawnChildForRun(
+      this.requireActiveRun(runId),
+      role,
+      additionalContext,
+      false,
+    );
+  }
+
+  private spawnChildForRun(
+    run: MutableRun,
+    role: PipelineChildRole,
+    additionalContext: string,
+    controllerOwnedDiscovery: boolean,
+  ) {
+    const runId = run.id;
     if (!roleBelongsToDefinition(run.definition, role)) {
       throw new Error(`Unsupported ${run.definition} child role "${role}".`);
     }
@@ -489,6 +639,21 @@ export class PipelineController {
     const priorAttempts = this.agentsFor(runId).filter(
       (agent) => agent.role === role,
     );
+    if (
+      run.definition === FEATURE_PIPELINE_ID &&
+      isFeatureDiscoveryRole(role)
+    ) {
+      if (!controllerOwnedDiscovery) {
+        throw new Error(
+          `${role} is controller-owned and unavailable to feature-pipeline Sol.`,
+        );
+      }
+      if (run.stage !== "discover" || run.featureDiscoveryBootstrapped) {
+        throw new Error(
+          `${role} can only start during controller-owned feature discovery bootstrap.`,
+        );
+      }
+    }
     if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
       const requiredStage =
         role === SMALL_FEATURE_IMPLEMENTER_ROLE ? "build" : "final-audit";
@@ -540,7 +705,7 @@ export class PipelineController {
     ]
       .filter((item) => item.trim())
       .join("\n");
-    return this.tree.spawn({
+    const spec = {
       scopeId: runId,
       parentId: run.rootId,
       role,
@@ -557,7 +722,9 @@ export class PipelineController {
       persistent:
         run.definition === SMALL_FEATURE_PIPELINE_ID &&
         role === SMALL_FEATURE_IMPLEMENTER_ROLE,
-    });
+      shouldStart: () => run.status === "starting" || run.status === "running",
+    };
+    return this.tree.spawn(spec);
   }
 
   listChildren(runId: string) {
@@ -618,6 +785,14 @@ export class PipelineController {
     const run = this.requireActiveRun(runId);
     const agent = this.getAgent(runId, id);
     if (!agent.parentId) throw new Error(`Agent "${id}" is the pipeline root.`);
+    if (
+      run.definition === FEATURE_PIPELINE_ID &&
+      isFeatureDiscoveryRole(agent.role)
+    ) {
+      throw new Error(
+        "feature-pipeline discovery retries are controller-owned and unavailable to Sol.",
+      );
+    }
     if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
       if (agent.role !== SMALL_FEATURE_IMPLEMENTER_ROLE) {
         throw new Error(

@@ -221,6 +221,39 @@ test("small-feature reports require exact implementation and four-track Luna aud
   }
 });
 
+test("feature child report contracts reject malformed programmatic discovery", () => {
+  const valid = JSON.stringify({
+    summary: "Repository evidence",
+    evidence: ["src/feature.ts"],
+    unknowns: [],
+    constraints: [],
+  });
+  assert.deepEqual(
+    validatePipelineReport("feature-pipeline", "discover-problem", valid),
+    [],
+  );
+  assert.match(
+    validatePipelineReport(
+      "feature-pipeline",
+      "discover-problem",
+      "not-json",
+    )[0] ?? "",
+    /exactly one JSON object/,
+  );
+  assert.deepEqual(
+    validatePipelineReport(
+      "feature-pipeline",
+      PIPELINE_4_LUNA_AUDIT_ROLES[0],
+      JSON.stringify({
+        track: PIPELINE_4_LUNA_AUDIT_ROLES[0],
+        findings: [],
+        unprovenChecks: [],
+      }),
+    ),
+    [],
+  );
+});
+
 test("plan child report contracts distinguish discovery, Luna audit, and Terra audit", () => {
   assert.deepEqual(
     validatePipelineReport(
@@ -325,12 +358,12 @@ test("plan child report contracts distinguish discovery, Luna audit, and Terra a
     )[0] ?? "",
     /complete canonical initial-review JSON result schema/,
   );
-  assert.deepEqual(
+  assert.match(
     validatePipelineReport(
       "feature-pipeline",
       "discover-problem",
-      "legacy feature report handling remains unchanged",
-    ),
-    [],
+      "feature reports now fail closed",
+    )[0] ?? "",
+    /exactly one JSON object/,
   );
 });
