@@ -32,22 +32,45 @@ export const SMALL_FEATURE_PIPELINE_STAGES = [
   "complete",
 ] as const satisfies ReadonlyArray<PipelineStage>;
 
-export const FEATURE_PIPELINE_CHILD_ROLES = [
+export const FINAL_AUDIT_ROLE = "final-audit" as const;
+
+export const FEATURE_PIPELINE_DISCOVERY_ROLES = [
   "discover-problem",
   "discover-outcome",
   "discover-context",
   "discover-user-scenarios",
   "discover-product-precedents",
-  "audit-feature-outcome",
-  "audit-logic-invariants",
-  "audit-functional-correctness",
-  "audit-reliability-regressions",
-  "final-audit",
 ] as const;
 
+export const FEATURE_OUTCOME_AUDIT_ROLE = "audit-feature-outcome" as const;
+export const FEATURE_LOGIC_AUDIT_ROLE = "audit-logic-invariants" as const;
+export const FEATURE_CORRECTNESS_AUDIT_ROLE =
+  "audit-functional-correctness" as const;
+export const FEATURE_RELIABILITY_AUDIT_ROLE =
+  "audit-reliability-regressions" as const;
+
+export const FEATURE_PIPELINE_LUNA_AUDIT_ROLES = [
+  FEATURE_OUTCOME_AUDIT_ROLE,
+  FEATURE_LOGIC_AUDIT_ROLE,
+  FEATURE_CORRECTNESS_AUDIT_ROLE,
+  FEATURE_RELIABILITY_AUDIT_ROLE,
+] as const;
+export type FeaturePipelineLunaAuditRole =
+  (typeof FEATURE_PIPELINE_LUNA_AUDIT_ROLES)[number];
+
+export const FEATURE_PIPELINE_CHILD_ROLES = [
+  ...FEATURE_PIPELINE_DISCOVERY_ROLES,
+  ...FEATURE_PIPELINE_LUNA_AUDIT_ROLES,
+  FINAL_AUDIT_ROLE,
+] as const;
+
+export const SMALL_FEATURE_IMPLEMENTER_ROLE =
+  "implement-small-feature" as const;
+export const SMALL_FEATURE_AUDIT_ROLE = "audit-small-feature" as const;
+
 export const SMALL_FEATURE_PIPELINE_CHILD_ROLES = [
-  "implement-small-feature",
-  "audit-small-feature",
+  SMALL_FEATURE_IMPLEMENTER_ROLE,
+  SMALL_FEATURE_AUDIT_ROLE,
 ] as const;
 
 export const PLAN_PIPELINE_DISCOVERY_ROLES = [
@@ -68,7 +91,7 @@ export const PLAN_PIPELINE_AUDIT_ROLES = [
 export const PLAN_PIPELINE_CHILD_ROLES = [
   ...PLAN_PIPELINE_DISCOVERY_ROLES,
   ...PLAN_PIPELINE_AUDIT_ROLES,
-  "final-audit",
+  FINAL_AUDIT_ROLE,
 ] as const;
 
 // Backward-compatible alias for feature-pipeline callers and tests.
@@ -82,6 +105,42 @@ export type PipelineChildRole =
   | FeaturePipelineChildRole
   | SmallFeaturePipelineChildRole
   | PlanPipelineChildRole;
+
+export interface PipelineChildContextPolicy {
+  readonly gitEvidence?: true;
+  readonly priorReportRole?: PipelineChildRole;
+}
+
+type PipelineChildContextPolicies = Readonly<
+  Record<
+    PipelineDefinitionId,
+    Readonly<Partial<Record<PipelineChildRole, PipelineChildContextPolicy>>>
+  >
+>;
+
+export const PIPELINE_CHILD_CONTEXT_POLICIES: PipelineChildContextPolicies = {
+  [FEATURE_PIPELINE_ID]: {
+    [FEATURE_OUTCOME_AUDIT_ROLE]: { gitEvidence: true },
+    [FEATURE_LOGIC_AUDIT_ROLE]: { gitEvidence: true },
+    [FEATURE_CORRECTNESS_AUDIT_ROLE]: { gitEvidence: true },
+    [FEATURE_RELIABILITY_AUDIT_ROLE]: { gitEvidence: true },
+    [FINAL_AUDIT_ROLE]: { gitEvidence: true },
+  },
+  [SMALL_FEATURE_PIPELINE_ID]: {
+    [SMALL_FEATURE_AUDIT_ROLE]: {
+      gitEvidence: true,
+      priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
+    },
+  },
+  [PLAN_PIPELINE_ID]: {},
+};
+
+export function childContextPolicyFor(
+  definition: PipelineDefinitionId,
+  role: PipelineChildRole,
+) {
+  return PIPELINE_CHILD_CONTEXT_POLICIES[definition][role] ?? {};
+}
 
 export interface PipelineDefinition {
   readonly id: PipelineDefinitionId;
@@ -188,7 +247,7 @@ export interface PipelineHandoff {
 }
 
 export function modelForRole(role: PipelineChildRole) {
-  return role === "final-audit" || role === "audit-small-feature"
+  return role === FINAL_AUDIT_ROLE || role === SMALL_FEATURE_AUDIT_ROLE
     ? TERRA_MODEL
     : LUNA_MODEL;
 }

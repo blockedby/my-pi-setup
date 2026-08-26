@@ -14,14 +14,19 @@ import { PipelineController } from "./controller.ts";
 import { pipelineSessionToolPolicy } from "./session.ts";
 import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
+  FEATURE_PIPELINE_LUNA_AUDIT_ROLES,
+  FINAL_AUDIT_ROLE,
   LUNA_MODEL,
   PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_AUDIT_ROLES,
   PLAN_PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
+  SMALL_FEATURE_AUDIT_ROLE,
+  SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SOL_MODEL,
   TERRA_MODEL,
+  childContextPolicyFor,
   type PipelineChildRole,
   type PipelineHandoff,
 } from "./domain.ts";
@@ -338,6 +343,29 @@ test("root tools are run-scoped and children have coding tools without orchestra
   await run.controller.dispose();
 });
 
+test("definition role policies centralize child context requirements", () => {
+  for (const role of [...FEATURE_PIPELINE_LUNA_AUDIT_ROLES, FINAL_AUDIT_ROLE]) {
+    assert.deepEqual(childContextPolicyFor("feature-pipeline", role), {
+      gitEvidence: true,
+    });
+  }
+  assert.deepEqual(
+    childContextPolicyFor("small-feature-pipeline", SMALL_FEATURE_AUDIT_ROLE),
+    {
+      gitEvidence: true,
+      priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
+    },
+  );
+  assert.deepEqual(
+    childContextPolicyFor("feature-pipeline", "discover-problem"),
+    {},
+  );
+  assert.deepEqual(
+    childContextPolicyFor("plan-pipeline", "audit-decomposition-dag"),
+    {},
+  );
+});
+
 test("small-feature Sol and Terra are read-only while Luna keeps coding tools", () => {
   const rootDenied = new Set<string>(
     pipelineSessionToolPolicy("small-feature-pipeline", true, "pipeline-root")
@@ -594,6 +622,63 @@ test("small-feature-pipeline reuses one persistent Luna after one Terra audit", 
   );
 
   await run.controller.dispose();
+});
+
+test("feature Luna audits and final Terra receive fresh base-relative Git evidence", async () => {
+  const workingDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "feature-audit-evidence-"),
+  );
+  execFileSync("git", ["init", "-q"], { cwd: workingDir });
+  execFileSync("git", ["config", "user.email", "test@example.com"], {
+    cwd: workingDir,
+  });
+  execFileSync("git", ["config", "user.name", "Test"], {
+    cwd: workingDir,
+  });
+  fs.mkdirSync(path.join(workingDir, "src"));
+  fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "before\n");
+  execFileSync("git", ["add", "."], { cwd: workingDir });
+  execFileSync("git", ["commit", "-qm", "baseline"], { cwd: workingDir });
+  const baseSha = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: workingDir,
+    encoding: "utf8",
+  }).trim();
+
+  const run = harness();
+  const runId = run.controller.start(request(workingDir));
+  await settleInitialization();
+  fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "after\n");
+  run.controller.setStage(runId, "audit");
+  await Promise.all(
+    FEATURE_PIPELINE_LUNA_AUDIT_ROLES.map((role) =>
+      run.controller.spawnChild(runId, role),
+    ),
+  );
+  for (const role of FEATURE_PIPELINE_LUNA_AUDIT_ROLES) {
+    const lunaAudit = run.sessions.find(
+      (session) => session.spec.role === role,
+    );
+    assert.ok(lunaAudit);
+    assert.equal(lunaAudit.prompts[0]?.includes(baseSha), true);
+    assert.equal(lunaAudit.prompts[0]?.includes("-before"), true);
+    assert.equal(lunaAudit.prompts[0]?.includes("+after"), true);
+    settleRole(run, role);
+  }
+
+  fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "final\n");
+  run.controller.setStage(runId, "final-audit");
+  await run.controller.spawnChild(runId, "final-audit");
+  const terraAudit = run.sessions.find(
+    (session) => session.spec.role === "final-audit",
+  );
+  assert.ok(terraAudit);
+  assert.equal(terraAudit.prompts[0]?.includes(baseSha), true);
+  assert.equal(terraAudit.prompts[0]?.includes("-before"), true);
+  assert.equal(terraAudit.prompts[0]?.includes("+final"), true);
+  assert.equal(terraAudit.prompts[0]?.includes("+after"), false);
+
+  await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
 test("small-feature Terra receives the captured base and actual workspace diff", async () => {

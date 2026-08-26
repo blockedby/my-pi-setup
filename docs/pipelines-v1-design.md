@@ -43,6 +43,8 @@ The pipeline agent launches four fixed Luna feature-review tracks in parallel:
 
 Each returns evidence to the pipeline agent; it does not issue the final pipeline decision. All four use a shared finding contract derived from the canonical audit skill: concrete `scenario`, `expected`, `actual`, affected paths, relationship to the change, evidence type/evidence, impact, confidence, and minimal next action, plus exact unproven checks when necessary. They omit style/taste, generic hardening, unsupported speculation, impact-1 candidates, and confidence below 50. Missing tests are reported only when tied to a demonstrated behavior gap; Luna auditors do not emit READY/NOT_READY verdicts.
 
+The host captures `HEAD` when the feature run starts. At each Luna audit spawn it supplies that stable base, `WORKTREE` review-head label, current short Git status, and a bounded base-relative diff in addition to Sol's feature contract/check context. At final Terra spawn the host collects the evidence again, after Luna remediation, so Terra reviews the current change independently without receiving prior Luna reports. These are internal read-only commands invoked without shell interpolation; no agent receives a new Git mutation tool. A non-Git workspace degrades to explicit unavailable evidence, and status plus normal read-only file tools cover reported untracked paths.
+
 ## Current flow (confirmed only)
 
 ```text

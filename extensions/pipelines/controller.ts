@@ -22,6 +22,7 @@ import {
   SMALL_FEATURE_PIPELINE_ID,
   SOL_MODEL,
   TERRA_MODEL,
+  childContextPolicyFor,
   definitionFor,
   initialStageForDefinition,
   modelForRole,
@@ -520,27 +521,20 @@ export class PipelineController {
       }
     }
     const attempt = priorAttempts.length + 1;
-    const promptContext =
-      run.definition === SMALL_FEATURE_PIPELINE_ID &&
-      role === "audit-small-feature"
-        ? [
-            "Luna implementation report:",
-            this.agentsFor(runId).find(
-              (agent) => agent.role === "implement-small-feature",
-            )?.finalText ?? "",
-            "Workspace review base:",
-            run.baseSha,
-            "Workspace review head:",
-            "WORKTREE",
-            "Workspace Git status:",
-            this.gitStatus(runId),
-            "Workspace Git diff:",
-            this.gitDiff(runId),
-            additionalContext,
-          ]
-            .filter((item) => item.trim())
-            .join("\n")
-        : additionalContext;
+    const contextPolicy = childContextPolicyFor(run.definition, role);
+    const priorReportRole = contextPolicy.priorReportRole;
+    const priorReport = priorReportRole
+      ? this.agentsFor(runId).find((agent) => agent.role === priorReportRole)
+      : undefined;
+    const promptContext = [
+      ...(priorReport && priorReportRole
+        ? [`${titleForRole(priorReportRole)} report:`, priorReport.finalText]
+        : []),
+      ...(contextPolicy.gitEvidence ? [this.gitEvidence(runId)] : []),
+      additionalContext,
+    ]
+      .filter((item) => item.trim())
+      .join("\n");
     return this.tree.spawn({
       scopeId: runId,
       parentId: run.rootId,
@@ -730,6 +724,20 @@ export class PipelineController {
     } catch (error) {
       return `Git status unavailable: ${error instanceof Error ? error.message : String(error)}`;
     }
+  }
+
+  private gitEvidence(runId: string) {
+    const run = this.requireActiveRun(runId);
+    return [
+      "Workspace review base:",
+      run.baseSha,
+      "Workspace review head:",
+      "WORKTREE",
+      "Workspace Git status:",
+      this.gitStatus(runId),
+      "Workspace Git diff:",
+      this.gitDiff(runId),
+    ].join("\n");
   }
 
   private gitDiff(runId: string) {
