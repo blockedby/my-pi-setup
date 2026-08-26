@@ -30,14 +30,18 @@ import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
 import {
   AUDIT_PIPELINE_ID,
   AUDIT_SYNTHESIS_ROLE,
+  FEATURE_PIPELINE_DISCOVERY_ROLES,
+  FEATURE_PIPELINE_ID,
   LUNA_MODEL,
   PIPELINE_4_LUNA_AUDIT_ROLES,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
+  type FeaturePipelineDiscoveryRole,
   type PipelineDefinitionId,
   type PipelineLunaAuditRole,
 } from "./domain.ts";
+import { featureDiscoveryReportSchema } from "./discovery-report.ts";
 import type {
   AgentNodeSpec,
   AgentTreeSessionEvent,
@@ -64,6 +68,18 @@ interface PipelineSessionFactoryOptions {
     token: string,
   ) => void;
   readonly auditToolAllowed?: (runId: string, role: string) => boolean;
+  readonly discoverySubmit?: (
+    runId: string,
+    role: string,
+    sessionToken: string,
+    value: unknown,
+  ) => void;
+  readonly discoverySessionCreated?: (
+    runId: string,
+    role: string,
+    token: string,
+  ) => void;
+  readonly discoveryToolAllowed?: (runId: string, role: string) => boolean;
 }
 
 function textContent(message: Message) {
@@ -144,6 +160,32 @@ function auditSubmissionRole(role: string) {
   return PIPELINE_4_LUNA_AUDIT_ROLES.find((candidate) => candidate === role);
 }
 
+export function createPipelineDiscoverySubmitTool(
+  role: FeaturePipelineDiscoveryRole,
+  submit: (value: unknown) => void,
+) {
+  return defineTool({
+    name: "pipeline_discovery_submit",
+    label: "Submit Discovery Report",
+    description:
+      "Submit this role's complete feature discovery V2 report to the host and stop this turn.",
+    parameters: featureDiscoveryReportSchema(role),
+    async execute(_toolCallId, params) {
+      submit(params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Discovery report recorded. Stop this turn.",
+          },
+        ],
+        details: params,
+        terminate: true,
+      };
+    },
+  });
+}
+
 export function createPipelineAuditSubmitTool(
   role: typeof AUDIT_SYNTHESIS_ROLE | PipelineLunaAuditRole,
   submit: (value: unknown) => void,
@@ -190,6 +232,14 @@ export function pipelineSessionToolPolicy(
   if (
     role === AUDIT_SYNTHESIS_ROLE ||
     PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)
+  ) {
+    return readOnlyPipelineChildToolPolicy();
+  }
+  if (
+    definition === FEATURE_PIPELINE_ID &&
+    FEATURE_PIPELINE_DISCOVERY_ROLES.some(
+      (discoveryRole) => discoveryRole === role,
+    )
   ) {
     return readOnlyPipelineChildToolPolicy();
   }
@@ -305,6 +355,35 @@ export function createPipelineSessionFactory(
       const isRoot = !spec.parentId;
       const definition = options.definitionForRun(spec.scopeId ?? "");
       const submissionRole = auditSubmissionRole(spec.role);
+      const discoveryRole = FEATURE_PIPELINE_DISCOVERY_ROLES.find(
+        (candidate) => candidate === spec.role,
+      );
+      const discoveryToolAllowed =
+        !isRoot &&
+        definition === FEATURE_PIPELINE_ID &&
+        discoveryRole &&
+        options.discoverySubmit &&
+        options.discoveryToolAllowed?.(spec.scopeId ?? "", spec.role);
+      const discoverySessionToken = discoveryToolAllowed
+        ? randomUUID()
+        : undefined;
+      if (discoverySessionToken)
+        options.discoverySessionCreated?.(
+          spec.scopeId ?? "",
+          spec.role,
+          discoverySessionToken,
+        );
+      const discoveryTool =
+        discoveryToolAllowed && discoverySessionToken && discoveryRole
+          ? createPipelineDiscoverySubmitTool(discoveryRole, (value) =>
+              options.discoverySubmit!(
+                spec.scopeId ?? "",
+                spec.role,
+                discoverySessionToken,
+                value,
+              ),
+            )
+          : undefined;
       const auditToolAllowed =
         submissionRole &&
         options.auditSubmit &&
@@ -333,6 +412,7 @@ export function createPipelineSessionFactory(
           : undefined;
       const sessionTools = [
         ...(customTools ?? []),
+        ...(discoveryTool ? [discoveryTool] : []),
         ...(auditTool ? [auditTool] : []),
       ];
       const { session } = await createAgentSession({

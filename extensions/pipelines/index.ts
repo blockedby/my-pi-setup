@@ -211,6 +211,9 @@ export default function pipelines(pi: ExtensionAPI) {
         auditSubmit,
         auditSessionCreated,
         auditToolAllowed,
+        discoverySubmit,
+        discoverySessionCreated,
+        discoveryToolAllowed,
       ) =>
         createPipelineSessionFactory({
           modelRegistry: ctx.modelRegistry,
@@ -221,6 +224,9 @@ export default function pipelines(pi: ExtensionAPI) {
           auditSubmit,
           auditSessionCreated,
           auditToolAllowed,
+          discoverySubmit,
+          discoverySessionCreated,
+          discoveryToolAllowed,
         }),
       onHandoff: deliver,
     });
