@@ -93,7 +93,19 @@ Deferred Sol/high root
   → factual completion
 ```
 
-Discovery retry remains controller-owned: one same-session retry for malformed/failed output or one replacement when no session was created. Pre-final audit retry remains bounded and root-controlled. The final audit segment is controller-owned and fail-closed.
+Feature discovery remains controller-owned, parallel, and read-only by tool policy. Its sessions retain `read`, `fd`, `rg`, and deterministic read-only web search/fetch when available, while shell/edit/write, delegated patch/task tools, MCP, background mutation, user interaction, and pipeline/workflow/subagent orchestration are denied. No discovery tool is exposed to plan discovery or any non-feature-discovery session.
+
+Each track has a role-fixed TypeBox `feature-discovery-v2` schema and matching host validation. The common envelope carries applicability, a bounded synthesis, coverage in exact deterministic role order, typed evidence, candidate acceptance records, actionable unknown/safe-assumption records, and sourced constraints. The ordered criteria are:
+
+- problem: actor/job, current behavior, problem or opportunity, observable consequence, boundaries, non-goals, neighboring flows;
+- outcome: primary, alternate, and failure outcomes, candidate acceptance, observable verification, non-goals;
+- context: current user journey, direct dependencies, contracts/invariants, neighboring scenarios, repository conventions, integration boundaries;
+- user scenarios: primary, alternate, empty, error, permission/auth, retry/recovery, before/after transition;
+- product precedents: similar behavior, established terminology, implementation and testing precedents, reusable pattern, intentional divergence.
+
+Missing, duplicate, unknown, or reordered criteria fail validation. `covered`, `partial`, and `not_applicable` coverage require specific evidence; N/A also requires a conclusion. Unknown coverage requires a distinct actionable unknown. `discover-outcome` and `discover-user-scenarios` require at least two observable candidate criteria unless top-level applicability is `not_applicable`; discovery records evidence and verification rather than selecting an implementation solution. Collections are capped at 12, ordinary text at 2 KiB, reports at 20 KiB UTF-8, and five-report fan-in at 100 KiB.
+
+The role calls `pipeline_discovery_submit`; an unexposed controller token binds the tool closure to the concrete registered node. The host records payload during the turn and consumes/validates it only after that same session settles. Validated final-text JSON remains a compatibility fallback. Parsed reports plus role/session/attempt/submission provenance enter Sol context as untrusted objects rather than JSON strings embedded inside JSON. Correction accounting is independent per concrete session: rejected settled turns one through three continue that same session without cancelling other tracks, while rejection four fails the run and cancels remaining sessions. Provider failure/cancellation may fail immediately. A replacement is allowed only when creation failed before a usable session existed. Pre-final audit retry remains bounded and root-controlled; the final audit segment remains controller-owned and fail-closed.
 
 ### Small-feature pipeline
 

@@ -2,11 +2,14 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  FEATURE_PIPELINE_DISCOVERY_ROLES,
+  FEATURE_PIPELINE_ID,
   PIPELINE_4_LUNA_AUDIT_ROLES,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_PIPELINE_ID,
   type PipelineDefinitionId,
 } from "./domain.ts";
+import { validateFeatureDiscoveryReport } from "./discovery-report.ts";
 
 export const PLAN_REQUIRED_SECTIONS = [
   "Goal and non-goals",
@@ -556,6 +559,12 @@ export function validatePipelineReport(
         ];
   }
 
+  const featureDiscoveryRole = FEATURE_PIPELINE_DISCOVERY_ROLES.find(
+    (discoveryRole) => discoveryRole === role,
+  );
+  if (definition === FEATURE_PIPELINE_ID && featureDiscoveryRole) {
+    return validateFeatureDiscoveryReport(featureDiscoveryRole, report);
+  }
   if (role.startsWith("discover-")) {
     return validDiscoveryReport(report)
       ? []

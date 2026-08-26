@@ -10,11 +10,15 @@ import type {
   AgentTreeSession,
   AgentTreeSessionEvent,
 } from "../shared/agent-tree/domain.ts";
-import { PipelineController } from "./controller.ts";
+import {
+  PipelineController,
+  pipelineDiscoverySubmissionAllowed,
+} from "./controller.ts";
 import { inspectPipeline, PIPELINE_CHECK_MAX_BYTES } from "./inspection.ts";
 import { pipelineSessionToolPolicy, pipelineThinkingLevel } from "./session.ts";
 import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
+  FEATURE_PIPELINE_DISCOVERY_ROLES,
   PIPELINE_4_LUNA_AUDIT_ROLES,
   FINAL_AUDIT_ROLE,
   LUNA_MODEL,
@@ -30,6 +34,7 @@ import {
   type PipelineChildRole,
   type PipelineHandoff,
 } from "./domain.ts";
+import { FEATURE_DISCOVERY_COVERAGE } from "./discovery-report.ts";
 
 class FakePipelineSession implements AgentTreeSession {
   readonly listeners = new Set<(event: AgentTreeSessionEvent) => void>();
@@ -43,15 +48,18 @@ class FakePipelineSession implements AgentTreeSession {
   readonly activeTools: ReadonlyArray<string>;
   readonly spec: AgentNodeSpec;
   readonly autoReport?: string;
+  readonly discoverySubmit?: (value: unknown) => void;
 
   constructor(
     activeTools: ReadonlyArray<string>,
     spec: AgentNodeSpec,
     autoReport?: string,
+    discoverySubmit?: (value: unknown) => void,
   ) {
     this.activeTools = activeTools;
     this.spec = spec;
     this.autoReport = autoReport;
+    this.discoverySubmit = discoverySubmit;
     this.sessionFile = `/tmp/${spec.scopeId}-${spec.role}-${spec.attempt}.jsonl`;
   }
 
@@ -106,35 +114,84 @@ function harness(
   let agentSequence = 0;
   let runSequence = 0;
   let rootToolNames: string[] = [];
+  let discoverySubmitCallback:
+    | ((
+        runId: string,
+        role: string,
+        sessionToken: string,
+        value: unknown,
+      ) => void)
+    | undefined;
   const controller = new PipelineController({
     makeRunId: () => `run-${++runSequence}`,
     makeAgentId: () => `node-${++agentSequence}`,
     createSessionFactory: (
       rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
       definitionForRun,
-    ) => ({
-      async create(spec) {
-        if (!spec.parentId && options.rootGate) await options.rootGate;
-        const orchestration = !spec.parentId
-          ? rootTools(spec.scopeId ?? "").map((tool) => tool.name)
-          : [];
-        if (!spec.parentId) rootToolNames = orchestration;
-        const autoReport =
-          options.autoCompleteFeatureDiscovery !== false &&
-          spec.parentId &&
-          definitionForRun(spec.scopeId ?? "") === "feature-pipeline" &&
-          spec.role.startsWith("discover-")
-            ? reportForRole(spec.role)
+      _auditSubmit,
+      _auditSessionCreated,
+      _auditToolAllowed,
+      discoverySubmit,
+      discoverySessionCreated,
+      discoveryToolAllowed,
+    ) => {
+      discoverySubmitCallback = discoverySubmit;
+      return {
+        async create(spec) {
+          if (!spec.parentId && options.rootGate) await options.rootGate;
+          const orchestration = !spec.parentId
+            ? rootTools(spec.scopeId ?? "").map((tool) => tool.name)
+            : [];
+          if (!spec.parentId) rootToolNames = orchestration;
+          const autoReport =
+            options.autoCompleteFeatureDiscovery !== false &&
+            spec.parentId &&
+            definitionForRun(spec.scopeId ?? "") === "feature-pipeline" &&
+            spec.role.startsWith("discover-")
+              ? reportForRole(spec.role)
+              : undefined;
+          const discoveryAllowed =
+            Boolean(spec.parentId) &&
+            Boolean(discoverySubmit) &&
+            Boolean(discoveryToolAllowed?.(spec.scopeId ?? "", spec.role));
+          const discoveryToken = discoveryAllowed
+            ? `token-${spec.scopeId}-${spec.role}-${spec.attempt}`
             : undefined;
-        const session = new FakePipelineSession(
-          ["read", "bash", "edit", "write", ...orchestration],
-          spec,
-          autoReport,
-        );
-        sessions.push(session);
-        return session;
-      },
-    }),
+          if (discoveryToken) {
+            discoverySessionCreated?.(
+              spec.scopeId ?? "",
+              spec.role,
+              discoveryToken,
+            );
+          }
+          const session = new FakePipelineSession(
+            spec.parentId
+              ? [
+                  "read",
+                  "fd",
+                  "rg",
+                  "web_search_codex",
+                  "web_fetch_codex",
+                  ...(discoveryAllowed ? ["pipeline_discovery_submit"] : []),
+                ]
+              : ["read", "bash", "edit", "write", ...orchestration],
+            spec,
+            autoReport,
+            discoveryToken
+              ? (value) =>
+                  discoverySubmit?.(
+                    spec.scopeId ?? "",
+                    spec.role,
+                    discoveryToken,
+                    value,
+                  )
+              : undefined,
+          );
+          sessions.push(session);
+          return session;
+        },
+      };
+    },
     onHandoff: (handoff) => {
       handoffs.push(handoff);
     },
@@ -145,6 +202,10 @@ function harness(
     handoffs,
     get rootToolNames() {
       return rootToolNames;
+    },
+    submitUnauthorized(role: string, value: unknown) {
+      assert.ok(discoverySubmitCallback);
+      discoverySubmitCallback("run-1", role, "unauthorized-token", value);
     },
   };
 }
@@ -185,6 +246,54 @@ function reportForRole(role: string) {
       unresolvedItems: [],
     });
   }
+  const featureDiscoveryRole = FEATURE_PIPELINE_DISCOVERY_ROLES.find(
+    (candidate) => candidate === role,
+  );
+  if (featureDiscoveryRole) {
+    const evidence = [
+      {
+        kind: "code",
+        reference: "extensions/pipelines/controller.ts",
+        detail: "Controller behavior provides direct repository evidence",
+      },
+    ];
+    const candidateAcceptanceCriteria = [
+      {
+        scenario: "A feature discovery report settles",
+        expected: "The host receives observable bounded evidence",
+        verification: "Validate the parsed report before build activation",
+        evidence,
+      },
+      {
+        scenario: "Discovery evidence is incomplete",
+        expected: "The report remains explicit and actionable",
+        verification: "Inspect the validated report status and evidence",
+        evidence,
+      },
+    ];
+    return JSON.stringify({
+      reportType: "feature-discovery-v2",
+      role: featureDiscoveryRole,
+      applicability: "applicable",
+      summary: `${role} repository evidence`,
+      coverage: FEATURE_DISCOVERY_COVERAGE[featureDiscoveryRole].map(
+        (criterion) => ({
+          criterion,
+          status: "covered",
+          conclusion: `${criterion} is covered by repository evidence`,
+          evidence,
+          implications: [],
+        }),
+      ),
+      candidateAcceptanceCriteria:
+        featureDiscoveryRole === "discover-outcome" ||
+        featureDiscoveryRole === "discover-user-scenarios"
+          ? candidateAcceptanceCriteria
+          : [],
+      unknowns: [],
+      constraints: [],
+    });
+  }
   if (role.startsWith("discover-")) {
     return JSON.stringify({
       summary: role,
@@ -204,6 +313,12 @@ function reportForRole(role: string) {
     });
   }
   return JSON.stringify({ track: role, findings: [], unprovenChecks: [] });
+}
+
+function featureDiscoveryValue(
+  role: (typeof FEATURE_PIPELINE_DISCOVERY_ROLES)[number],
+) {
+  return JSON.parse(reportForRole(role)) as unknown;
 }
 
 function settleRole(run: ReturnType<typeof harness>, role: string) {
@@ -468,6 +583,93 @@ test("feature discovery runs programmatically before the deferred Sol prompt", a
   await run.controller.dispose();
 });
 
+test("feature discovery tool payload is bound to its session and consumed only after settlement", async () => {
+  const run = harness({ autoCompleteFeatureDiscovery: false });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES.slice(1)) {
+    settleRole(run, role);
+  }
+  const problem = run.sessions.find(
+    (session) => session.spec.role === "discover-problem",
+  );
+  const root = run.sessions.find(
+    (session) => session.spec.role === "pipeline-root",
+  );
+  assert.ok(problem?.discoverySubmit);
+  assert.throws(
+    () =>
+      run.submitUnauthorized(
+        "discover-problem",
+        featureDiscoveryValue("discover-problem"),
+      ),
+    /session is not registered/,
+  );
+  problem.discoverySubmit(featureDiscoveryValue("discover-problem"));
+  assert.throws(
+    () => problem.discoverySubmit?.(featureDiscoveryValue("discover-problem")),
+    /already recorded a submission/,
+  );
+  assert.equal(run.controller.get(runId)?.stage, "discover");
+  assert.equal(root?.sends.length, 0);
+
+  problem.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: "Tool result text is not the compatibility report",
+    },
+  });
+  await settleInitialization();
+
+  assert.equal(run.controller.get(runId)?.stage, "build");
+  assert.equal(root?.sends.length, 1);
+  assert.match(root?.sends[0] ?? "", /"submission":"tool"/);
+  assert.match(root?.sends[0] ?? "", /"reportType":"feature-discovery-v2"/);
+  assert.doesNotMatch(root?.sends[0] ?? "", /\\"reportType\\"/);
+  await run.controller.dispose();
+});
+
+test("feature discovery submission scope is fixed to active feature discovery roles", () => {
+  assert.equal(
+    pipelineDiscoverySubmissionAllowed(
+      "feature-pipeline",
+      "discover-problem",
+      "discover",
+      false,
+    ),
+    true,
+  );
+  assert.equal(
+    pipelineDiscoverySubmissionAllowed(
+      "plan-pipeline",
+      "discover-goal-outcomes",
+      "discover",
+      false,
+    ),
+    false,
+  );
+  assert.equal(
+    pipelineDiscoverySubmissionAllowed(
+      "feature-pipeline",
+      "discover-problem",
+      "build",
+      false,
+    ),
+    false,
+  );
+  assert.equal(
+    pipelineDiscoverySubmissionAllowed(
+      "feature-pipeline",
+      "discover-problem",
+      "discover",
+      true,
+    ),
+    false,
+  );
+});
+
 test("programmatic feature discovery retries one malformed report in the same session", async () => {
   const run = harness({ autoCompleteFeatureDiscovery: false });
   const runId = run.controller.start(request());
@@ -493,7 +695,7 @@ test("programmatic feature discovery retries one malformed report in the same se
 
   assert.equal(run.controller.get(runId)?.stage, "discover");
   assert.equal(problem.sends.length, 1);
-  assert.match(problem.sends[0] ?? "", /Retry this same role once/);
+  assert.match(problem.sends[0] ?? "", /correction 1\/3/);
   problem.emit({
     type: "settled",
     outcome: {
@@ -512,14 +714,13 @@ test("programmatic feature discovery retries one malformed report in the same se
   await run.controller.dispose();
 });
 
-test("programmatic feature discovery fails closed after its one retry", async () => {
+test("feature discovery uses independent correction counters and fails on rejection four", async () => {
   const run = harness({ autoCompleteFeatureDiscovery: false });
   const runId = run.controller.start(request());
   await settleInitialization();
 
   for (const role of [
     "discover-outcome",
-    "discover-context",
     "discover-user-scenarios",
     "discover-product-precedents",
   ]) {
@@ -528,23 +729,43 @@ test("programmatic feature discovery fails closed after its one retry", async ()
   const problem = run.sessions.find(
     (session) => session.spec.role === "discover-problem",
   );
+  const context = run.sessions.find(
+    (session) => session.spec.role === "discover-context",
+  );
   assert.ok(problem);
+  assert.ok(context);
+
+  for (let rejection = 1; rejection <= 3; rejection++) {
+    problem.emit({
+      type: "settled",
+      outcome: {
+        type: "completed",
+        finalText: `not-json-${rejection}`,
+      },
+    });
+    await settleInitialization();
+    assert.equal(run.controller.get(runId)?.status, "running");
+    assert.equal(run.controller.get(runId)?.stage, "discover");
+    assert.equal(problem.sends.length, rejection);
+    assert.match(
+      problem.sends.at(-1) ?? "",
+      new RegExp(`correction ${rejection}/3`),
+    );
+    assert.equal(context.interrupted, 0);
+  }
+
   problem.emit({
     type: "settled",
-    outcome: { type: "completed", finalText: "not-json" },
-  });
-  await settleInitialization();
-  problem.emit({
-    type: "settled",
-    outcome: { type: "completed", finalText: "still-not-json" },
+    outcome: { type: "completed", finalText: "fourth-invalid-report" },
   });
   await settleInitialization();
 
   assert.equal(run.controller.get(runId)?.status, "failed");
   assert.match(
     run.controller.get(runId)?.error ?? "",
-    /no valid discover-problem report/,
+    /rejected settled turn 4/,
   );
+  assert.equal(context.interrupted, 1);
   assert.equal(
     run.sessions.find((session) => session.spec.role === "pipeline-root")?.sends
       .length,
@@ -589,7 +810,7 @@ test("dashboard cancellation of a starting run prevents its root prompt", async 
   await run.controller.dispose();
 });
 
-test("root tools are run-scoped and children have coding tools without orchestration", async () => {
+test("root tools are run-scoped and feature discovery children are read-only", async () => {
   const run = harness();
   const runId = run.controller.start(request());
   await settleInitialization();
@@ -611,10 +832,24 @@ test("root tools are run-scoped and children have coding tools without orchestra
   );
   assert.deepEqual(childSession?.activeTools, [
     "read",
+    "fd",
+    "rg",
+    "web_search_codex",
+    "web_fetch_codex",
+    "pipeline_discovery_submit",
+  ]);
+  for (const mutator of [
     "bash",
     "edit",
     "write",
-  ]);
+    "apply_patch_codex",
+    "codex_task",
+    "mcp",
+    "bg_start",
+    "ask_user",
+  ]) {
+    assert.equal(childSession?.activeTools.includes(mutator), false);
+  }
   for (const forbidden of [
     "pipeline_run",
     "pipeline_check",
@@ -656,6 +891,46 @@ test("definition role policies centralize child context requirements", () => {
     childContextPolicyFor("plan-pipeline", "audit-decomposition-dag"),
     {},
   );
+});
+
+test("feature discovery policy is read-only without weakening ordinary feature children", () => {
+  const discoveryDenied = new Set<string>(
+    pipelineSessionToolPolicy("feature-pipeline", false, "discover-problem")
+      .excludeTools,
+  );
+  const ordinaryAuditDenied = new Set<string>(
+    pipelineSessionToolPolicy(
+      "feature-pipeline",
+      false,
+      "audit-feature-outcome",
+    ).excludeTools,
+  );
+  for (const allowed of [
+    "read",
+    "fd",
+    "rg",
+    "web_search_codex",
+    "web_fetch_codex",
+  ]) {
+    assert.equal(discoveryDenied.has(allowed), false);
+  }
+  for (const denied of [
+    "bash",
+    "edit",
+    "write",
+    "apply_patch_codex",
+    "codex_task",
+    "mcp",
+    "bg_start",
+    "bg_kill",
+    "ask_user",
+    "pipeline_child_spawn",
+    "workflow",
+    "subagent_spawn",
+  ]) {
+    assert.equal(discoveryDenied.has(denied), true);
+  }
+  assert.equal(ordinaryAuditDenied.has("bash"), true);
 });
 
 test("small-feature Luna root and audit Lunas are read-only while the implementer keeps coding tools", () => {

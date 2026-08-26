@@ -47,6 +47,12 @@ import {
   writePlanArtifact,
 } from "./plan-contract.ts";
 import {
+  parseFeatureDiscoveryReport,
+  parseFeatureDiscoveryReportText,
+  validateFeatureDiscoveryFanIn,
+  type FeatureDiscoveryReportV2,
+} from "./discovery-report.ts";
+import {
   buildPipelineChildPrompt,
   buildPipelinePrompt,
   type FeatureDiscoveryReportContext,
@@ -58,7 +64,21 @@ import {
   type AuditSegmentContext,
 } from "./audit-segment.ts";
 
-const FEATURE_DISCOVERY_REPORT_MAX_BYTES = 32 * 1024;
+export function pipelineDiscoverySubmissionAllowed(
+  definition: PipelineDefinitionId,
+  role: string,
+  stage: PipelineStage,
+  bootstrapped: boolean,
+) {
+  return (
+    definition === FEATURE_PIPELINE_ID &&
+    stage === "discover" &&
+    !bootstrapped &&
+    FEATURE_PIPELINE_DISCOVERY_ROLES.some(
+      (discoveryRole) => discoveryRole === role,
+    )
+  );
+}
 
 export function pipelineAuditSubmissionAllowed(
   definition: PipelineDefinitionId,
@@ -99,6 +119,10 @@ interface MutableRun {
   error?: string;
   rootId?: string;
   featureDiscoveryBootstrapped: boolean;
+  featureDiscoveryReports: Map<
+    FeaturePipelineDiscoveryRole,
+    FeatureDiscoveryReportContext
+  >;
   auditSegment?: AuditSegment;
   auditSegmentStarting?: Promise<ReadonlyArray<AgentNodeSnapshot>>;
   completion?: PipelineCompletionFacts;
@@ -133,6 +157,18 @@ export interface PipelineControllerOptions {
     ) => void,
     auditSessionCreated?: (runId: string, role: string, token: string) => void,
     auditToolAllowed?: (runId: string, role: string) => boolean,
+    discoverySubmit?: (
+      runId: string,
+      role: string,
+      sessionToken: string,
+      value: unknown,
+    ) => void,
+    discoverySessionCreated?: (
+      runId: string,
+      role: string,
+      token: string,
+    ) => void,
+    discoveryToolAllowed?: (runId: string, role: string) => boolean,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
   readonly makeRunId?: () => string;
@@ -174,6 +210,9 @@ export class PipelineController {
   private readonly auditPumps = new Set<string>();
   private readonly auditCorrections = new Map<string, number>();
   private readonly auditSessionTokens = new Map<string, string>();
+  private readonly discoveryCorrections = new Map<string, number>();
+  private readonly discoverySessionTokens = new Map<string, string>();
+  private readonly discoverySubmissions = new Map<string, unknown>();
   private readonly tree: AgentTreeController;
   private readonly onHandoff: PipelineControllerOptions["onHandoff"];
   private readonly makeRunId: () => string;
@@ -200,6 +239,19 @@ export class PipelineController {
             Boolean(run.auditSegment),
           );
         },
+        (runId, role, token, value) =>
+          this.submitDiscoveryReport(runId, role, token, value),
+        (runId, role, token) =>
+          this.registerDiscoverySessionToken(runId, role, token),
+        (runId, role) => {
+          const run = this.requireRun(runId);
+          return pipelineDiscoverySubmissionAllowed(
+            run.definition,
+            role,
+            run.stage,
+            run.featureDiscoveryBootstrapped,
+          );
+        },
       ),
       // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
       // intentionally do not apply to pipeline roots or children.
@@ -215,6 +267,62 @@ export class PipelineController {
   subscribe(listener: () => void) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  private registerDiscoverySessionToken(
+    runId: string,
+    role: string,
+    token: string,
+  ) {
+    const run = this.requireRun(runId);
+    if (
+      !pipelineDiscoverySubmissionAllowed(
+        run.definition,
+        role,
+        run.stage,
+        run.featureDiscoveryBootstrapped,
+      )
+    ) {
+      return;
+    }
+    const node = this.agentsFor(runId)
+      .filter((agent) => agent.role === role && agent.status === "starting")
+      .at(-1);
+    if (node) this.discoverySessionTokens.set(token, node.id);
+  }
+
+  private submitDiscoveryReport(
+    runId: string,
+    role: string,
+    token: string,
+    value: unknown,
+  ) {
+    const run = this.requireActiveRun(runId);
+    if (
+      !pipelineDiscoverySubmissionAllowed(
+        run.definition,
+        role,
+        run.stage,
+        run.featureDiscoveryBootstrapped,
+      )
+    ) {
+      throw new Error("Feature discovery submission is not active.");
+    }
+    const sessionId = this.discoverySessionTokens.get(token);
+    const node = sessionId ? this.tree.view.get(sessionId) : undefined;
+    if (
+      !sessionId ||
+      !node ||
+      node.scopeId !== runId ||
+      node.role !== role ||
+      node.status !== "running"
+    ) {
+      throw new Error("Discovery submission session is not registered.");
+    }
+    if (this.discoverySubmissions.has(sessionId)) {
+      throw new Error("This discovery turn already recorded a submission.");
+    }
+    this.discoverySubmissions.set(sessionId, value);
   }
 
   private registerAuditSessionToken(
@@ -339,6 +447,7 @@ export class PipelineController {
       status: "starting",
       startedAt: Date.now(),
       featureDiscoveryBootstrapped: false,
+      featureDiscoveryReports: new Map(),
       planArtifactsWritten: new Map(),
     };
     this.runs.set(id, run);
@@ -430,36 +539,75 @@ export class PipelineController {
     }
   }
 
-  private featureDiscoveryReportAgent(
-    run: MutableRun,
-    role: FeaturePipelineDiscoveryRole,
-  ) {
-    return this.agentsFor(run.id)
-      .filter(
-        (agent) =>
-          agent.role === role &&
-          (agent.status === "done" || agent.status === "idle") &&
-          Buffer.byteLength(agent.finalText, "utf8") <=
-            FEATURE_DISCOVERY_REPORT_MAX_BYTES &&
-          validatePipelineReport(run.definition, role, agent.finalText)
-            .length === 0,
-      )
-      .at(-1);
-  }
-
   private featureDiscoveryReports(run: MutableRun) {
     return FEATURE_PIPELINE_DISCOVERY_ROLES.map((role) => {
-      const agent = this.featureDiscoveryReportAgent(run, role);
-      if (!agent) {
+      const report = run.featureDiscoveryReports.get(role);
+      if (!report) {
         throw new Error(
           `feature-pipeline programmatic discovery has no valid ${role} report.`,
         );
       }
-      return {
-        role,
-        report: agent.finalText,
-      } satisfies FeatureDiscoveryReportContext;
+      return report;
     });
+  }
+
+  private acceptFeatureDiscoveryTurn(
+    run: MutableRun,
+    role: FeaturePipelineDiscoveryRole,
+    agent: AgentNodeSnapshot,
+  ) {
+    const hasSubmission = this.discoverySubmissions.has(agent.id);
+    const submitted = this.discoverySubmissions.get(agent.id);
+    this.discoverySubmissions.delete(agent.id);
+    const report: FeatureDiscoveryReportV2 = hasSubmission
+      ? parseFeatureDiscoveryReport(role, submitted)
+      : parseFeatureDiscoveryReportText(role, agent.finalText);
+    run.featureDiscoveryReports.set(role, {
+      role,
+      provenance: {
+        sessionId: agent.id,
+        attempt: agent.attempt,
+        submission: hasSubmission ? "tool" : "final-text-json",
+      },
+      report,
+    });
+  }
+
+  private async settleFeatureDiscoveryRole(
+    run: MutableRun,
+    role: FeaturePipelineDiscoveryRole,
+    initial: AgentNodeSnapshot,
+  ) {
+    const sessionId = initial.id;
+    while (run.status === "running") {
+      const [settled] = await this.waitForChildren(run.id, [sessionId]);
+      if (!settled) {
+        throw new Error(`Feature discovery session ${sessionId} disappeared.`);
+      }
+      if (settled.status === "error" || settled.status === "cancelled") {
+        throw new Error(
+          `Feature discovery ${role} session ${settled.status}: ${settled.error ?? "provider failure or cancellation"}.`,
+        );
+      }
+      try {
+        this.acceptFeatureDiscoveryTurn(run, role, settled);
+        return;
+      } catch (error) {
+        const count = (this.discoveryCorrections.get(sessionId) ?? 0) + 1;
+        this.discoveryCorrections.set(sessionId, count);
+        const detail = error instanceof Error ? error.message : String(error);
+        if (count >= 4) {
+          throw new Error(
+            `Feature discovery ${role} rejected settled turn ${count}: ${detail}`,
+          );
+        }
+        await this.tree.send(
+          sessionId,
+          `Your feature discovery V2 submission was rejected (correction ${count}/3): ${detail} Use pipeline_discovery_submit with the complete strict ${role} report, correcting the reported fields, then stop. If the tool is unavailable, return the same object as compact final-text JSON. Do not rerun or disturb other discovery tracks.`,
+        );
+      }
+    }
+    throw new Error(`Feature discovery ${role} ended because the run stopped.`);
   }
 
   private async bootstrapFeatureDiscovery(run: MutableRun) {
@@ -468,42 +616,22 @@ export class PipelineController {
         this.spawnFeatureDiscoveryAttempt(run, role),
       ),
     );
-    await this.waitForChildren(
-      run.id,
-      initial.map((agent) => agent.id),
+    await Promise.all(
+      FEATURE_PIPELINE_DISCOVERY_ROLES.map((role, index) => {
+        const child = initial[index];
+        if (!child) {
+          throw new Error(`Feature discovery ${role} session was not created.`);
+        }
+        return this.settleFeatureDiscoveryRole(run, role, child);
+      }),
     );
     if (run.status !== "running") return [];
-
-    const retryIds: string[] = [];
-    for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) {
-      if (this.featureDiscoveryReportAgent(run, role)) continue;
-      const attempts = this.agentsFor(run.id).filter(
-        (agent) => agent.role === role,
-      );
-      const latest = attempts.at(-1);
-      if (!latest || latest.status === "cancelled" || attempts.length >= 2) {
-        throw new Error(
-          `feature-pipeline programmatic discovery failed for ${role}.`,
-        );
-      }
-      await this.tree.send(
-        latest.id,
-        `Your discovery report was missing, malformed, failed, or exceeded ${FEATURE_DISCOVERY_REPORT_MAX_BYTES} UTF-8 bytes. Retry this same role once. Return only one corrected compact JSON object matching the original report contract.`,
-      );
-      retryIds.push(latest.id);
-    }
-
-    if (retryIds.length > 0) {
-      await this.waitForChildren(run.id, retryIds);
-    }
-    if (run.status !== "running") return [];
     const reports = this.featureDiscoveryReports(run);
-    if (run.stage !== "build") {
-      throw new Error(
-        "feature-pipeline programmatic discovery did not advance to build.",
-      );
-    }
+    const fanInIssues = validateFeatureDiscoveryFanIn(reports);
+    if (fanInIssues.length > 0) throw new Error(fanInIssues.join(" "));
+    run.stage = "build";
     run.featureDiscoveryBootstrapped = true;
+    this.notify();
     return reports;
   }
 
@@ -1007,7 +1135,7 @@ export class PipelineController {
       run.definition === FEATURE_PIPELINE_ID &&
       isFeatureDiscoveryRole(role)
     ) {
-      return Boolean(this.featureDiscoveryReportAgent(run, role));
+      return run.featureDiscoveryReports.has(role);
     }
     return this.agentsFor(run.id).some(
       (agent) =>

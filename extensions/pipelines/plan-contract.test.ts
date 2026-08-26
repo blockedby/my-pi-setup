@@ -3,7 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { PIPELINE_4_LUNA_AUDIT_ROLES } from "./domain.ts";
+import {
+  FEATURE_PIPELINE_DISCOVERY_ROLES,
+  PIPELINE_4_LUNA_AUDIT_ROLES,
+  type FeaturePipelineDiscoveryRole,
+} from "./domain.ts";
+import { FEATURE_DISCOVERY_COVERAGE } from "./discovery-report.ts";
 import {
   resolvePlanArtifact,
   validatePipelineReport,
@@ -221,17 +226,61 @@ test("small-feature reports require exact implementation and four-track Luna aud
   }
 });
 
-test("feature child report contracts reject malformed programmatic discovery", () => {
-  const valid = JSON.stringify({
+function featureDiscoveryReport(role: FeaturePipelineDiscoveryRole) {
+  const evidence = [
+    {
+      kind: "code",
+      reference: "extensions/pipelines/controller.ts",
+      detail: "The controller provides direct behavior evidence",
+    },
+  ];
+  const candidates = [
+    {
+      scenario: "A discovery report settles",
+      expected: "The host validates role-complete evidence",
+      verification: "Inspect the parsed fan-in context",
+      evidence,
+    },
+    {
+      scenario: "A discovery report is malformed",
+      expected: "The same session receives a correction",
+      verification: "Observe the controller continuation",
+      evidence,
+    },
+  ];
+  return JSON.stringify({
+    reportType: "feature-discovery-v2",
+    role,
+    applicability: "applicable",
     summary: "Repository evidence",
-    evidence: ["src/feature.ts"],
+    coverage: FEATURE_DISCOVERY_COVERAGE[role].map((criterion) => ({
+      criterion,
+      status: "covered",
+      conclusion: `${criterion} is supported by repository evidence`,
+      evidence,
+      implications: [],
+    })),
+    candidateAcceptanceCriteria:
+      role === "discover-outcome" || role === "discover-user-scenarios"
+        ? candidates
+        : [],
     unknowns: [],
     constraints: [],
   });
-  assert.deepEqual(
-    validatePipelineReport("feature-pipeline", "discover-problem", valid),
-    [],
-  );
+}
+
+test("feature child report contracts reject malformed programmatic discovery", () => {
+  const valid = featureDiscoveryReport("discover-problem");
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) {
+    assert.deepEqual(
+      validatePipelineReport(
+        "feature-pipeline",
+        role,
+        featureDiscoveryReport(role),
+      ),
+      [],
+    );
+  }
   assert.match(
     validatePipelineReport(
       "feature-pipeline",
