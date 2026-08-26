@@ -1,13 +1,13 @@
 # Hardcoded pipelines — design and runtime contract
 
-_Status: implemented design record. Historical feature-pipeline v1 decisions remain below; the plan-pipeline addition is specified in its own section._
+_Status: implemented design record. Historical feature-pipeline v1 decisions remain below; the small-feature-pipeline and plan-pipeline additions are specified in their own sections._
 
 ## Confirmed starting constraints
 
 - Pipelines are the intended user-facing orchestration feature; do not build a separate raw workflow surface for this proposal.
-- The package has two hardcoded definitions: **feature-pipeline** and **plan-pipeline**. The public selector accepts only these known definitions; it does not expose arbitrary workflows.
+- The package has three hardcoded definitions: **feature-pipeline**, **small-feature-pipeline**, and **plan-pipeline**. The public selector accepts only these known definitions; it does not expose arbitrary workflows.
 - The main agent activates a pipeline through a first-class tool, analogous to how it uses `subagent_spawn`. It should do so automatically for a nontrivial new-feature implementation when the workspace is prepared; it should not route bugs, refactors, research-only work, or trivial edits into this v1 feature pipeline.
-- `/pipelines` is a nested UI rather than a flat subagent-style list. It always lists both hardcoded definitions and nests each run beneath its selected definition.
+- `/pipelines` is a nested UI rather than a flat subagent-style list. It always lists all hardcoded definitions and nests each run beneath its selected definition.
 - Git/worktree policy is not hardcoded into the graph. The main agent chooses and prepares the working directory according to project instructions and applicable skills, then passes that workspace to the pipeline; delivery constraints come from the self-contained task and loaded project resources. In the usual local flow this may be a dedicated branch/worktree with commits; other environments may require different behavior.
 - Multiple pipeline runs may be active concurrently, including in the same working directory. v1 has no workspace-conflict gate; the invoking main agent and project policy own that decision. The UI must show each run's working directory clearly. Pipeline sessions use their own Sol=4, Terra=8, and Luna=16 capacity pools, intentionally independent from direct `/subagents` capacity.
 - Pipeline lifecycle matches current direct subagents: runs are session-scoped and in memory. On main-session shutdown/reload/switch/fork, the runtime disposes active pipeline-agent and child sessions; v1 does not resume them. Persisted child session files are diagnostic artifacts, not resumable pipeline state.
@@ -60,14 +60,31 @@ Feature input
 ## Runtime architecture
 
 - `pipeline_run` accepts a self-contained `task`, optional `working_dir` (defaulting to the caller's current directory), and optional enum-like `pipeline`. Omission defaults to `feature-pipeline`; unknown definitions are rejected. It starts the root Sol session there, returns a run ID immediately, and delivers the eventual handoff to the main session as a follow-up. Run title is derived from the task; delivery/Git constraints come from the task and loaded project resources rather than extra tool fields.
-- The Sol session receives normal coding tools plus run-scoped custom tools: stage marking, child spawn/list/check/wait/cancel, and completion.
-- Child spawn accepts a hardcoded feature-pipeline role; the runtime selects the corresponding Luna or Terra model and role prompt. Child sessions do not receive orchestration tools.
+- The Sol session receives run-scoped custom tools for stage marking, child spawn/list/check/wait/send/cancel, and completion. Tool mutation boundaries are definition-specific: the full feature Sol may implement, while small-feature and planning Sol roots are read-only.
+- Child spawn accepts only roles hardcoded for the selected definition; the runtime selects the corresponding Luna or Terra model, role prompt, persistence, and tool policy. Child sessions do not receive orchestration tools.
 - The prompt owns graph sequencing and the one-retry policy. The host owns session lifecycle, role/model boundaries, hierarchy, subscriptions, cancellation, model admission, and bounded state.
 - Shared `agent-tree` infrastructure models root/children/attempts and supplies transcript, steer, cancel, and takeover behavior. Pipeline-specific graph/state and `/pipelines` composition stay in the pipelines extension.
 
 ## Completion handoff
 
 `pipeline_complete` emits facts, not a readiness label. Its structured handoff includes the selected definition, outcome, changed paths, checks/evidence, commits or observed Git state when applicable, discovery/audit report references or summaries, unresolved items, and the working directory. A completed `plan-pipeline` run additionally requires a validated repository-local `docs/plans/*.md` plan path. The main agent alone decides readiness and subsequent Git/PR actions.
+
+## Small-feature-pipeline definition
+
+`small-feature-pipeline` is for bounded, well-specified implementation work that still benefits from independent audit. The persistent Sol/high root is a read-only orchestrator rather than an implementer. One persistent Luna/medium session owns the initial implementation and the only remediation pass; one independent Terra/high session audits the actual workspace once.
+
+```text
+Task
+  → Persistent read-only Sol/high root
+      → one persistent Luna/medium implementer
+      → one independent read-only Terra/high auditor
+      → the same Luna session receives Terra's review and remediates once
+  → Factual handoff; no re-audit and no readiness verdict
+```
+
+The run starts at `build`, advances to `final-audit` only after an exact Luna implementation report, advances to `final-resolve` only after a complete canonical Terra initial-review result, and advances to `complete` only after the original Luna session returns a fresh post-remediation report. The host rejects second Luna/Terra sessions, Terra continuation, out-of-order stages, malformed child reports, completion before remediation, and mutation tools for Sol or Terra. Luna receives bounded workspace coding tools but no orchestration, delegated Codex task/patch, background-terminal, or generic MCP tools and must not commit or push.
+
+The implementation report records a non-empty summary plus changed paths, checks, assumptions, and unresolved items. The host captures the workspace base identity when the run starts and supplies Terra with that base, current Git status/diff, the original task, and Luna's implementation report; Terra can then inspect reported or untracked paths with read-only tools and verify the current workspace independently through the canonical code-review skill. Sol sends Terra's complete review to the same Luna session whether Terra found defects or not, so the bounded graph and same-session invariant remain observable. There is no discovery fan-out, Sol implementation, retry/replacement, second auditor, or audit after remediation.
 
 ## Plan-pipeline definition
 

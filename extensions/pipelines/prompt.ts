@@ -1,5 +1,6 @@
 import {
   FEATURE_PIPELINE_ID,
+  SMALL_FEATURE_PIPELINE_ID,
   type PipelineChildRole,
   type PipelineDefinitionId,
   type PipelineRunRequest,
@@ -26,6 +27,24 @@ Run this fixed graph yourself; the host records your actions and atomically adva
 7. Mark complete and call pipeline_complete with structured facts only, including every material assumption.
 
 If a Discover or Luna Audit child fails, use pipeline_child_send to retry that same child session at most once. If no session was created, spawn one replacement attempt. Do not retry final-audit. Do not delegate implementation to children. Completion has no readiness label: report outcome, changed paths, checks/evidence, assumptions, Git/commit observations when applicable, report summaries or references, unresolved items, and working_dir.`;
+}
+
+export function buildSmallFeaturePipelinePrompt(request: PipelineRunRequest) {
+  return `You are the persistent Sol/high orchestrator for one small-feature-pipeline run.
+
+Task:
+${request.task}
+
+Working directory:
+${request.workingDir}
+
+Run only this fixed graph. Do not implement, edit files, commit, push, invoke another pipeline, use raw workflows, use ordinary subagents, or ask the user:
+1. The run starts in build. Launch exactly one persistent Luna/medium implement-small-feature child and wait for it. Luna owns repository inspection, implementation, tests, and its structured implementation report. Successful fan-in enters final-audit.
+2. Launch exactly one independent Terra/high audit-small-feature child. Give Terra the original task and Luna's implementation report as additional context. Terra must inspect the actual change and checks independently, follow the canonical code-review skill in initial mode, and return its canonical structured review. Wait for it. Successful fan-in enters final-resolve. Do not retry or re-run Terra.
+3. Send Terra's complete review to the existing implement-small-feature child with pipeline_child_send. Instruct that same Luna session to fix every actionable finding or reject it with specific evidence, rerun appropriate checks, and return a fresh structured implementation report. Do not spawn a replacement or second Luna. Wait for that same child. Successful fan-in enters complete.
+4. Call pipeline_complete with factual structured facts only. Include changed paths, checks/evidence, assumptions, Git observations, both report summaries or references, unresolved items, and the exact working_dir. Do not state READY or make the main agent's Git/merge decision.
+
+There is no discovery fan-out, no Sol implementation, no second auditor, and no audit after Luna remediation. If either child fails or violates its report contract, complete as failed rather than changing the graph. The host enforces role cardinality, stages, same-session remediation, report contracts, and read-only boundaries for Sol and Terra.`;
 }
 
 export function buildPlanPipelinePrompt(request: PipelineRunRequest) {
@@ -56,9 +75,13 @@ export function buildPipelinePrompt(
   definition: PipelineDefinitionId,
   request: PipelineRunRequest,
 ) {
-  return definition === FEATURE_PIPELINE_ID
-    ? buildFeaturePipelinePrompt(request)
-    : buildPlanPipelinePrompt(request);
+  if (definition === FEATURE_PIPELINE_ID) {
+    return buildFeaturePipelinePrompt(request);
+  }
+  if (definition === SMALL_FEATURE_PIPELINE_ID) {
+    return buildSmallFeaturePipelinePrompt(request);
+  }
+  return buildPlanPipelinePrompt(request);
 }
 
 const ROLE_INSTRUCTIONS: Record<PipelineChildRole, string> = {
@@ -80,6 +103,10 @@ const ROLE_INSTRUCTIONS: Record<PipelineChildRole, string> = {
     "Review functional correctness: observable behavior, contracts, integrations, edge cases, and data handling.",
   "audit-reliability-regressions":
     "Review reliability and regressions: failures, retries, partial success, stale state, concurrency, and existing flows.",
+  "implement-small-feature":
+    "Implement the bounded task directly in the supplied workspace, add or update focused tests, run appropriate checks, and retain this session for one post-audit remediation pass. Do not commit or push.",
+  "audit-small-feature":
+    "Perform one independent deep code audit after Luna implementation. Read and follow the available canonical code-review skill in initial mode, verify claims against the actual workspace, and do not edit files.",
   "discover-goal-outcomes":
     "Clarify the engineering/product goal, observable outcomes, non-goals, and candidate acceptance criteria using repository evidence. Report unknowns and assumptions Sol must preserve.",
   "discover-frontend-scope":
@@ -111,6 +138,16 @@ const DISCOVERY_REPORT_CONTRACT = `Return exactly one compact JSON object with t
 }
 Do not choose the implementation solution. Important overlap with other discovery roles is allowed.`;
 
+const IMPLEMENTATION_REPORT_CONTRACT = `Return exactly one compact JSON object with this shape:
+{
+  "summary": "what was implemented or remediated",
+  "changedPaths": ["repository-relative path"],
+  "checks": ["command and factual result"],
+  "assumptions": ["material assumption"],
+  "unresolvedItems": ["remaining concrete issue"]
+}
+changedPaths and checks must each contain at least one concrete entry. Use empty arrays only for assumptions or unresolvedItems when none exist. Do not return a readiness verdict.`;
+
 const LUNA_AUDIT_REPORT_CONTRACT = `Return exactly one compact JSON object with this shape:
 {
   "track": "your audit role",
@@ -141,14 +178,29 @@ export function buildPipelineChildPrompt(
   request: PipelineRunRequest,
   additionalContext = "",
 ) {
+  const contextSection = additionalContext.trim()
+    ? `\nAdditional pipeline context:\n${additionalContext.trim()}\n`
+    : "";
+  if (definition === SMALL_FEATURE_PIPELINE_ID) {
+    const readOnly = role === "audit-small-feature";
+    const reportContract = readOnly
+      ? "Return exactly the compact JSON required by the canonical code-review skill. Do not return generic recommendations or strengths."
+      : IMPLEMENTATION_REPORT_CONTRACT;
+    return `You are the ${readOnly ? "read-only Terra auditor" : "persistent Luna implementer"} for role ${role}. ${ROLE_INSTRUCTIONS[role]}
+
+Task:
+${request.task}
+
+Working directory:
+${request.workingDir}
+${contextSection}
+Follow loaded AGENTS.md files and applicable skills. Do not spawn children, invoke pipelines/workflows/subagents, prompt the user, commit, push, or mutate external state. ${readOnly ? "Inspect independently and do not edit repository files." : "Use normal coding tools to implement and verify the task."} ${reportContract}`;
+  }
   const reportContract = role.startsWith("discover-")
     ? DISCOVERY_REPORT_CONTRACT
     : role === "final-audit"
       ? "Return exactly the compact JSON required by the canonical code-review skill. Do not return generic recommendations or strengths."
       : LUNA_AUDIT_REPORT_CONTRACT;
-  const contextSection = additionalContext.trim()
-    ? `\nAdditional pipeline context:\n${additionalContext.trim()}\n`
-    : "";
   return `You are a read-only ${definition} child for role ${role}. ${ROLE_INSTRUCTIONS[role]}
 
 Task:

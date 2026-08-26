@@ -14,6 +14,14 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline: "small-feature-pipeline",
+      task: "Implement a bounded feature",
+      working_dir: ".worktrees/small-feature",
+    }),
+    true,
+  );
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
       pipeline: "plan-pipeline",
       task: "Plan a feature",
       working_dir: ".worktrees/feature",
@@ -35,6 +43,10 @@ test("pipeline_run defaults to feature-pipeline and rejects unknown definitions"
   assert.equal(
     resolvePipelineDefinition("feature-pipeline"),
     "feature-pipeline",
+  );
+  assert.equal(
+    resolvePipelineDefinition("small-feature-pipeline"),
+    "small-feature-pipeline",
   );
   assert.equal(resolvePipelineDefinition("plan-pipeline"), "plan-pipeline");
   assert.throws(

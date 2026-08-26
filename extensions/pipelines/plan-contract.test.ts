@@ -147,6 +147,68 @@ test("plan writes reject an escaping parent symlink before creating outside dire
   fs.rmSync(outside, { recursive: true, force: true });
 });
 
+test("small-feature reports require exact Luna implementation and Terra audit contracts", () => {
+  assert.deepEqual(
+    validatePipelineReport(
+      "small-feature-pipeline",
+      "implement-small-feature",
+      JSON.stringify({
+        summary: "Implemented the bounded behavior",
+        changedPaths: ["src/feature.ts"],
+        checks: ["focused test passed"],
+        assumptions: [],
+        unresolvedItems: [],
+      }),
+    ),
+    [],
+  );
+  for (const invalidReport of [
+    {
+      summary: "Missing checks and remediation evidence",
+      changedPaths: [],
+    },
+    {
+      summary: "Claims implementation without concrete evidence",
+      changedPaths: [],
+      checks: [],
+      assumptions: [],
+      unresolvedItems: [],
+    },
+  ]) {
+    assert.match(
+      validatePipelineReport(
+        "small-feature-pipeline",
+        "implement-small-feature",
+        JSON.stringify(invalidReport),
+      )[0] ?? "",
+      /Implementation report must contain exactly/,
+    );
+  }
+  assert.deepEqual(
+    validatePipelineReport(
+      "small-feature-pipeline",
+      "audit-small-feature",
+      JSON.stringify({
+        mode: "initial",
+        base_sha: "1234567",
+        head_sha: "WORKTREE",
+        verdict: "READY",
+        findings: [],
+        summary: "No actionable findings",
+      }),
+    ),
+    [],
+  );
+  assert.match(
+    validatePipelineReport(
+      "small-feature-pipeline",
+      "audit-small-feature",
+      JSON.stringify({ findings: [] }),
+    )[0] ?? "",
+    /complete canonical initial-review JSON result schema/,
+  );
+});
+
 test("plan child report contracts distinguish discovery, Luna audit, and Terra audit", () => {
   assert.deepEqual(
     validatePipelineReport(
