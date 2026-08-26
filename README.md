@@ -62,6 +62,8 @@ Select the planning-only pipeline explicitly when the desired artifact is an imp
 
 Unknown definition names are rejected; this is not a raw-workflow API. `/pipelines` always shows both definitions and nests each session-scoped run beneath the selected definition, with transcript/takeover, steer, and cancel controls.
 
+Automatic routing selects `plan-pipeline` only when the requested deliverable is a durable audited plan, task breakdown, dependency waves, or test/release plan and the goal has a complexity signal: multiple frontend/backend/data/DevOps/runtime layers; migration, rollout, rollback, operational-readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies that require repository discovery. An explicit `plan-pipeline` request overrides that threshold. Cross-layer implementation requests still use `feature-pipeline`; bugs, refactors, research-only work, and trivial edits use neither. The main agent asks when plan versus implementation is ambiguous.
+
 `plan-pipeline` runs this fixed graph. Its root and children do not receive shell/edit/write or delegated patch/task tools; Sol writes only through a bounded `docs/plans/*.md` plan tool and receives bounded plan-validation and Git-status tools:
 
 ```text
