@@ -44,7 +44,7 @@ No extra web-search service key or environment file is required. Pipi does not c
 
 ## Pipelines
 
-A pipeline keeps one big task from turning into one giant, opaque prompt. Sol drives a fixed route, Luna explores or builds, and Terra checks the result independently—so implementation, review, and fixes happen in clear stages.
+A pipeline keeps one big task from turning into one giant, opaque prompt. Sol drives a fixed route, Luna explores, builds, or checks focused concerns, and the broader pipelines add an independent Terra final audit—so implementation, review, and fixes happen in clear stages.
 
 Use `small-feature-pipeline` for a focused build → audit → fix cycle, `feature-pipeline` for broader work with parallel discovery and review, and `plan-pipeline` when you need an audited plan instead of code. Open `/pipelines` for a compact live view: `Enter` expands a run or opens the agent handling a stage, and green/yellow/red status shows how it is going at a glance.
 
@@ -76,17 +76,17 @@ Select the planning-only pipeline explicitly when the desired artifact is an imp
 
 Unknown definition names are rejected; this is not a raw-workflow API. `/pipelines` always shows all three definitions and nests each session-scoped run beneath the selected definition, with transcript/takeover, steer, and cancel controls.
 
-Automatic routing uses `small-feature-pipeline` for bounded, well-specified implementation work that fits one Luna implementation, one independent Terra audit, and one same-session Luna remediation pass. Broader nontrivial feature work that needs discovery and multi-concern audit uses `feature-pipeline`. `plan-pipeline` is selected only when the requested deliverable is a durable audited plan, task breakdown, dependency waves, or test/release plan and the goal has a complexity signal: multiple frontend/backend/data/DevOps/runtime layers; migration, rollout, rollback, operational-readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies that require repository discovery. Explicit pipeline selection overrides automatic routing. Bugs, refactors, research-only work, and trivial edits use no pipeline; a small feature is bounded work that still benefits from independent audit, not a synonym for a trivial edit. The main agent asks when plan versus implementation is ambiguous.
+Automatic routing uses `small-feature-pipeline` for bounded, well-specified implementation work that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Broader nontrivial feature work that needs discovery and multi-concern audit uses `feature-pipeline`. `plan-pipeline` is selected only when the requested deliverable is a durable audited plan, task breakdown, dependency waves, or test/release plan and the goal has a complexity signal: multiple frontend/backend/data/DevOps/runtime layers; migration, rollout, rollback, operational-readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies that require repository discovery. Explicit pipeline selection overrides automatic routing. Bugs, refactors, research-only work, and trivial edits use no pipeline; a small feature is bounded work that still benefits from independent audit, not a synonym for a trivial edit. The main agent asks when plan versus implementation is ambiguous.
 
-Implementation pipeline audits receive host-collected, read-only Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start. In `feature-pipeline`, every Luna audit receives the captured base and current status/diff, while Terra receives a fresh snapshot after Luna remediation without receiving prior Luna findings. This evidence also supports the bounded small-feature audit; untracked paths remain visible through status and can be inspected with read-only file tools.
+Implementation pipeline audits receive host-collected, read-only Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start. In `feature-pipeline`, every Luna audit receives the captured base and current status/diff, while Terra receives a fresh snapshot after Luna remediation without receiving prior Luna findings. The same four Luna audit roles receive captured-base evidence plus the implementation report in `small-feature-pipeline`; untracked paths remain visible through status and can be inspected with read-only file tools.
 
-`small-feature-pipeline` runs this fixed graph. Sol and Terra are read-only; the persistent Luna session owns both implementation and remediation. Terra runs once, and there is no re-audit after Luna fixes:
+`small-feature-pipeline` runs this fixed graph. Sol and all audit children are read-only; the persistent Luna session owns both implementation and remediation. All four audits run in parallel, and there is no re-audit after Luna fixes:
 
 ```text
 Persistent Sol/high root
   ├─ one persistent Luna/medium implementer
-  ├─ one independent read-only Terra/high auditor
-  ├─ the same Luna session fixes or resolves Terra findings
+  ├─ four parallel read-only Luna/medium audit tracks
+  ├─ the same implementer session fixes or resolves all findings
   └─ factual handoff (no readiness verdict)
 ```
 

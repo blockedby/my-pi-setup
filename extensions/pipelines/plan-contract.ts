@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  PIPELINE_4_LUNA_AUDIT_ROLES,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_PIPELINE_ID,
   type PipelineDefinitionId,
@@ -552,10 +553,12 @@ export function validatePipelineReport(
             "Implementation report must contain exactly a non-empty summary, non-empty changedPaths and checks string arrays, plus assumptions and unresolvedItems string arrays.",
           ];
     }
-    return role === "audit-small-feature" && validCanonicalInitialReview(report)
+    return PIPELINE_4_LUNA_AUDIT_ROLES.some(
+      (auditRole) => auditRole === role,
+    ) && validLunaAuditReport(report)
       ? []
       : [
-          "Small-feature audit must use the complete canonical initial-review JSON result schema.",
+          "Small-feature Luna audit must match the complete track, findings, and unprovenChecks schema.",
         ];
   }
 

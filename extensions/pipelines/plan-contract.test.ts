@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { PIPELINE_4_LUNA_AUDIT_ROLES } from "./domain.ts";
 import {
   resolvePlanArtifact,
   validatePipelineReport,
@@ -147,7 +148,7 @@ test("plan writes reject an escaping parent symlink before creating outside dire
   fs.rmSync(outside, { recursive: true, force: true });
 });
 
-test("small-feature reports require exact Luna implementation and Terra audit contracts", () => {
+test("small-feature reports require exact implementation and four-track Luna audit contracts", () => {
   assert.deepEqual(
     validatePipelineReport(
       "small-feature-pipeline",
@@ -184,29 +185,40 @@ test("small-feature reports require exact Luna implementation and Terra audit co
       /Implementation report must contain exactly/,
     );
   }
-  assert.deepEqual(
-    validatePipelineReport(
-      "small-feature-pipeline",
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+    assert.deepEqual(
+      validatePipelineReport(
+        "small-feature-pipeline",
+        role,
+        JSON.stringify({
+          track: role,
+          findings: [],
+          unprovenChecks: [],
+        }),
+      ),
+      [],
+    );
+  }
+  for (const [role, report] of [
+    [PIPELINE_4_LUNA_AUDIT_ROLES[0], { findings: [] }],
+    [
       "audit-small-feature",
-      JSON.stringify({
-        mode: "initial",
-        base_sha: "1234567",
-        head_sha: "WORKTREE",
-        verdict: "READY",
+      {
+        track: "audit-small-feature",
         findings: [],
-        summary: "No actionable findings",
-      }),
-    ),
-    [],
-  );
-  assert.match(
-    validatePipelineReport(
-      "small-feature-pipeline",
-      "audit-small-feature",
-      JSON.stringify({ findings: [] }),
-    )[0] ?? "",
-    /complete canonical initial-review JSON result schema/,
-  );
+        unprovenChecks: [],
+      },
+    ],
+  ] as const) {
+    assert.match(
+      validatePipelineReport(
+        "small-feature-pipeline",
+        role,
+        JSON.stringify(report),
+      )[0] ?? "",
+      /Small-feature Luna audit must match/,
+    );
+  }
 });
 
 test("plan child report contracts distinguish discovery, Luna audit, and Terra audit", () => {

@@ -13,11 +13,13 @@ import type {
 import {
   FEATURE_PIPELINE_ID,
   LUNA_MODEL,
+  PIPELINE_4_LUNA_AUDIT_ROLES,
   PIPELINE_STAGES,
   PLAN_PIPELINE_AUDIT_ROLES,
   PLAN_PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
+  SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SMALL_FEATURE_PIPELINE_ID,
   SOL_MODEL,
@@ -341,32 +343,35 @@ export class PipelineController {
       const boundary =
         run.stage === "build"
           ? {
-              role: "implement-small-feature" as const,
+              roles: [SMALL_FEATURE_IMPLEMENTER_ROLE] as const,
               nextStage: "final-audit" as const,
             }
           : run.stage === "final-audit"
             ? {
-                role: "audit-small-feature" as const,
+                roles: PIPELINE_4_LUNA_AUDIT_ROLES,
                 nextStage: "final-resolve" as const,
               }
             : run.stage === "final-resolve"
               ? {
-                  role: "implement-small-feature" as const,
+                  roles: [SMALL_FEATURE_IMPLEMENTER_ROLE] as const,
                   nextStage: "complete" as const,
                 }
               : undefined;
-      const waitedChild = boundary
-        ? waitedChildren.find((child) => child.role === boundary.role)
-        : undefined;
+      const waitedAtBoundary = boundary?.roles.some((role) =>
+        waitedChildren.some((child) => child.role === role),
+      );
+      const implementer = waitedChildren.find(
+        (child) => child.role === SMALL_FEATURE_IMPLEMENTER_ROLE,
+      );
       const remediationComplete =
         run.stage !== "final-resolve" ||
-        (waitedChild !== undefined &&
-          this.childContinuations.get(waitedChild.id) === 1);
+        (implementer !== undefined &&
+          this.childContinuations.get(implementer.id) === 1);
       if (
         boundary &&
-        waitedChild &&
+        waitedAtBoundary &&
         remediationComplete &&
-        this.roleHasValidReport(run, boundary.role)
+        boundary.roles.every((role) => this.roleHasValidReport(run, role))
       ) {
         run.stage = boundary.nextStage;
         this.notify();
@@ -419,14 +424,14 @@ export class PipelineController {
         );
       }
       if (stage === "final-audit") {
-        this.requireValidReports(run, ["implement-small-feature"], stage);
+        this.requireValidReports(run, [SMALL_FEATURE_IMPLEMENTER_ROLE], stage);
       } else if (stage === "final-resolve") {
-        this.requireValidReports(run, ["audit-small-feature"], stage);
+        this.requireValidReports(run, PIPELINE_4_LUNA_AUDIT_ROLES, stage);
       } else if (stage === "complete") {
         if (
           this.childContinuations.get(
             this.agentsFor(runId).find(
-              (agent) => agent.role === "implement-small-feature",
+              (agent) => agent.role === SMALL_FEATURE_IMPLEMENTER_ROLE,
             )?.id ?? "",
           ) !== 1
         ) {
@@ -486,7 +491,7 @@ export class PipelineController {
     );
     if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
       const requiredStage =
-        role === "implement-small-feature" ? "build" : "final-audit";
+        role === SMALL_FEATURE_IMPLEMENTER_ROLE ? "build" : "final-audit";
       if (run.stage !== requiredStage) {
         throw new Error(
           `${role} can only start during small-feature-pipeline stage ${requiredStage}.`,
@@ -551,7 +556,7 @@ export class PipelineController {
       ),
       persistent:
         run.definition === SMALL_FEATURE_PIPELINE_ID &&
-        role === "implement-small-feature",
+        role === SMALL_FEATURE_IMPLEMENTER_ROLE,
     });
   }
 
@@ -614,9 +619,9 @@ export class PipelineController {
     const agent = this.getAgent(runId, id);
     if (!agent.parentId) throw new Error(`Agent "${id}" is the pipeline root.`);
     if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
-      if (agent.role !== "implement-small-feature") {
+      if (agent.role !== SMALL_FEATURE_IMPLEMENTER_ROLE) {
         throw new Error(
-          "small-feature-pipeline Terra audit cannot be retried or continued.",
+          "small-feature-pipeline audit children cannot be retried or continued.",
         );
       }
       if (run.stage !== "final-resolve") {
@@ -624,7 +629,7 @@ export class PipelineController {
           "small-feature-pipeline Luna remediation can only run during final-resolve.",
         );
       }
-      this.requireValidReports(run, ["audit-small-feature"], run.stage);
+      this.requireValidReports(run, PIPELINE_4_LUNA_AUDIT_ROLES, run.stage);
       if (agent.status !== "idle") {
         throw new Error(
           "small-feature-pipeline Luna must be idle before remediation.",
@@ -660,10 +665,12 @@ export class PipelineController {
     const continuationText =
       run.definition === SMALL_FEATURE_PIPELINE_ID
         ? [
-            "Independent Terra audit to resolve:",
-            this.agentsFor(runId).find(
-              (candidate) => candidate.role === "audit-small-feature",
-            )?.finalText ?? "",
+            "Independent Luna audit reports to resolve:",
+            ...PIPELINE_4_LUNA_AUDIT_ROLES.flatMap((role) => [
+              `${titleForRole(role)}:`,
+              this.agentsFor(runId).find((candidate) => candidate.role === role)
+                ?.finalText ?? "",
+            ]),
             "Sol remediation instruction:",
             text,
           ].join("\n")

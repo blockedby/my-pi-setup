@@ -73,20 +73,20 @@ Feature input
 
 ## Small-feature-pipeline definition
 
-`small-feature-pipeline` is for bounded, well-specified implementation work that still benefits from independent audit. The persistent Sol/high root is a read-only orchestrator rather than an implementer. One persistent Luna/medium session owns the initial implementation and the only remediation pass; one independent Terra/high session audits the actual workspace once.
+`small-feature-pipeline` is for bounded, well-specified implementation work that still benefits from independent multi-concern audit. The persistent Sol/high root is a read-only orchestrator rather than an implementer. One persistent Luna/medium session owns the initial implementation and the only remediation pass; the shared `PIPELINE_4_LUNA_AUDIT_ROLES` contract supplies four independent read-only Luna/medium audit tracks.
 
 ```text
 Task
   → Persistent read-only Sol/high root
       → one persistent Luna/medium implementer
-      → one independent read-only Terra/high auditor
-      → the same Luna session receives Terra's review and remediates once
+      → four parallel read-only Luna/medium audit tracks
+      → the same implementer session receives all reports and remediates once
   → Factual handoff; no re-audit and no readiness verdict
 ```
 
-The run starts at `build`, advances to `final-audit` only after an exact Luna implementation report, advances to `final-resolve` only after a complete canonical Terra initial-review result, and advances to `complete` only after the original Luna session returns a fresh post-remediation report. The host rejects second Luna/Terra sessions, Terra continuation, out-of-order stages, malformed child reports, completion before remediation, and mutation tools for Sol or Terra. Luna receives bounded workspace coding tools but no orchestration, delegated Codex task/patch, background-terminal, or generic MCP tools and must not commit or push.
+The run starts at `build`, advances to `final-audit` only after an exact implementation report, advances to `final-resolve` only after all four Luna audit reports pass the shared track/findings/unproven-checks contract, and advances to `complete` only after the original implementer session returns a fresh post-remediation report. The host rejects duplicate child roles, audit continuation, partial fan-in, out-of-order stages, malformed child reports, completion before remediation, and mutation tools for Sol or audit children. The implementer receives bounded workspace coding tools but no orchestration, delegated Codex task/patch, background-terminal, or generic MCP tools and must not commit or push.
 
-The implementation report records a non-empty summary plus changed paths, checks, assumptions, and unresolved items. The host captures the workspace base identity when the run starts and supplies Terra with that base, current Git status/diff, the original task, and Luna's implementation report; Terra can then inspect reported or untracked paths with read-only tools and verify the current workspace independently through the canonical code-review skill. Sol sends Terra's complete review to the same Luna session whether Terra found defects or not, so the bounded graph and same-session invariant remain observable. There is no discovery fan-out, Sol implementation, retry/replacement, second auditor, or audit after remediation.
+The implementation report records a non-empty summary plus changed paths, checks, assumptions, and unresolved items. The host captures the workspace base identity when the run starts and supplies each audit track with that base, current Git status/diff, the original task, and the implementation report. Each auditor can inspect reported or untracked paths with read-only tools. Sol sends all four reports to the same implementer session whether or not they contain findings, so the bounded graph and same-session invariant remain observable. There is no discovery fan-out, Sol implementation, Terra audit, retry/replacement, or audit after remediation.
 
 ## Plan-pipeline definition
 

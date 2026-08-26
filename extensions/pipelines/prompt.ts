@@ -1,5 +1,7 @@
 import {
   FEATURE_PIPELINE_ID,
+  PIPELINE_4_LUNA_AUDIT_ROLES,
+  SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
   type PipelineChildRole,
   type PipelineDefinitionId,
@@ -20,7 +22,7 @@ Own orchestration, planning, implementation, remediation, and the factual comple
 Run this fixed graph yourself; the host records your actions and atomically advances successful fan-in boundaries but does not schedule tool calls:
 1. Mark discover. Launch these five Luna/medium roles in one parallel wave: discover-problem, discover-outcome, discover-context, discover-user-scenarios, discover-product-precedents. Wait for every report in this same session. Successful full fan-in enters build.
 2. Synthesize the reports into a feature contract, candidate acceptance criteria, and explicit assumptions. Make reasonable assumptions when evidence remains incomplete; do not pause for user input. Plan and implement the feature yourself.
-3. Mark audit. Launch these four Luna/medium roles in one parallel wave: audit-feature-outcome, audit-logic-invariants, audit-functional-correctness, audit-reliability-regressions. Give each the feature contract, assumptions, current change, and check evidence as additional context. Wait for every report. Successful full fan-in enters audit-resolve.
+3. Mark audit. Launch these four Luna/medium roles in one parallel wave: ${PIPELINE_4_LUNA_AUDIT_ROLES.join(", ")}. Give each the feature contract, assumptions, current change, and check evidence as additional context. Wait for every report. Successful full fan-in enters audit-resolve.
 4. Evaluate every concrete finding; fix it or reject it with specific evidence. Run appropriate checks.
 5. Mark final-audit. Launch one Terra/high final-audit child. Give it only the original task, feature contract, assumptions, current change, and current checks. Do not include prior Luna findings or their resolutions. Wait for its independent report. Successful fan-in enters final-resolve.
 6. Evaluate and resolve the Terra findings yourself. Do not run another audit afterward.
@@ -40,11 +42,11 @@ ${request.workingDir}
 
 Run only this fixed graph. Do not implement, edit files, commit, push, invoke another pipeline, use raw workflows, use ordinary subagents, or ask the user:
 1. The run starts in build. Launch exactly one persistent Luna/medium implement-small-feature child and wait for it. Luna owns repository inspection, implementation, tests, and its structured implementation report. Successful fan-in enters final-audit.
-2. Launch exactly one independent Terra/high audit-small-feature child. Give Terra the original task and Luna's implementation report as additional context. Terra must inspect the actual change and checks independently, follow the canonical code-review skill in initial mode, and return its canonical structured review. Wait for it. Successful fan-in enters final-resolve. Do not retry or re-run Terra.
-3. Send Terra's complete review to the existing implement-small-feature child with pipeline_child_send. Instruct that same Luna session to fix every actionable finding or reject it with specific evidence, rerun appropriate checks, and return a fresh structured implementation report. Do not spawn a replacement or second Luna. Wait for that same child. Successful fan-in enters complete.
-4. Call pipeline_complete with factual structured facts only. Include changed paths, checks/evidence, assumptions, Git observations, both report summaries or references, unresolved items, and the exact working_dir. Do not state READY or make the main agent's Git/merge decision.
+2. Launch exactly these four independent read-only Luna/medium audit roles in one parallel wave: ${PIPELINE_4_LUNA_AUDIT_ROLES.join(", ")}. Each receives the original task, Luna's implementation report, and fresh captured-base Git evidence. Wait for every report. Successful full fan-in enters final-resolve. Do not retry or re-run audit children.
+3. Send all four complete audit reports to the existing implement-small-feature child with pipeline_child_send. Instruct that same Luna session to fix every actionable finding or reject it with specific evidence, rerun appropriate checks, and return a fresh structured implementation report. Do not spawn a replacement or second implementer. Wait for that same child. Successful fan-in enters complete.
+4. Call pipeline_complete with factual structured facts only. Include changed paths, checks/evidence, assumptions, Git observations, all report summaries or references, unresolved items, and the exact working_dir. Do not state READY or make the main agent's Git/merge decision.
 
-There is no discovery fan-out, no Sol implementation, no second auditor, and no audit after Luna remediation. If either child fails or violates its report contract, complete as failed rather than changing the graph. The host enforces role cardinality, stages, same-session remediation, report contracts, and read-only boundaries for Sol and Terra.`;
+There is no discovery fan-out, Sol implementation, Terra audit, audit-child retry/replacement, or audit after Luna remediation. If any child fails or violates its report contract, complete as failed rather than changing the graph. The host enforces role cardinality, four-report fan-in, stages, same-session remediation, report contracts, and read-only boundaries for Sol and audit children.`;
 }
 
 export function buildPlanPipelinePrompt(request: PipelineRunRequest) {
@@ -105,8 +107,6 @@ const ROLE_INSTRUCTIONS: Record<PipelineChildRole, string> = {
     "Review reliability and regressions: failures, retries, partial success, stale state, concurrency, and existing flows.",
   "implement-small-feature":
     "Implement the bounded task directly in the supplied workspace, add or update focused tests, run appropriate checks, and retain this session for one post-audit remediation pass. Do not commit or push.",
-  "audit-small-feature":
-    "Perform one independent deep code audit after Luna implementation. Read and follow the available canonical code-review skill in initial mode, verify claims against the actual workspace, and do not edit files.",
   "discover-goal-outcomes":
     "Clarify the engineering/product goal, observable outcomes, non-goals, and candidate acceptance criteria using repository evidence. Report unknowns and assumptions Sol must preserve.",
   "discover-frontend-scope":
@@ -182,11 +182,11 @@ export function buildPipelineChildPrompt(
     ? `\nAdditional pipeline context:\n${additionalContext.trim()}\n`
     : "";
   if (definition === SMALL_FEATURE_PIPELINE_ID) {
-    const readOnly = role === "audit-small-feature";
-    const reportContract = readOnly
-      ? "Return exactly the compact JSON required by the canonical code-review skill. Do not return generic recommendations or strengths."
-      : IMPLEMENTATION_REPORT_CONTRACT;
-    return `You are the ${readOnly ? "read-only Terra auditor" : "persistent Luna implementer"} for role ${role}. ${ROLE_INSTRUCTIONS[role]}
+    const implementer = role === SMALL_FEATURE_IMPLEMENTER_ROLE;
+    const reportContract = implementer
+      ? IMPLEMENTATION_REPORT_CONTRACT
+      : LUNA_AUDIT_REPORT_CONTRACT;
+    return `You are the ${implementer ? "persistent Luna implementer" : "read-only Luna auditor"} for role ${role}. ${ROLE_INSTRUCTIONS[role]}
 
 Task:
 ${request.task}
@@ -194,7 +194,7 @@ ${request.task}
 Working directory:
 ${request.workingDir}
 ${contextSection}
-Follow loaded AGENTS.md files and applicable skills. Do not spawn children, invoke pipelines/workflows/subagents, prompt the user, commit, push, or mutate external state. ${readOnly ? "Inspect independently and do not edit repository files." : "Use normal coding tools to implement and verify the task."} ${reportContract}`;
+Follow loaded AGENTS.md files and applicable skills. Do not spawn children, invoke pipelines/workflows/subagents, prompt the user, commit, push, or mutate external state. ${implementer ? "Use normal coding tools to implement and verify the task." : "Inspect independently and do not edit repository files."} ${reportContract}`;
   }
   const reportContract = role.startsWith("discover-")
     ? DISCOVERY_REPORT_CONTRACT
