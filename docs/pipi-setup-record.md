@@ -10,7 +10,7 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Source branch                           | `main`                                                   |
 | Launcher                                | `/home/kcnc/.local/bin/pipi`                             |
 | Pipi Pi executable                      | `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi`        |
-| Pipi runtime package                    | `@earendil-works/pi-coding-agent@0.84.2`                 |
+| Pipi runtime package                    | `@earendil-works/pi-coding-agent@0.84.3`                 |
 | Pipi settings                           | `/home/kcnc/.pipi/agent/settings.json`                   |
 | Pipi model overrides                    | `/home/kcnc/.pipi/agent/models.json`                     |
 | Tracked model-override record           | `config/pipi-model-overrides.json`                       |
@@ -26,15 +26,16 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Canonical plan-gh-backlog skill         | `vendor/plan-gh-backlog`                                 |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
-| Current Pipi Pi version                 | `0.84.2`                                                 |
+| Current Pipi Pi version                 | `0.84.3`                                                 |
 | Original Pipi Pi version                | `0.82.1`                                                 |
 | Codex CLI version at initial acceptance | `0.145.0`                                                |
 
 ## Isolation contract
 
-- `pipi` launches the exact pinned runtime at `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi` (`@earendil-works/pi-coding-agent@0.84.2`); it is not a second global installation and does not replace or launch regular `pi` by default.
-- The launcher exports `PI_CODING_AGENT_DIR=/home/kcnc/.pipi/agent`.
-- The launcher exports `PI_CODING_AGENT_SESSION_DIR=/home/kcnc/.pipi/sessions`.
+- `pipi` launches the exact pinned runtime at `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi` (`@earendil-works/pi-coding-agent@0.84.3`); it is not a second global installation and does not replace or launch regular `pi` by default.
+- The installer brands that isolated runtime as `pipi`, so Pi's own banner, terminal title, help, and resume command use the Pipi name.
+- The launcher exports `PIPI_CODING_AGENT_DIR=/home/kcnc/.pipi/agent` and the compatibility alias `PI_CODING_AGENT_DIR`.
+- The launcher exports `PIPI_CODING_AGENT_SESSION_DIR=/home/kcnc/.pipi/sessions` and the compatibility alias `PI_CODING_AGENT_SESSION_DIR`.
 - Regular Pi settings, sessions, auth, and MCP override files remain under `/home/kcnc/.pi/agent`.
 - Pipi auth is separate by default. No auth secret bytes were copied.
 - Pipi's MCP adapter is isolated under `~/.pipi/agent/npm`.
@@ -889,3 +890,15 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Pull request:** Prepared and pushed `chore/pipi-0.84.3`, then opened [PR #25](https://github.com/blockedby/my-pi-setup/pull/25) with the version bump and separate rollout optimization commits.
 - **Merge and rollout:** Squash-merged [PR #25](https://github.com/blockedby/my-pi-setup/pull/25) as `6d3c170`, synchronized primary `main`, and ran the optimized rollout from the primary package. It completed in 1 second with no repository dependency pass, kept only the primary checkout package registration, and verified Pipi 0.84.3, MCP 2.15.0, install-script policy, and unchanged model overrides. The two safety stashes created while preserving the concurrent resume-branding investigation remain intact for that operation's owner.
 - **Pending:** Reload or restart Pipi sessions created before this rollout.
+
+## Operation entry: brand the Pipi runtime and welcome screen
+
+- **Request:** Change the interactive exit hint from `pi --session-dir ... --session ...` to `pipi --session-dir ... --session ...`, change the welcome-screen PI block logo to PIPI, use Luna agents for research without a pipeline, and deliver the fix through a separate pull request.
+- **Action:** Four read-only Luna investigations traced Pi 0.84.3 branding, launcher options, regression strategy, and the custom welcome header. Implemented Pi's supported `piConfig.name` packaging rebrand as an installer-repaired property of the isolated runtime, including `--skip-dependencies` repair; added branded `PIPI_CODING_AGENT_*` launcher variables while retaining legacy `PI_*` aliases. Updated the custom six-line block logo and transient terminal title from PI to PIPI, with a compact `PIPI` fallback for narrow terminals. No normal welcome image asset exists, so no image protocol behavior changed. Updated installation checks and runtime documentation. No pipeline, credential access, model override change, dependency pin change, or submodule pin change occurred.
+- **Affected paths or values:** `scripts/install-dependencies.mjs`, `scripts/install.mjs`, `scripts/check-pipi-install.mjs`, `tests/scripts/install.test.mjs`, `extensions/ui-customization/index.ts`, new `index.test.ts`, `SETUP.md`, three explanatory documents, this installation summary, and branch/worktree `fix/pipi-branding` at `.worktrees/pipi-branding`.
+- **Verification:** Focused installer tests passed 16/16 and welcome-branding tests passed 2/2 after initializing the existing pinned submodules and installing worktree dependencies. Full fresh checks then passed 30/30 installer tests, 180/180 deterministic extension tests, 22/22 file-search tests, exact submodule validation, TypeScript, formatting, and `git diff --check`. Installer failures observed before worktree dependency/submodule initialization were environment setup failures rather than product regressions. Installed the branch with repository dependencies skipped, removed the temporary primary-checkout package duplicate, and verified isolated Pipi 0.84.3 with branded `APP_NAME`/`APP_TITLE`, `pipi --help`, the exact `pipi --session-dir '/tmp/pipi sessions' --session test-session` formatter result, MCP 2.15.0, unchanged model overrides, and no unreviewed runtime install scripts.
+- **Review:** Independent Terra initial review returned `READY` with no actionable introduced or regressed findings.
+- **Pull request:** Opened [PR #27](https://github.com/blockedby/my-pi-setup/pull/27) from `fix/pipi-branding` to `main`. Rebased onto the latest `origin/main`; the only conflict was this operation record, resolved by retaining the merged 0.84.3 rollout facts and the branding entry.
+- **Post-rebase verification:** The target preparation helper required regression reruns because of the resolved conflict. Fresh checks again passed 30/30 installer tests, 180/180 deterministic extension tests, 22/22 file-search tests, exact submodule validation, TypeScript, formatting, `git diff --check`, and the installed branded-runtime check.
+- **Publish:** Force-pushed the rebased branch with lease; PR #27 now points to the reviewed, post-rebase implementation and evidence.
+- **Pending:** Review/merge PR #27 and reload or restart this current Pipi session before visually checking the new PIPI welcome header.

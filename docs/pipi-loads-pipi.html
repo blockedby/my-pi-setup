@@ -643,11 +643,11 @@ session directory
             </div>
             <div class="variable">
               <strong>Agent resources</strong>
-              <span>PI_CODING_AGENT_DIR=~/.pipi/agent</span>
+              <span>PIPI_CODING_AGENT_DIR=~/.pipi/agent</span>
             </div>
             <div class="variable">
               <strong>Session storage</strong>
-              <span>PI_CODING_AGENT_SESSION_DIR=~/.pipi/sessions</span>
+              <span>PIPI_CODING_AGENT_SESSION_DIR=~/.pipi/sessions</span>
             </div>
           </div>
         </div>
@@ -674,6 +674,8 @@ session directory
                 </p>
               </div>
               <div class="code-card">export PIPI_PROFILE=1
+export PIPI_CODING_AGENT_DIR="$HOME/.pipi/agent"
+export PIPI_CODING_AGENT_SESSION_DIR="$HOME/.pipi/sessions"
 export PI_CODING_AGENT_DIR="$HOME/.pipi/agent"
 export PI_CODING_AGENT_SESSION_DIR="$HOME/.pipi/sessions"
 exec "$HOME/.pipi/agent/npm/node_modules/.bin/pi" "$@"</div>

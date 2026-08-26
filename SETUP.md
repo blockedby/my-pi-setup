@@ -110,10 +110,12 @@ Restart Pipi or use `/reload` after installation so the browser skill and MCP co
 
 ## Isolation and authentication
 
-The launcher executes `~/.pipi/agent/npm/node_modules/.bin/pi` after exporting a persistent profile marker and both isolation variables:
+The installer brands the isolated Pi runtime as `pipi`, so Pi's own banner, terminal title, help, and resume command use the Pipi name. The launcher exports a persistent profile marker, Pipi's branded isolation variables, and the legacy Pi aliases for compatibility:
 
 ```text
 PIPI_PROFILE=1
+PIPI_CODING_AGENT_DIR=~/.pipi/agent
+PIPI_CODING_AGENT_SESSION_DIR=~/.pipi/sessions
 PI_CODING_AGENT_DIR=~/.pipi/agent
 PI_CODING_AGENT_SESSION_DIR=~/.pipi/sessions
 ```

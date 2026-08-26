@@ -44,6 +44,25 @@ export const ensureIsolatedNpmPolicy = ({ prefix, allowScripts }) => {
   });
 };
 
+export const ensureIsolatedPiBranding = ({ prefix, appName }) => {
+  const manifestPath = join(
+    prefix,
+    "node_modules",
+    "@earendil-works",
+    "pi-coding-agent",
+    "package.json",
+  );
+  const manifest = readManifest(manifestPath);
+  if (!manifest) return false;
+  const piConfig =
+    manifest.piConfig && typeof manifest.piConfig === "object"
+      ? manifest.piConfig
+      : {};
+  manifest.piConfig = { ...piConfig, name: appName };
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return true;
+};
+
 export const ensureIsolatedNpmPackage = ({
   prefix,
   packageName,

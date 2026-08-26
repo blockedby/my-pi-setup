@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import {
   ensureIsolatedNpmPackage,
   ensureIsolatedNpmPolicy,
+  ensureIsolatedPiBranding,
   installDependencies,
 } from "./install-dependencies.mjs";
 
@@ -471,6 +472,7 @@ const install = () => {
       expectedVersion: mcpAdapterVersion,
     });
   }
+  ensureIsolatedPiBranding({ prefix: isolatedNpmPrefix, appName: "pipi" });
   const isolatedPiExecutable = join(
     isolatedNpmPrefix,
     "node_modules",
@@ -497,7 +499,7 @@ const install = () => {
     symlinkSync(regularAuthPath, pipiAuthPath);
   }
 
-  const launcher = `#!/bin/sh\n${managedLauncherMarker}\nexport PIPI_PROFILE=1\nexport PI_CODING_AGENT_DIR=${shellQuote(agentDir)}\nexport PI_CODING_AGENT_SESSION_DIR=${shellQuote(sessionDir)}\nexec ${shellQuote(piExecutable)} "$@"\n`;
+  const launcher = `#!/bin/sh\n${managedLauncherMarker}\nexport PIPI_PROFILE=1\nexport PIPI_CODING_AGENT_DIR=${shellQuote(agentDir)}\nexport PIPI_CODING_AGENT_SESSION_DIR=${shellQuote(sessionDir)}\nexport PI_CODING_AGENT_DIR=${shellQuote(agentDir)}\nexport PI_CODING_AGENT_SESSION_DIR=${shellQuote(sessionDir)}\nexec ${shellQuote(piExecutable)} "$@"\n`;
   writeFileSync(launcherPath, launcher, { mode: 0o755 });
   chmodSync(launcherPath, 0o755);
 

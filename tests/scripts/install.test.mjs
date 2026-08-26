@@ -65,6 +65,8 @@ process.stdout.write(JSON.stringify({
   pipiProfile: process.env.PIPI_PROFILE,
   agentDir: process.env.PI_CODING_AGENT_DIR,
   sessionDir: process.env.PI_CODING_AGENT_SESSION_DIR,
+  pipiAgentDir: process.env.PIPI_CODING_AGENT_DIR,
+  pipiSessionDir: process.env.PIPI_CODING_AGENT_SESSION_DIR,
   codex,
   args: process.argv.slice(2),
 }));
@@ -104,9 +106,9 @@ if (args[0] === "install") {
     const binDir = join(prefix, "node_modules", ".bin");
     mkdirSync(join(prefix, "node_modules", "@earendil-works", "pi-coding-agent"), { recursive: true });
     mkdirSync(binDir, { recursive: true });
-    writeFileSync(join(prefix, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"), JSON.stringify({ version }));
+    writeFileSync(join(prefix, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"), JSON.stringify({ version, piConfig: { configDir: ".pi" } }));
     const piPath = join(binDir, "pi");
-    writeFileSync(piPath, '#!/usr/bin/env node\\nprocess.stdout.write(JSON.stringify({ pipiProfile: process.env.PIPI_PROFILE, agentDir: process.env.PI_CODING_AGENT_DIR, args: process.argv.slice(2) }));\\n');
+    writeFileSync(piPath, '#!/usr/bin/env node\\nprocess.stdout.write(JSON.stringify({ pipiProfile: process.env.PIPI_PROFILE, agentDir: process.env.PI_CODING_AGENT_DIR, pipiAgentDir: process.env.PIPI_CODING_AGENT_DIR, args: process.argv.slice(2) }));\\n');
     chmodSync(piPath, 0o755);
   }
   if (spec.startsWith("pi-mcp-adapter@")) {
@@ -276,6 +278,8 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     pipiProfile: "1",
     agentDir: join(fixture.home, ".pipi", "agent"),
     sessionDir: join(fixture.home, ".pipi", "sessions"),
+    pipiAgentDir: join(fixture.home, ".pipi", "agent"),
+    pipiSessionDir: join(fixture.home, ".pipi", "sessions"),
     codex: fixture.codexPath,
     args: ["--version", "argument with spaces"],
   });
@@ -397,18 +401,19 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
 
   assert.equal(result.status, 0, result.stderr);
   const pipiNpm = join(fixture.home, ".pipi", "agent", "npm");
-  assert.equal(
-    readJson(
-      join(
-        pipiNpm,
-        "node_modules",
-        "@earendil-works",
-        "pi-coding-agent",
-        "package.json",
-      ),
-    ).version,
-    runtimePiVersion,
+  const runtimeManifestPath = join(
+    pipiNpm,
+    "node_modules",
+    "@earendil-works",
+    "pi-coding-agent",
+    "package.json",
   );
+  const installedRuntime = readJson(runtimeManifestPath);
+  assert.equal(installedRuntime.version, runtimePiVersion);
+  assert.deepEqual(installedRuntime.piConfig, {
+    configDir: ".pi",
+    name: "pipi",
+  });
   assert.equal(
     readJson(join(pipiNpm, "node_modules", "pi-mcp-adapter", "package.json"))
       .version,
@@ -440,10 +445,15 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
     {
       pipiProfile: "1",
       agentDir: join(fixture.home, ".pipi", "agent"),
+      pipiAgentDir: join(fixture.home, ".pipi", "agent"),
       args: ["--version"],
     },
   );
 
+  writeFileSync(
+    runtimeManifestPath,
+    `${JSON.stringify({ ...installedRuntime, piConfig: { configDir: ".pi" } })}\n`,
+  );
   const skipped = spawnSync(
     process.execPath,
     [installScript, "--skip-dependencies", "--codex-tools", fixture.codexTools],
@@ -451,6 +461,10 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
   );
   assert.equal(skipped.status, 0, skipped.stderr);
   assert.equal(readFileSync(launcherPath, "utf8"), launcher);
+  assert.deepEqual(readJson(runtimeManifestPath).piConfig, {
+    configDir: ".pi",
+    name: "pipi",
+  });
 });
 
 test("repository dependency skip still installs isolated runtime dependencies", async (t) => {
