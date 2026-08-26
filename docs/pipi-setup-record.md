@@ -979,4 +979,5 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Action:** Added two introductory paragraphs to `README.md` describing fixed bounded Sol-orchestrated graphs, limited Luna/Terra roles, validated reports and factual handoffs; summarized `small-feature-pipeline`, `feature-pipeline`, and `plan-pipeline`; and explained the collapsed `/pipelines` dashboard, textual color status, expansion, and stage-agent opening behavior before the existing detailed reference.
 - **Affected paths or values:** `README.md` and this operation record only. Pipeline behavior, installed Pipi state, dependencies, runtime versions, model overrides, submodule pins, credentials, and current session resources are unchanged.
 - **Verification:** Reviewed the wording against the three current pipeline definitions and merged dashboard behavior; `git diff --check` passes.
-- **Pending:** Commit and push the documentation branch and open the requested PR; do not install or reload Pipi.
+- **Pull request:** Committed as `67e7a0f`, pushed `docs/readme-pipelines-overview`, and opened [PR #36](https://github.com/blockedby/my-pi-setup/pull/36) against current `main`; target preparation reported no rebase was needed.
+- **Pending:** User review of PR #36; do not install or reload Pipi.
