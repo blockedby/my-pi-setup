@@ -209,6 +209,36 @@ function finalReport(
   });
 }
 
+function synthesisSegment(
+  mode: "initial" | "closure" = "initial",
+  priorBlockers: ReadonlyArray<{ id: string; closureCondition: string }> = [],
+) {
+  return new AuditSegment({
+    task: "Audit synthesis contract",
+    acceptanceContract: "The synthesis contract is strict",
+    assumptions: [],
+    checks: [],
+    input: {
+      mode,
+      acceptanceCriteria: [],
+      ...(priorBlockers.length > 0 ? { priorBlockers } : {}),
+    },
+    git: {
+      baseSha: "UNAVAILABLE",
+      headSha: "UNAVAILABLE",
+      worktreeLabel: "WORKTREE",
+      workingDir: "/tmp/work",
+      branch: "main",
+      status: { state: "available", value: "" },
+      baseIsAncestor: "yes",
+      commits: { state: "available", value: "" },
+      committedDiff: { state: "available", value: "" },
+      dirtyDiff: { state: "available", value: "" },
+      combinedDiff: { state: "available", value: "" },
+    },
+  });
+}
+
 function settle(session: FakeSession, finalText: string) {
   session.emit({
     type: "settled",
@@ -674,6 +704,134 @@ test("final audit findings are canonicalized, deduplicated, and assigned IDs hos
       ["AUD-002", "lower"],
     ],
   );
+});
+
+test("synthesis accepts any exact role order and canonicalizes it without reducer restart", () => {
+  const segment = synthesisSegment();
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+    segment.accept(role, trackReport(role), 1);
+  }
+  assert.equal(segment.nextPrompt()?.turn.final, true);
+  const arrivalOrder = [
+    PIPELINE_4_LUNA_AUDIT_ROLES[0],
+    PIPELINE_4_LUNA_AUDIT_ROLES[2],
+    PIPELINE_4_LUNA_AUDIT_ROLES[3],
+    PIPELINE_4_LUNA_AUDIT_ROLES[1],
+  ];
+  const invalid = JSON.parse(
+    finalReport(
+      [...arrivalOrder.slice(0, -1), arrivalOrder[0]],
+      [{ blockerId: "BLOCK-1", closureCondition: "not applicable" }],
+    ),
+  );
+  assert.equal(Check(AUDIT_SYNTHESIS_REPORT_SCHEMA, invalid), false);
+  assert.throws(
+    () => segment.settleSubmitted(invalid),
+    (error) => {
+      assert.match(String(error), /integratedRoles exact set mismatch/);
+      assert.match(
+        String(error),
+        /initial closureResults must be an empty array/,
+      );
+      return true;
+    },
+  );
+  assert.equal(segment.progress().revision, 1);
+  segment.settleSubmitted(JSON.parse(finalReport(arrivalOrder)));
+  assert.deepEqual(
+    segment.finalReport?.integratedRoles,
+    PIPELINE_4_LUNA_AUDIT_ROLES,
+  );
+});
+
+test("fallback rejects non-array initial closureResults with a bounded diagnostic", () => {
+  const segment = synthesisSegment();
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+    segment.accept(role, trackReport(role), 1);
+  }
+  segment.nextPrompt();
+  const report = JSON.parse(finalReport(PIPELINE_4_LUNA_AUDIT_ROLES));
+  report.closureResults = "not an array";
+  assert.throws(
+    () => segment.settleSubmitted(report),
+    /initial closureResults must be an empty array/,
+  );
+});
+
+test("final schema bounds unprovenChecks and rejects extra properties", () => {
+  const report = JSON.parse(finalReport(PIPELINE_4_LUNA_AUDIT_ROLES));
+  const check = { claim: "claim", reason: "reason", requiredCheck: "check" };
+  report.unprovenChecks = Array.from({ length: 129 }, () => check);
+  assert.equal(Check(AUDIT_SYNTHESIS_REPORT_SCHEMA, report), false);
+  report.unprovenChecks = [{ ...check, extra: "rejected" }];
+  assert.equal(Check(AUDIT_SYNTHESIS_REPORT_SCHEMA, report), false);
+});
+
+test("synthesis rejects duplicate or missing integrated roles", () => {
+  const segment = synthesisSegment();
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+    segment.accept(role, trackReport(role), 1);
+  }
+  segment.nextPrompt();
+  const duplicate = [
+    ...PIPELINE_4_LUNA_AUDIT_ROLES.slice(0, -1),
+    PIPELINE_4_LUNA_AUDIT_ROLES[0],
+  ];
+  assert.throws(
+    () => segment.settleSubmitted(JSON.parse(finalReport(duplicate))),
+    /integratedRoles exact set mismatch/,
+  );
+  const missing = PIPELINE_4_LUNA_AUDIT_ROLES.slice(0, -1);
+  assert.throws(
+    () => segment.settleSubmitted(JSON.parse(finalReport(missing))),
+    /integratedRoles exact set mismatch.*missing=/,
+  );
+});
+
+test("closure synthesis keeps blocker IDs, order, and conditions strict", () => {
+  const blockers = [
+    { id: "BLOCK-1", closureCondition: "first condition" },
+    { id: "BLOCK-2", closureCondition: "second condition" },
+  ];
+  const segment = synthesisSegment("closure", blockers);
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+    segment.accept(role, trackReport(role), 1);
+  }
+  segment.nextPrompt();
+  const wrongOrder = [
+    { ...blockers[1], status: "closed", evidence: "evidence" },
+    { ...blockers[0], status: "open", evidence: "evidence" },
+  ];
+  assert.throws(
+    () =>
+      segment.settleSubmitted(
+        JSON.parse(
+          finalReport(PIPELINE_4_LUNA_AUDIT_ROLES, wrongOrder, "closure"),
+        ),
+      ),
+    /closure blocker ID\/order\/condition mismatch/,
+  );
+  const validSegment = synthesisSegment("closure", blockers);
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+    validSegment.accept(role, trackReport(role), 1);
+  }
+  validSegment.nextPrompt();
+  assert.deepEqual(validSegment.context.input.priorBlockers, blockers);
+  validSegment.settleSubmitted(
+    JSON.parse(
+      finalReport(
+        PIPELINE_4_LUNA_AUDIT_ROLES,
+        blockers.map((blocker) => ({
+          blockerId: blocker.id,
+          closureCondition: blocker.closureCondition,
+          status: "closed",
+          evidence: "evidence",
+        })),
+        "closure",
+      ),
+    ),
+  );
+  assert.equal(validSegment.finalReport?.closureResults.length, 2);
 });
 
 test("closure audit input rejects an empty directly touched invariant scope", async () => {
