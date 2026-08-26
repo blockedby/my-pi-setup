@@ -838,3 +838,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** This operation record only; product/runtime behavior, credentials, model overrides, dependencies, and submodules are unchanged.
 - **Verification:** Explanation was grounded in the implemented controller/session/tool contracts and the completed 12-session live acceptance that produced a valid 22-task frontend/backend/DevOps/test plan without product-code mutation.
 - **Pending:** Reload/restart Pipi before interactive use; review PR #23.
+
+## Operation entry: publish pipeline stage-status correction to PR
+
+- **Request:** Open a pull request for the pipeline stage-status correction.
+- **Action:** Confirmed that branch `feat/pipelines-v1` already has open PR #23 against `main`, so no duplicate PR was created. Committed the authoritative fan-in stage transitions and dashboard activity-glyph correction as `8035d93` (`fix(pipelines): align active stage status`), confirmed the branch was already up to date with `origin/main`, pushed it to `origin/feat/pipelines-v1`, and updated PR #23's summary and verification evidence.
+- **Affected paths or values:** Git branch `feat/pipelines-v1`, commit `8035d93`, remote branch `origin/feat/pipelines-v1`, and <https://github.com/blockedby/my-pi-setup/pull/23>. No merge, deployment, runtime installation, credential, model override, dependency, or submodule change was performed.
+- **Verification:** Pre-publish evidence remained 178/178 deterministic extension tests, 22/22 focused pipeline tests, TypeScript, formatting, submodule validation, and `git diff --check`. The target-branch preparation helper reported `rebase_status=up_to_date`, `content_changed=false`, and `rerun_required=false`. GitHub confirmed PR #23 is open with base `main`, head `feat/pipelines-v1`, and the updated body; no repository checks are configured.
+- **Pending:** PR #23 review/merge and a Pipi reload or restart before visually confirming the updated dashboard in a fresh pipeline run.
