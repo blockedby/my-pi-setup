@@ -126,6 +126,7 @@ test("child denylist keeps extension and workflow structured tools available", a
         "pipeline_plan_write",
         "pipeline_plan_validate",
         "pipeline_git_status",
+        "pipeline_audit_start",
       ],
     );
     const allTools = new Set(session.getAllTools().map((tool) => tool.name));

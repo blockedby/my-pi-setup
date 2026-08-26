@@ -1,4 +1,6 @@
 import {
+  AUDIT_PIPELINE_ID,
+  AUDIT_SYNTHESIS_ROLE,
   FEATURE_PIPELINE_ID,
   PIPELINE_4_LUNA_AUDIT_ROLES,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
@@ -35,11 +37,11 @@ Continue this fixed graph from build:
 1. Synthesize the discovery reports into a feature contract, candidate acceptance criteria, and explicit assumptions. Make reasonable assumptions when evidence remains incomplete; do not pause for user input. Plan and implement the feature yourself.
 2. Mark audit. Launch these four Luna/medium roles in one parallel wave: ${PIPELINE_4_LUNA_AUDIT_ROLES.join(", ")}. Give each the feature contract, assumptions, current change, and check evidence as additional context. Wait for every report. Successful full fan-in enters audit-resolve.
 3. Evaluate every concrete finding; fix it or reject it with specific evidence. Run appropriate checks.
-4. Mark final-audit. Launch one Terra/high final-audit child. Give it only the original task, feature contract, assumptions, current change, and current checks. Do not include prior Luna findings or their resolutions. Wait for its independent report. Successful fan-in enters final-resolve.
-5. Evaluate and resolve the Terra findings yourself. Do not run another audit afterward.
+4. Mark final-audit, then call pipeline_audit_start once with the feature contract, assumptions, and current checks. The host launches four new isolated Luna/medium audit tracks plus one persistent Luna/medium synthesizer. Use the returned IDs with pipeline_child_wait. Synthesis starts after the first valid track report and incrementally integrates later reports; successful validated synthesis enters final-resolve.
+5. Evaluate and resolve every concrete finding in the synthesized final report yourself. Do not run another audit afterward.
 6. Mark complete and call pipeline_complete with structured facts only, including every material assumption.
 
-If a Luna Audit child fails, use pipeline_child_send to retry that same child session at most once. If no session was created, spawn one replacement attempt. Do not retry final-audit. Do not delegate implementation to children. Completion has no readiness label: report outcome, changed paths, checks/evidence, assumptions, Git/commit observations when applicable, report summaries or references, unresolved items, and working_dir.`;
+If a pre-final Luna Audit child fails, use pipeline_child_send to retry that same child session at most once. If no session was created, spawn one replacement attempt. The controller-owned final audit segment is fail-closed and cannot be retried or manually spawned. Do not delegate implementation to children. Completion has no readiness label: report outcome, changed paths, checks/evidence, assumptions, Git/commit observations when applicable, report summaries or references, unresolved items, and working_dir.`;
 }
 
 export function buildSmallFeaturePipelinePrompt(request: PipelineRunRequest) {
@@ -77,8 +79,8 @@ Run this fixed graph yourself; the host records actions and atomically advances 
 3. The plan must contain these level-two sections: Goal and non-goals; Evidence and assumptions; Candidate acceptance criteria; Frontend tasks; Backend tasks; DevOps tasks; Cross-cutting tasks; Test plan; Implementation waves; Risks, rollout, and rollback; Unresolved questions. Record inapplicable frontend/backend/DevOps sections explicitly. Use unique headings like \`### TASK-001: title\`. Every task must have bullet fields \`**Scope:**\`, \`**Likely paths/components:**\`, \`**Dependencies:**\`, and \`**Acceptance/verification evidence:**\`. Assign every task to a dependency-safe wave. The test plan must address unit, integration, contract, e2e, and operational checks, explicitly marking checks not applicable when evidence supports that.
 4. Run fresh bounded validation with pipeline_plan_validate and capture Git state with pipeline_git_status. Mark audit. Launch exactly these four Luna/medium roles in one parallel wave: audit-product-traceability, audit-decomposition-dag, audit-cross-layer-integration, audit-test-release-reliability. Give each the goal, repository evidence, assumptions, plan path/content, and validation evidence. Wait for every report. Successful full fan-in enters audit-resolve.
 5. Resolve every actionable Luna finding in the plan once, or reject it with specific evidence. Revalidate the plan.
-6. Mark final-audit. Launch one independent Terra/high final-audit child. Give it the original goal, synthesized repository evidence, assumptions, current plan path/content, and fresh validation evidence. Do not include Luna findings or their resolutions. Terra must read and follow the canonical code-review skill in initial mode, adapted from implementation defects to concrete plan-quality defects. Wait for its report; do not retry this role. Successful fan-in enters final-resolve.
-7. Resolve Terra's actionable findings in the plan once, or reject them with evidence. Revalidate the artifact. Do not audit again.
+6. Mark final-audit, then call pipeline_audit_start once with the current plan path/content as the acceptance contract, assumptions, and fresh validation checks. The host launches four isolated Luna/medium audit tracks plus one persistent Luna/medium synthesizer and incrementally integrates reports. Wait on the returned IDs; successful validated synthesis enters final-resolve.
+7. Resolve the synthesized audit's actionable findings in the plan once, or reject them with evidence. Revalidate the artifact. Do not audit again.
 8. Mark complete and call pipeline_complete. Supply plan_path as the repository-relative docs/plans/*.md artifact path and factual outcome, changed paths, checks/evidence, assumptions, Git state, report summaries/references, unresolved items/questions, and working_dir. Do not state a READY/readiness verdict.
 
 If a Discover or Luna Audit child fails or returns a report-contract warning, use pipeline_child_send to retry that same child session at most once. If no session was created, spawn one replacement attempt. Children remain read-only and have no grandchildren. Do not delegate plan synthesis or remediation to children.`;
@@ -94,6 +96,9 @@ export function buildPipelinePrompt(
   }
   if (definition === SMALL_FEATURE_PIPELINE_ID) {
     return buildSmallFeaturePipelinePrompt(request);
+  }
+  if (definition === AUDIT_PIPELINE_ID) {
+    return "The audit-pipeline root is activated only by the controller's incremental audit reducer.";
   }
   return buildPlanPipelinePrompt(request);
 }
@@ -137,8 +142,10 @@ const ROLE_INSTRUCTIONS: Record<PipelineChildRole, string> = {
     "Audit frontend, backend, DevOps, and cross-cutting integration boundaries. Respect evidence-backed not-applicable layers and report only concrete integration gaps.",
   "audit-test-release-reliability":
     "Audit unit/integration/contract/e2e/operational coverage, failure handling, risks, release sequencing, rollout, rollback, and observability for concrete gaps.",
+  [AUDIT_SYNTHESIS_ROLE]:
+    "Incrementally synthesize validated Luna audit reports in one persistent read-only session without making readiness or Git decisions.",
   "final-audit":
-    "Perform one independent deep final audit after Luna remediation. Read and follow the available canonical code-review skill in initial mode. For plan-pipeline, adapt its candidate-finding rules to implementation-plan quality and use the plan artifact as the reviewed change. Verify claims with repository and validation evidence and return the canonical structured review result.",
+    "Reserved for explicit/manual Terra escalation outside automatic pipeline routing.",
 };
 
 const DISCOVERY_REPORT_CONTRACT = `Return exactly one compact JSON object with this shape:
@@ -193,6 +200,9 @@ export function buildPipelineChildPrompt(
   const contextSection = additionalContext.trim()
     ? `\nAdditional pipeline context:\n${additionalContext.trim()}\n`
     : "";
+  if (definition === AUDIT_PIPELINE_ID) {
+    return `You are a read-only audit-pipeline track for role ${role}. ${ROLE_INSTRUCTIONS[role]}\n\nTask:\n${request.task}\n\nWorking directory:\n${request.workingDir}\n${contextSection}\nInspect independently and do not mutate repository or external state. ${LUNA_AUDIT_REPORT_CONTRACT}`;
+  }
   if (definition === SMALL_FEATURE_PIPELINE_ID) {
     const implementer = role === SMALL_FEATURE_IMPLEMENTER_ROLE;
     const reportContract = implementer

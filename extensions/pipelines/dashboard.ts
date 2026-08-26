@@ -12,6 +12,9 @@ import {
 import { openAgentTakeover } from "../shared/agent-tree/takeover.ts";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import {
+  AUDIT_PIPELINE_ID,
+  AUDIT_SYNTHESIS_ROLE,
+  PIPELINE_4_LUNA_AUDIT_ROLES,
   PIPELINE_DEFINITIONS,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
@@ -63,9 +66,18 @@ function childStage(
   role: string,
 ): PipelineStage {
   if (role === SMALL_FEATURE_IMPLEMENTER_ROLE) return "build";
+  if (role === AUDIT_SYNTHESIS_ROLE) return "final-audit";
   if (role.startsWith("discover-")) return "discover";
   if (role.startsWith("audit-")) {
-    return definition === SMALL_FEATURE_PIPELINE_ID ? "final-audit" : "audit";
+    if (definition === AUDIT_PIPELINE_ID) return "audit";
+    if (
+      definition === SMALL_FEATURE_PIPELINE_ID ||
+      (definition === "plan-pipeline" &&
+        PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role))
+    ) {
+      return "final-audit";
+    }
+    return "audit";
   }
   return "final-audit";
 }

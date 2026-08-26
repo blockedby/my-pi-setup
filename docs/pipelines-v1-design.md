@@ -1,140 +1,143 @@
 # Hardcoded pipelines — design and runtime contract
 
-_Status: implemented design record. Historical feature-pipeline v1 decisions remain below; the small-feature-pipeline and plan-pipeline additions are specified in their own sections._
+_Status: implemented design record. The public surface is intentionally four bounded definitions, not a generic workflow API._
 
-## Confirmed starting constraints
+## Public definitions and ownership
 
-- Pipelines are the intended user-facing orchestration feature; do not build a separate raw workflow surface for this proposal.
-- The package has three hardcoded definitions: **feature-pipeline**, **small-feature-pipeline**, and **plan-pipeline**. The public selector accepts only these known definitions; it does not expose arbitrary workflows.
-- The main agent activates a pipeline through a first-class tool, analogous to how it uses `subagent_spawn`. It should do so automatically for a nontrivial new-feature implementation when the workspace is prepared; it should not route bugs, refactors, research-only work, or trivial edits into this v1 feature pipeline.
-- `/pipelines` is a nested UI rather than a flat subagent-style list. It always lists all hardcoded definitions and nests each run beneath its selected definition.
-- Git/worktree policy is not hardcoded into the graph. The main agent chooses and prepares the working directory according to project instructions and applicable skills, then passes that workspace to the pipeline; delivery constraints come from the self-contained task and loaded project resources. In the usual local flow this may be a dedicated branch/worktree with commits; other environments may require different behavior.
-- Multiple pipeline runs may be active concurrently, including in the same working directory. v1 has no workspace-conflict gate; the invoking main agent and project policy own that decision. The UI must show each run's working directory clearly. Pipeline graphs predeclare every root and child they may launch, so pipeline sessions intentionally apply no model-capacity quotas. Sol=4, Terra=8, Luna=16, and non-Pi limits belong only to direct `/subagents` admission and are neither inherited nor independently duplicated by pipelines.
-- Pipeline lifecycle matches current direct subagents: runs are session-scoped and in memory. On main-session shutdown/reload/switch/fork, the runtime disposes active pipeline-agent and child sessions; v1 does not resume them. Persisted child session files are diagnostic artifacts, not resumable pipeline state.
-- One persistent **pipeline agent** owns each definition's agent-driven stages and receives pipeline-scoped child-management tools analogous to the main agent's subagent tools. Feature and plan roots use Sol/high; the routing-only small-feature root uses Luna/medium. The controller owns feature discovery before activating Sol.
-- For `feature-pipeline`, the controller creates the persistent Sol session in a deferred idle state, launches five Discover Luna children at `medium` reasoning itself, validates their reports, and sends Sol its first prompt only after complete fan-in advances the run to `build`. Sol then synthesizes the supplied reports, plans, and implements the feature.
-- It launches the four parallel Audit Luna children at `medium` reasoning, reads and resolves their reports, then launches one Terra final-audit child at `high` reasoning and resolves that report. Reports naturally return into the same pipeline-agent context as tool results.
-- Feature discovery retry is controller-owned: failed, malformed, or oversized reports receive at most one same-session retry, while a pre-session creation failure may receive one replacement attempt. Sol cannot spawn or continue discovery roles. Post-build Luna audit retry remains prompt-controlled; attempts remain visible in state/UI.
-- Terra's final audit is independent: it receives the feature task, acceptance/assumptions, current change, and checks, but not the earlier Luna audit reports or their resolutions. This reduces anchoring. There is no re-audit loop; after the pipeline agent resolves the Terra report, the pipeline hands the branch and reports back to the main agent for its decision.
-- Pipeline child-management tools are scoped to the current run. They enforce allowed roles/models, record children and attempts under the run for nested UI, and are not available to Luna/Terra children. The host schedules only the feature discovery bootstrap and its bounded retry; later feature stages and the other pipeline definitions remain agent-driven. A successful current-stage fan-in atomically advances `discover → build`, `audit → audit-resolve`, or `final-audit → final-resolve` only after every required role has a successful report accepted by that definition's validator.
-- `/pipelines` provides nested transcript views, steer, and cancel for the pipeline agent and its Luna/Terra children. A deferred feature Sol rejects steering until controller discovery completes, while cancellation remains effective. Stage rows/details show only status and nested agents/attempts; semantic reports remain in transcripts rather than being duplicated into the graph view. The orange running glyph belongs to the active stage rather than the persistent root, while child attempts retain their own result glyphs. Pipeline children remain outside the flat `/subagents` projection.
-- Parent/child session state, subscriptions, control actions, bounded transcripts, and takeover UI are implemented as reusable `extensions/shared/agent-tree` infrastructure. Pipeline graph semantics remain in `extensions/pipelines`. A later PR may migrate direct subagents to this shared tree and enable their second level; v1 does not enable recursive orchestration for ordinary subagents.
+`pipeline_run` accepts a self-contained `task`, caller-selected `working_dir`, and one of four hardcoded definitions:
 
-## Current discussion: Discover
+- `feature-pipeline`: persistent Sol/high implementation root, controller-owned five-track discovery, root implementation, four Luna audits, root remediation, reusable final Luna audit segment, root final resolution and factual completion;
+- `small-feature-pipeline`: read-only Luna/medium coordinator, one persistent Luna implementer, four parallel Luna auditors, and one same-session implementer remediation pass;
+- `plan-pipeline`: persistent Sol/high planning root, five Luna discovery tracks, one validated `docs/plans/*.md` artifact, four plan-audit tracks, root remediation, reusable final Luna audit segment, root final resolution and factual completion;
+- `audit-pipeline`: four isolated read-only Luna/medium audit tracks and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, repository mutation, readiness decision, or Git decision.
 
-The v1 pipeline is oriented around feature work. Discover is its first layer: five fixed Luna agents run in parallel and investigate these product questions at a high level:
+Omission still selects `feature-pipeline`. Unknown names fail closed. No definition accepts arbitrary roles, edges, models, shell commands, or Git refs. Terra constants, model profile, direct-subagent quotas, and `terra-audit` remain available for explicit future/manual escalation, but no automatic pipeline route uses Terra.
 
-1. **Problem:** identify the actor, their job, the current problem/opportunity, its consequence, and problem boundaries so the pipeline agent can formulate sound acceptance criteria; do not assess roadmap priority or invent ROI.
-2. **Outcome:** identify observable desired outcomes and propose candidate acceptance criteria grounded in the task/product evidence. The pipeline agent owns the final feature contract.
-3. **Context:** inspect the current user journey, neighboring scenarios, direct dependencies/contracts, and relevant repository conventions without broad architecture audit.
-4. **User Scenarios:** map primary, alternative, empty/error/permission, and before/after journeys that the feature must handle.
-5. **Product Precedents:** search the current product/repository first for similar behaviors, terminology, flows, tests, and interaction/implementation patterns that can keep the feature consistent. Use external research only when the task explicitly requires it.
+Pipeline graphs predeclare their roots and children and therefore do not consume, inherit, queue on, or enforce direct-subagent capacity quotas. Multiple runs may execute concurrently, including against the same workspace; the calling main agent owns workspace-conflict policy. Runs and child sessions are in-memory and session-scoped and are cancelled/disposed on shutdown, reload, switch, or fork.
 
-The roles may repeat important facts; inexpensive redundancy is preferred over artificial non-overlap. Discover does not choose a solution or divide implementation work. All five roles return the same compact structured report: `summary`, `evidence`, `unknowns`, and `constraints`; each role prompt defines how those fields apply to its question. If the reports leave an important behavior choice ungrounded, the pipeline agent makes and records a reasonable assumption, continues implementation, and exposes that assumption in the final handoff rather than pausing for user input. Detailed wording remains open.
+## Shared audit segment
 
-## Audit tracks
+`extensions/pipelines/audit-segment.ts` is the reusable hardcoded audit component. It encapsulates:
 
-The pipeline agent launches four fixed Luna feature-review tracks in parallel:
+1. exactly four independent Luna/medium tracks using the established concerns:
+   - feature outcome, acceptance, and user scenarios;
+   - logic, state transitions, rules, permissions, and invariants;
+   - functional correctness, contracts, integrations, tests, edge cases, and data handling;
+   - reliability, retries, partial success, stale state, concurrency, and regressions;
+2. one persistent Luna/medium synthesis session;
+3. strict bounded track, intermediate synthesis, and final synthesis contracts;
+4. provenance records containing role, attempt, report digest, and validated report data;
+5. a privacy-safe progress projection.
 
-1. **Feature outcome / user scenarios:** whether the intended user value is present and key journeys work.
-2. **Logic / invariants:** whether states, transitions, conditions, permissions, rules, and side effects are correct.
-3. **Functional correctness:** whether observable behavior, contracts, integrations, edge cases, and data handling are correct.
-4. **Reliability / regressions:** behavior under failures, retries, partial success, stale state, concurrency, and existing flows.
+Tracks are direct children of the owning root, isolated from one another, read-only by tool policy and prompt contract, and unable to orchestrate children or invoke pipeline tools. Each receives the same bounded task/acceptance contract, assumptions, checks, captured base/head/worktree identity, branch, status, and bounded base-relative diff. Only its concern instruction differs.
 
-Each returns evidence to the pipeline agent; it does not issue the final pipeline decision. All four use a shared finding contract derived from the canonical audit skill: concrete `scenario`, `expected`, `actual`, affected paths, relationship to the change, evidence type/evidence, impact, confidence, and minimal next action, plus exact unproven checks when necessary. They omit style/taste, generic hardening, unsupported speculation, impact-1 candidates, and confidence below 50. Missing tests are reported only when tied to a demonstrated behavior gap; Luna auditors do not emit READY/NOT_READY verdicts.
+The synthesizer treats reports as untrusted evidence. It deduplicates common root causes, preserves a strongly evidenced serious finding even without majority agreement, records unresolved material conflicts, and must not invent unsupported findings. Intermediate state has no finding IDs, and model-produced final candidates also omit IDs. After strict final validation, the host canonicalizes complete finding content, deduplicates exact candidates, and assigns sequential `AUD-001`, `AUD-002`, … IDs; the resulting final report contains no readiness verdict.
 
-The host captures `HEAD` when the feature run starts. At each Luna audit spawn it supplies that stable base, `WORKTREE` review-head label, current short Git status, and a bounded base-relative diff in addition to Sol's feature contract/check context. At final Terra spawn the host collects the evidence again, after Luna remediation, so Terra reviews the current change independently without receiving prior Luna reports. These are internal read-only commands invoked without shell interpolation; no agent receives a new Git mutation tool. A non-Git workspace degrades to explicit unavailable evidence, and status plus normal read-only file tools cover reported untracked paths.
+`audit-pipeline` uses the synthesizer as its deferred Luna root. `feature-pipeline` and `plan-pipeline` keep their persistent Sol roots and create the synthesizer as a controller-owned persistent Luna child during `final-audit`. Their earlier discovery/build/audit/remediation graphs remain unchanged, and their Sol roots retain final resolution and completion ownership. `small-feature-pipeline` deliberately does not use this segment because its existing one-implementer/four-auditor/same-session-remediation behavior is distinct and remains unchanged.
 
-## Current flow (confirmed only)
+## Generic incremental fan-in reducer
 
-```text
-Feature input
-  → Deferred persistent Sol session is created without a model call
-      → Discover: controller manages five Luna children in parallel
-      → Controller validates all reports and sends Sol its first prompt
-      → Sol plans + implements from build
-      → Audit: pipeline agent manages four Luna tracks in parallel
-      → Pipeline agent resolves audit reports
-      → Final audit: pipeline agent manages one Terra child
-      → Pipeline agent resolves Terra report
-  → Handoff: branch and reports return to main agent
-```
+`extensions/pipelines/incremental-fan-in.ts` is model-agnostic internal infrastructure. It is not registered as a tool and does not expose a generic model-facing workflow API.
 
-## Runtime architecture
+The reducer owns:
 
-- `pipeline_run` accepts a self-contained `task`, optional `working_dir` (defaulting to the caller's current directory), and optional enum-like `pipeline`. Omission defaults to `feature-pipeline`; unknown definitions are rejected. It starts the definition-selected persistent root session there, returns a run ID immediately, and delivers the eventual handoff to the main session as a follow-up. Run title is derived from the task; delivery/Git constraints come from the task and loaded project resources rather than extra tool fields.
-- The persistent root receives run-scoped custom tools for stage marking, child spawn/list/check/wait/send/cancel, and completion. Tool mutation boundaries are definition-specific: the full feature Sol may implement, while the small-feature Luna and planning Sol roots are read-only.
-- Child spawn accepts only roles hardcoded for the selected definition; the runtime selects the corresponding Luna or Terra model, role prompt, persistence, and tool policy. Child sessions do not receive orchestration tools.
-- The controller owns feature discovery sequencing, strict report validation, a 32 KiB UTF-8 limit per discovery report, bounded retry, and deferred Sol activation. It passes the five validated reports to Sol as escaped evidence data, not instructions. After bootstrap, the prompt owns feature graph sequencing and Luna-audit retry; plan and small-feature sequencing remain prompt-owned. The host also owns session lifecycle, role/model boundaries, hierarchy, subscriptions, cancellation, and bounded state.
-- Shared `agent-tree` infrastructure models root/children/attempts and supplies transcript, steer, cancel, and takeover behavior. Pipeline-specific graph/state and `/pipelines` composition stay in the pipelines extension.
+- a fixed unique expected-contributor set;
+- contributor validation and exactly-once acceptance;
+- a bounded pending queue;
+- one active reducer turn at a time;
+- accepted, pending, in-flight, and integrated contributor state;
+- monotonically increasing revisions;
+- intermediate and final result validation;
+- finalization only after every expected contributor is integrated.
 
-## Completion handoff
+When the first valid report settles, the controller immediately starts the deferred synthesis session. Reports arriving during an active turn enter the pending queue. The controller never steers or interrupts a busy synthesis session; embedded roots cannot cancel segment tracks or synthesis individually, while whole-run/session lifecycle cancellation remains authoritative. When that session becomes safely idle, all pending reports are sent as one next revision. Each role appears in one batch exactly once. A synthesis output is validated as final only when its turn integrates the complete expected set; intermediate output can update inspection state but can never deliver the automatic completion handoff.
 
-`pipeline_complete` emits facts, not a readiness label. Its structured handoff includes the selected definition, outcome, changed paths, checks/evidence, commits or observed Git state when applicable, discovery/audit report references or summaries, unresolved items, and the working directory. A completed `plan-pipeline` run additionally requires a validated repository-local `docs/plans/*.md` plan path. The main agent alone decides readiness and subsequent Git/PR actions.
+A malformed, oversized, missing, failed, or cancelled track report fails the segment. A malformed synthesis revision or invalid final report also fails it. Standalone completion requires all four validated reports, all four integrations, and one valid final report. Embedded final-audit advancement to `final-resolve` has the same gate.
 
-## Small-feature-pipeline definition
+## Initial and closure audit contracts
 
-`small-feature-pipeline` is for bounded, well-specified implementation work that still benefits from independent multi-concern audit. Its persistent Luna/medium root is a read-only orchestrator rather than an implementer. A separate persistent Luna/medium session owns the initial implementation and the only remediation pass; the shared `PIPELINE_4_LUNA_AUDIT_ROLES` contract supplies four independent read-only Luna/medium audit tracks.
+The optional `audit` input on `pipeline_run` is valid only with `audit-pipeline`.
 
-```text
-Task
-  → Persistent read-only Luna/medium root
-      → one persistent Luna/medium implementer
-      → four parallel read-only Luna/medium audit tracks
-      → the same implementer session receives all reports and remediates once
-  → Factual handoff; no re-audit and no readiness verdict
-```
+Initial mode accepts:
 
-The run starts at `build`, advances to `final-audit` only after an exact implementation report, advances to `final-resolve` only after all four Luna audit reports pass the shared track/findings/unproven-checks contract, and advances to `complete` only after the original implementer session returns a fresh post-remediation report. The host rejects duplicate child roles, audit continuation, partial fan-in, out-of-order stages, malformed child reports, completion before remediation, and mutation tools for the Luna root or audit children. The implementer receives bounded workspace coding tools but no orchestration, delegated Codex task/patch, background-terminal, or generic MCP tools and must not commit or push.
+- `mode: "initial"`;
+- optional bounded `acceptance_criteria` strings.
 
-The implementation report records a non-empty summary plus changed paths, checks, assumptions, and unresolved items. The host captures the workspace base identity when the run starts and supplies each audit track with that base, current Git status/diff, the original task, and the implementation report. Each auditor can inspect reported or untracked paths with read-only tools. The Luna root sends all four reports to the same implementer session whether or not they contain findings, so the bounded graph and same-session invariant remain observable. There is no discovery fan-out, root implementation, Terra audit, retry/replacement, or audit after remediation.
+Closure mode requires:
 
-## Plan-pipeline definition
+- `mode: "closure"`;
+- one or more `prior_blockers`, each with an ID and closure condition;
+- a bounded supplied `remediation_diff`;
+- bounded `touched_invariants`;
+- optional acceptance criteria.
 
-`plan-pipeline` is planning-only. Its persistent Sol/high root may inspect the repository, write and remediate one Markdown plan under `docs/plans/`, and run read-only validation. Plan roots and children are denied shell/edit/write, delegated patch/task, and background-shell mutation tools. Sol writes only through a bounded plan-artifact tool and uses bounded plan-validation and Git-status tools. It must not implement the requested product goal, modify product code, commit, push, install runtime changes, or deploy.
+Closure tracks and synthesis may evaluate only supplied blocker IDs and closure conditions, the remediation diff, and directly touched invariants. They must not reopen broad discovery. The final report preserves blocker order, IDs, and closure conditions and records `closed`, `open`, or `unproven` with evidence. The public schema has no command or ref field.
+
+## Host-collected Git evidence
+
+The controller captures `HEAD` when a run starts. At audit-segment activation it resolves current `HEAD`, branch, short status, and base-relative diff using `execFileSync("git", argumentArray, ...)` without shell interpolation. Output is bounded before entering model context. A non-Git workspace degrades to explicit `UNAVAILABLE` identity/evidence rather than guessed state. The caller still supplies `working_dir`; models cannot select commands or unsafe refs.
+
+## Definition flows
+
+### Feature pipeline
 
 ```text
-Goal
-  → Persistent Sol/high root
-      → Discover (one parallel wave, Luna/medium)
-          ├─ goal/outcomes and candidate acceptance criteria
-          ├─ frontend/UI scope
-          ├─ backend/data/API scope
-          ├─ DevOps/runtime/release scope
-          └─ testing/quality strategy
-      → Sol synthesizes docs/plans/<descriptive-name>.md
-      → Audit (one parallel wave, Luna/medium)
-          ├─ product outcome and AC traceability
-          ├─ decomposition, dependencies, and DAG quality
-          ├─ cross-layer integration
-          └─ test, release, and reliability coverage
-      → Sol resolves actionable Luna findings once
-      → Independent Terra/high final audit
-      → Sol resolves Terra findings once; no re-audit
-  → Factual plan handoff
+Deferred Sol/high root
+  → controller-owned five Luna discovery tracks
+  → validated full discovery fan-in activates Sol at build
+  → Sol plans and implements
+  → four agent-driven Luna audit tracks
+  → Sol resolves findings
+  → controller-owned reusable Luna final audit segment
+  → Sol resolves synthesized findings once
+  → factual completion
 ```
 
-All children are fixed direct children of the root and receive no orchestration tools, so there are no grandchildren. The controller enforces stage order, definition-specific roles, one valid report per required track before phase transitions/completion, at most one same-session retry for a failed or malformed discovery/Luna audit report, and no Terra retry. A pre-session discovery/Luna spawn failure may create one replacement attempt. A track may explicitly report `not applicable` when supported by repository evidence.
+Discovery retry remains controller-owned: one same-session retry for malformed/failed output or one replacement when no session was created. Pre-final audit retry remains bounded and root-controlled. The final audit segment is controller-owned and fail-closed.
 
-### Plan artifact contract
+### Small-feature pipeline
 
-The artifact has a level-one title and level-two sections for:
+```text
+Read-only Luna/medium coordinator
+  → one persistent Luna/medium implementer
+  → four parallel read-only Luna/medium auditors
+  → same implementer receives all reports and remediates once
+  → factual completion
+```
 
-- goal and non-goals;
-- repository evidence and explicit assumptions;
-- candidate acceptance criteria;
-- frontend, backend, DevOps, and cross-cutting tasks;
-- a test plan addressing unit, integration, contract, e2e, and operational checks, including evidence-backed `not applicable` entries;
-- dependency-safe implementation waves;
-- risks, rollout, and rollback;
-- unresolved questions.
+There is no discovery, Sol, Terra, reusable synthesis segment, replacement auditor, or post-remediation re-audit.
 
-Implementation tasks use unique stable IDs such as `TASK-001`. Every task records scope, likely paths/components, dependencies, and acceptance/verification evidence, and every task appears in an implementation wave. Frontend/backend/DevOps sections remain present but may state that the layer is not applicable rather than inventing tasks.
+### Plan pipeline
 
-The controller validates the completed plan's repository-local path and structural contract. Plan discovery reports use the established `summary`/`evidence`/`unknowns`/`constraints` object. Luna audits use `track`/`findings`/`unprovenChecks`. Contract warnings are returned to Sol so a failed or malformed Luna track can receive its one bounded retry. Terra follows the canonical code-review skill in initial mode, adapted to concrete plan-quality defects, and does not receive prior Luna findings or their resolutions.
+```text
+Sol/high planning root
+  → five Luna discovery tracks
+  → validated docs/plans/*.md artifact
+  → four Luna plan-quality tracks
+  → Sol remediates and revalidates
+  → controller-owned reusable Luna final audit segment
+  → Sol resolves synthesis and revalidates once
+  → factual plan completion
+```
 
-### Plan handoff and limitations
+The root remains unable to use shell/edit/write or delegated mutation tools. It writes only through the validated plan artifact tool and reads bounded plan/Git evidence. Earlier discovery, artifact, audit, retry, and remediation behavior remains intact.
 
-The factual handoff identifies `plan-pipeline`, plan path, changed paths, checks and fresh evidence, assumptions, report summaries/references, unresolved questions/items, working directory, and observed Git state. It deliberately omits a READY/readiness decision.
+### Standalone audit pipeline
 
-Runs remain in-memory and session-scoped, are not resumable, apply no direct-subagent capacity quotas, and use the same transcript/steer/cancel/takeover behavior as `feature-pipeline`. Multiple runs may target the same workspace because conflict prevention remains the caller's responsibility. Artifact validation proves plan structure, not product feasibility, stakeholder approval, or correctness of a future implementation.
+```text
+Deferred persistent Luna/medium synthesis root
+  ├─ four controller-owned read-only Luna/medium tracks in parallel
+  ├─ first valid report activates root synthesis
+  ├─ later reports are serialized/batched into that same session
+  └─ strict factual structured audit handoff
+```
+
+No pipeline agent or child may mutate the repository, remediate findings, make readiness claims, or decide Git actions.
+
+## Tooling, inspection, and completion
+
+Feature and plan roots receive `pipeline_audit_start`, a definition-specific tool that accepts only the bounded acceptance contract, assumptions, and check evidence. It starts the fixed shared segment and returns the five controller-owned agent IDs for normal run-scoped waiting/inspection. It is not a generic fan-in or workflow API. Pipeline children cannot call it.
+
+`pipeline_check` and `pipeline_list` remain synchronous, nonblocking, and main-agent-only. Audit progress exposes only mode, phase, expected/accepted/pending/integrated counts, reducer idle/busy/finalized state, revision, and final-validation boolean. It never exposes prompts, thinking, tool arguments/results, raw reports, Git evidence, report provenance, session files, or session paths. Text and previews remain bounded.
+
+`pipeline_complete` continues to emit facts rather than readiness. Standalone audit completion is controller-owned after strict final validation and includes the bounded structured final audit report. Feature and plan roots still call `pipeline_complete` after their own final resolution. The calling main agent owns readiness, remediation outside the standalone audit, and all branch/commit/push/PR decisions.

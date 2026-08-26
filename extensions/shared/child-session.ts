@@ -36,6 +36,7 @@ export const PIPELINE_ORCHESTRATION_TOOL_NAMES = [
   "pipeline_plan_write",
   "pipeline_plan_validate",
   "pipeline_git_status",
+  "pipeline_audit_start",
 ] as const;
 
 export const CHILD_EXCLUDED_TOOL_NAMES = [

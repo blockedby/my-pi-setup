@@ -3,10 +3,12 @@ import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 export const FEATURE_PIPELINE_ID = "feature-pipeline" as const;
 export const SMALL_FEATURE_PIPELINE_ID = "small-feature-pipeline" as const;
 export const PLAN_PIPELINE_ID = "plan-pipeline" as const;
+export const AUDIT_PIPELINE_ID = "audit-pipeline" as const;
 export const PIPELINE_DEFINITION_IDS = [
   FEATURE_PIPELINE_ID,
   SMALL_FEATURE_PIPELINE_ID,
   PLAN_PIPELINE_ID,
+  AUDIT_PIPELINE_ID,
 ] as const;
 export type PipelineDefinitionId = (typeof PIPELINE_DEFINITION_IDS)[number];
 
@@ -32,7 +34,15 @@ export const SMALL_FEATURE_PIPELINE_STAGES = [
   "complete",
 ] as const satisfies ReadonlyArray<PipelineStage>;
 
+export const AUDIT_PIPELINE_STAGES = [
+  "audit",
+  "complete",
+] as const satisfies ReadonlyArray<PipelineStage>;
+
+// Terra remains available for explicit/manual direct-subagent escalation. It is
+// intentionally absent from every automatic pipeline definition.
 export const FINAL_AUDIT_ROLE = "final-audit" as const;
+export const AUDIT_SYNTHESIS_ROLE = "audit-synthesis" as const;
 
 export const FEATURE_PIPELINE_DISCOVERY_ROLES = [
   "discover-problem",
@@ -63,7 +73,7 @@ export type PipelineLunaAuditRole =
 export const FEATURE_PIPELINE_CHILD_ROLES = [
   ...FEATURE_PIPELINE_DISCOVERY_ROLES,
   ...PIPELINE_4_LUNA_AUDIT_ROLES,
-  FINAL_AUDIT_ROLE,
+  AUDIT_SYNTHESIS_ROLE,
 ] as const;
 
 export const SMALL_FEATURE_IMPLEMENTER_ROLE =
@@ -92,7 +102,12 @@ export const PLAN_PIPELINE_AUDIT_ROLES = [
 export const PLAN_PIPELINE_CHILD_ROLES = [
   ...PLAN_PIPELINE_DISCOVERY_ROLES,
   ...PLAN_PIPELINE_AUDIT_ROLES,
-  FINAL_AUDIT_ROLE,
+  ...PIPELINE_4_LUNA_AUDIT_ROLES,
+  AUDIT_SYNTHESIS_ROLE,
+] as const;
+
+export const AUDIT_PIPELINE_CHILD_ROLES = [
+  ...PIPELINE_4_LUNA_AUDIT_ROLES,
 ] as const;
 
 // Backward-compatible alias for feature-pipeline callers and tests.
@@ -102,10 +117,14 @@ export type FeaturePipelineChildRole =
 export type SmallFeaturePipelineChildRole =
   (typeof SMALL_FEATURE_PIPELINE_CHILD_ROLES)[number];
 export type PlanPipelineChildRole = (typeof PLAN_PIPELINE_CHILD_ROLES)[number];
+export type AuditPipelineChildRole =
+  (typeof AUDIT_PIPELINE_CHILD_ROLES)[number];
 export type PipelineChildRole =
   | FeaturePipelineChildRole
   | SmallFeaturePipelineChildRole
-  | PlanPipelineChildRole;
+  | PlanPipelineChildRole
+  | AuditPipelineChildRole
+  | typeof FINAL_AUDIT_ROLE;
 
 export interface PipelineChildContextPolicy {
   readonly gitEvidence?: true;
@@ -125,7 +144,6 @@ export const PIPELINE_CHILD_CONTEXT_POLICIES: PipelineChildContextPolicies = {
     [FEATURE_LOGIC_AUDIT_ROLE]: { gitEvidence: true },
     [FEATURE_CORRECTNESS_AUDIT_ROLE]: { gitEvidence: true },
     [FEATURE_RELIABILITY_AUDIT_ROLE]: { gitEvidence: true },
-    [FINAL_AUDIT_ROLE]: { gitEvidence: true },
   },
   [SMALL_FEATURE_PIPELINE_ID]: {
     [FEATURE_OUTCOME_AUDIT_ROLE]: {
@@ -146,6 +164,12 @@ export const PIPELINE_CHILD_CONTEXT_POLICIES: PipelineChildContextPolicies = {
     },
   },
   [PLAN_PIPELINE_ID]: {},
+  [AUDIT_PIPELINE_ID]: {
+    [FEATURE_OUTCOME_AUDIT_ROLE]: { gitEvidence: true },
+    [FEATURE_LOGIC_AUDIT_ROLE]: { gitEvidence: true },
+    [FEATURE_CORRECTNESS_AUDIT_ROLE]: { gitEvidence: true },
+    [FEATURE_RELIABILITY_AUDIT_ROLE]: { gitEvidence: true },
+  },
 };
 
 export function childContextPolicyFor(
@@ -185,6 +209,13 @@ export const PIPELINE_DEFINITIONS: ReadonlyArray<PipelineDefinition> = [
     rootModel: SOL_MODEL,
     childRoles: PLAN_PIPELINE_CHILD_ROLES,
   },
+  {
+    id: AUDIT_PIPELINE_ID,
+    title: "Audit pipeline",
+    rootTitle: "Audit pipeline Luna synthesizer",
+    rootModel: LUNA_MODEL,
+    childRoles: AUDIT_PIPELINE_CHILD_ROLES,
+  },
 ];
 
 export function definitionFor(id: PipelineDefinitionId) {
@@ -196,19 +227,22 @@ export function rolesForDefinition(id: PipelineDefinitionId) {
   if (id === SMALL_FEATURE_PIPELINE_ID) {
     return SMALL_FEATURE_PIPELINE_CHILD_ROLES;
   }
-  return PLAN_PIPELINE_CHILD_ROLES;
+  if (id === PLAN_PIPELINE_ID) return PLAN_PIPELINE_CHILD_ROLES;
+  return AUDIT_PIPELINE_CHILD_ROLES;
 }
 
 export function stagesForDefinition(
   id: PipelineDefinitionId,
 ): ReadonlyArray<PipelineStage> {
-  return id === SMALL_FEATURE_PIPELINE_ID
-    ? SMALL_FEATURE_PIPELINE_STAGES
-    : PIPELINE_STAGES;
+  if (id === SMALL_FEATURE_PIPELINE_ID) return SMALL_FEATURE_PIPELINE_STAGES;
+  if (id === AUDIT_PIPELINE_ID) return AUDIT_PIPELINE_STAGES;
+  return PIPELINE_STAGES;
 }
 
 export function initialStageForDefinition(id: PipelineDefinitionId) {
-  return id === SMALL_FEATURE_PIPELINE_ID ? "build" : "discover";
+  if (id === SMALL_FEATURE_PIPELINE_ID) return "build";
+  if (id === AUDIT_PIPELINE_ID) return "audit";
+  return "discover";
 }
 
 export function roleBelongsToDefinition(
@@ -218,6 +252,21 @@ export function roleBelongsToDefinition(
   return (rolesForDefinition(definition) as ReadonlyArray<string>).includes(
     role,
   );
+}
+
+export type AuditMode = "initial" | "closure";
+
+export interface AuditPriorBlocker {
+  readonly id: string;
+  readonly closureCondition: string;
+}
+
+export interface AuditPipelineInput {
+  readonly mode: AuditMode;
+  readonly acceptanceCriteria: ReadonlyArray<string>;
+  readonly priorBlockers?: ReadonlyArray<AuditPriorBlocker>;
+  readonly remediationDiff?: string;
+  readonly touchedInvariants?: ReadonlyArray<string>;
 }
 
 export interface PipelineCompletionFacts {
@@ -230,6 +279,7 @@ export interface PipelineCompletionFacts {
   readonly reports: ReadonlyArray<string>;
   readonly unresolvedItems: ReadonlyArray<string>;
   readonly workingDir: string;
+  readonly auditReport?: import("./audit-segment.ts").AuditFinalReport;
 }
 
 export type PipelineRunStatus =
@@ -246,6 +296,7 @@ export interface PipelineRunSnapshot {
   readonly error?: string;
   readonly rootId?: string;
   readonly completion?: PipelineCompletionFacts;
+  readonly auditSegment?: import("./audit-segment.ts").AuditSegmentProgress;
   readonly agents: ReadonlyArray<AgentNodeSnapshot>;
 }
 
@@ -253,6 +304,7 @@ export interface PipelineRunRequest {
   readonly workingDir: string;
   readonly task: string;
   readonly pipeline?: PipelineDefinitionId;
+  readonly audit?: AuditPipelineInput;
 }
 
 export interface PipelineHandoff {

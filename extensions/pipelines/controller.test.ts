@@ -201,6 +201,92 @@ function settleRole(run: ReturnType<typeof harness>, role: string) {
   });
 }
 
+function synthesisReport(
+  reportType: "audit-synthesis-intermediate" | "audit-synthesis-final",
+  integratedRoles: ReadonlyArray<string>,
+) {
+  if (reportType === "audit-synthesis-intermediate") {
+    return JSON.stringify({
+      reportType,
+      integratedRoles,
+      rootCauseCandidates: [],
+      unresolvedConflicts: [],
+      unprovenChecks: [],
+      summary: "Incremental synthesis retained validated evidence",
+    });
+  }
+  return JSON.stringify({
+    reportType,
+    mode: "initial",
+    baseSha: "UNAVAILABLE",
+    headSha: "UNAVAILABLE",
+    integratedRoles,
+    findings: [],
+    closureResults: [],
+    unresolvedConflicts: [],
+    unprovenChecks: [],
+    summary: "No supported findings",
+  });
+}
+
+async function finishEmbeddedAudit(
+  run: ReturnType<typeof harness>,
+  runId: string,
+) {
+  run.controller.setStage(runId, "final-audit");
+  const agents = await run.controller.startFinalAudit(runId, {
+    acceptanceContract: "The approved feature contract",
+    assumptions: [],
+    checks: ["focused checks passed"],
+  });
+  const firstRole = PIPELINE_4_LUNA_AUDIT_ROLES[0];
+  const first =
+    run.sessions.find(
+      (session) => session.spec.role === firstRole && session.spec.attempt > 1,
+    ) ?? run.sessions.find((session) => session.spec.role === firstRole);
+  assert.ok(first);
+  first.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: reportForRole(firstRole) },
+  });
+  await settleInitialization();
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES.slice(1)) {
+    const session = [...run.sessions]
+      .reverse()
+      .find((candidate) => candidate.spec.role === role);
+    assert.ok(session);
+    session.emit({
+      type: "settled",
+      outcome: { type: "completed", finalText: reportForRole(role) },
+    });
+  }
+  const synthesizer = run.sessions.find(
+    (session) => session.spec.role === "audit-synthesis",
+  );
+  assert.ok(synthesizer);
+  synthesizer.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: synthesisReport("audit-synthesis-intermediate", [firstRole]),
+    },
+  });
+  await settleInitialization();
+  synthesizer.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: synthesisReport(
+        "audit-synthesis-final",
+        PIPELINE_4_LUNA_AUDIT_ROLES,
+      ),
+    },
+  });
+  await settleInitialization();
+  assert.equal(run.controller.get(runId)?.stage, "final-resolve");
+  assert.equal(agents.length, 5);
+}
+
 async function advancePlanToComplete(
   run: ReturnType<typeof harness>,
   runId: string,
@@ -222,10 +308,7 @@ async function advancePlanToComplete(
   );
   PLAN_PIPELINE_AUDIT_ROLES.forEach((role) => settleRole(run, role));
   run.controller.setStage(runId, "audit-resolve");
-  run.controller.setStage(runId, "final-audit");
-  await run.controller.spawnChild(runId, "final-audit");
-  settleRole(run, "final-audit");
-  run.controller.setStage(runId, "final-resolve");
+  await finishEmbeddedAudit(run, runId);
   run.controller.setStage(runId, "complete");
 }
 
@@ -504,6 +587,7 @@ test("root tools are run-scoped and children have coding tools without orchestra
     "pipeline_child_wait",
     "pipeline_child_send",
     "pipeline_child_cancel",
+    "pipeline_audit_start",
     "pipeline_complete",
   ]);
   const childSession = run.sessions.find(
@@ -530,11 +614,18 @@ test("root tools are run-scoped and children have coding tools without orchestra
 });
 
 test("definition role policies centralize child context requirements", () => {
-  for (const role of [...PIPELINE_4_LUNA_AUDIT_ROLES, FINAL_AUDIT_ROLE]) {
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
     assert.deepEqual(childContextPolicyFor("feature-pipeline", role), {
       gitEvidence: true,
     });
+    assert.deepEqual(childContextPolicyFor("audit-pipeline", role), {
+      gitEvidence: true,
+    });
   }
+  assert.deepEqual(
+    childContextPolicyFor("feature-pipeline", FINAL_AUDIT_ROLE),
+    {},
+  );
   for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
     assert.deepEqual(childContextPolicyFor("small-feature-pipeline", role), {
       gitEvidence: true,
@@ -607,19 +698,34 @@ test("roles select fixed models, remain direct root children, and record attempt
   const first = await run.controller.spawnChild(runId, "audit-feature-outcome");
   const retry = await run.controller.spawnChild(runId, "audit-feature-outcome");
   run.controller.setStage(runId, "final-audit");
-  const terra = await run.controller.spawnChild(runId, "final-audit");
+  const finalAgents = await run.controller.startFinalAudit(runId, {
+    acceptanceContract: "approved contract",
+    assumptions: [],
+    checks: [],
+  });
   assert.equal(first.model, LUNA_MODEL);
   assert.equal(retry.model, LUNA_MODEL);
-  assert.equal(terra.model, TERRA_MODEL);
+  assert.equal(
+    finalAgents.every((agent) => agent.model === LUNA_MODEL),
+    true,
+  );
   assert.equal(first.parentId, rootId);
   assert.equal(retry.parentId, rootId);
-  assert.equal(terra.parentId, rootId);
+  assert.equal(
+    finalAgents.every((agent) => agent.parentId === rootId),
+    true,
+  );
   assert.equal(first.attempt, 1);
   assert.equal(retry.attempt, 2);
-  assert.equal(terra.attempt, 1);
   assert.equal(run.controller.get(runId)?.agents[0]?.model, SOL_MODEL);
   assert.equal(pipelineThinkingLevel(SOL_MODEL), "high");
   assert.equal(pipelineThinkingLevel(TERRA_MODEL), "high");
+  assert.equal(
+    run.controller
+      .get(runId)
+      ?.agents.some((agent) => agent.model === TERRA_MODEL),
+    false,
+  );
   await assert.rejects(
     run.controller.spawnChild(runId, "not-a-role" as PipelineChildRole),
     /Unsupported feature-pipeline child role/,
@@ -628,7 +734,7 @@ test("roles select fixed models, remain direct root children, and record attempt
   await run.controller.dispose();
 });
 
-test("plan-pipeline has fixed staged direct Luna/Terra roles and rejects feature roles", async () => {
+test("plan-pipeline preserves earlier roles and uses a controller-owned Luna final audit", async () => {
   const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-roles-"));
   const run = harness();
   const runId = run.controller.start({
@@ -664,8 +770,20 @@ test("plan-pipeline has fixed staged direct Luna/Terra roles and rejects feature
   PLAN_PIPELINE_AUDIT_ROLES.forEach((role) => settleRole(run, role));
   run.controller.setStage(runId, "audit-resolve");
   run.controller.setStage(runId, "final-audit");
-  const terra = await run.controller.spawnChild(runId, "final-audit");
-  const children = [...discovery, ...audits, terra];
+  const finalAgents = await run.controller.startFinalAudit(runId, {
+    acceptanceContract: "validated plan artifact",
+    assumptions: [],
+    checks: ["plan contract passed"],
+  });
+  await assert.rejects(
+    run.controller.startFinalAudit(runId, {
+      acceptanceContract: "duplicate",
+      assumptions: [],
+      checks: [],
+    }),
+    /already started its final audit segment/,
+  );
+  const children = [...discovery, ...audits, ...finalAgents];
   assert.deepEqual(
     children.map((child) => child.role),
     [...PLAN_PIPELINE_CHILD_ROLES],
@@ -675,37 +793,24 @@ test("plan-pipeline has fixed staged direct Luna/Terra roles and rejects feature
     true,
   );
   assert.equal(
-    children.slice(0, 9).every((child) => child.model === LUNA_MODEL),
+    children.every((child) => child.model === LUNA_MODEL),
     true,
   );
-  assert.equal(children[9]?.model, TERRA_MODEL);
+  assert.equal(
+    children.some((child) => child.model === TERRA_MODEL),
+    false,
+  );
   await assert.rejects(
     run.controller.spawnChild(runId, "discover-problem"),
     /Unsupported plan-pipeline child role/,
   );
   await assert.rejects(
     run.controller.spawnChild(runId, "final-audit"),
-    /already has its allowed child session/,
+    /Unsupported plan-pipeline child role/,
   );
-  const terraSession = run.sessions.find(
-    (candidate) => candidate.spec.role === "final-audit",
-  );
-  assert.ok(terraSession);
-  terraSession.emit({
-    type: "settled",
-    outcome: {
-      type: "completed",
-      finalText: JSON.stringify({
-        mode: "initial",
-        verdict: "anything",
-        findings: [],
-        summary: "Incomplete canonical result",
-      }),
-    },
-  });
   assert.throws(
     () => run.controller.setStage(runId, "final-resolve"),
-    /missing valid reports: final-audit/,
+    /validated Luna audit synthesis/,
   );
 
   await run.controller.dispose();
@@ -846,7 +951,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
   await run.controller.dispose();
 });
 
-test("feature Luna audits and final Terra receive fresh base-relative Git evidence", async () => {
+test("feature audits and the embedded Luna segment receive captured fresh Git evidence", async () => {
   const workingDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "feature-audit-evidence-"),
   );
@@ -889,15 +994,25 @@ test("feature Luna audits and final Terra receive fresh base-relative Git eviden
 
   fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "final\n");
   run.controller.setStage(runId, "final-audit");
-  await run.controller.spawnChild(runId, "final-audit");
-  const terraAudit = run.sessions.find(
-    (session) => session.spec.role === "final-audit",
+  await run.controller.startFinalAudit(runId, {
+    acceptanceContract: "approved feature contract",
+    assumptions: [],
+    checks: ["focused tests passed"],
+  });
+  const finalAudits = PIPELINE_4_LUNA_AUDIT_ROLES.map((role) =>
+    [...run.sessions].reverse().find((session) => session.spec.role === role),
   );
-  assert.ok(terraAudit);
-  assert.equal(terraAudit.prompts[0]?.includes(baseSha), true);
-  assert.equal(terraAudit.prompts[0]?.includes("-before"), true);
-  assert.equal(terraAudit.prompts[0]?.includes("+final"), true);
-  assert.equal(terraAudit.prompts[0]?.includes("+after"), false);
+  assert.equal(finalAudits.every(Boolean), true);
+  for (const lunaAudit of finalAudits) {
+    assert.equal(lunaAudit?.prompts[0]?.includes(baseSha), true);
+    assert.equal(lunaAudit?.prompts[0]?.includes("-before"), true);
+    assert.equal(lunaAudit?.prompts[0]?.includes("+final"), true);
+    assert.equal(lunaAudit?.prompts[0]?.includes("+after"), false);
+  }
+  assert.equal(
+    run.sessions.some((session) => session.spec.model === TERRA_MODEL),
+    false,
+  );
 
   await run.controller.dispose();
   fs.rmSync(workingDir, { recursive: true, force: true });
@@ -1077,9 +1192,7 @@ test("successful audit fan-in atomically enters audit-resolve", async () => {
   const runId = run.controller.start(request());
   await settleInitialization();
   run.controller.setStage(runId, "audit");
-  const auditRoles = PIPELINE_CHILD_ROLES.filter((role) =>
-    role.startsWith("audit-"),
-  );
+  const auditRoles = PIPELINE_4_LUNA_AUDIT_ROLES;
   const children = await Promise.all(
     auditRoles.map((role) => run.controller.spawnChild(runId, role)),
   );
@@ -1102,12 +1215,45 @@ test("successful audit fan-in atomically enters audit-resolve", async () => {
     "audit-resolve · running",
   );
 
-  run.controller.setStage(runId, "final-audit");
-  const finalAudit = await run.controller.spawnChild(runId, "final-audit");
-  settleRole(run, "final-audit");
-  await run.controller.waitForChildren(runId, [finalAudit.id]);
-  assert.equal(run.controller.get(runId)?.stage, "final-resolve");
+  await finishEmbeddedAudit(run, runId);
 
+  await run.controller.dispose();
+});
+
+test("embedded roots cannot cancel a busy controller-owned audit synthesizer", async () => {
+  const run = harness();
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  run.controller.setStage(runId, "final-audit");
+  const agents = await run.controller.startFinalAudit(runId, {
+    acceptanceContract: "approved contract",
+    assumptions: [],
+    checks: [],
+  });
+  const firstRole = PIPELINE_4_LUNA_AUDIT_ROLES[0];
+  settleRole(run, firstRole);
+  await settleInitialization();
+  const synthesizer = agents.find((agent) => agent.role === "audit-synthesis");
+  assert.ok(synthesizer);
+  const synthesisSession = run.sessions.find(
+    (session) => session.spec.role === "audit-synthesis",
+  );
+  assert.ok(synthesisSession);
+  assert.equal(synthesisSession.sends.length, 1);
+
+  settleRole(run, PIPELINE_4_LUNA_AUDIT_ROLES[1]);
+  await settleInitialization();
+  assert.equal(run.controller.get(runId)?.auditSegment?.pendingReportCount, 1);
+  await assert.rejects(
+    run.controller.cancelChild(runId, synthesizer.id),
+    /only be cancelled with the whole pipeline run/,
+  );
+  assert.equal(synthesisSession.interrupted, 0);
+  assert.equal(run.controller.get(runId)?.status, "running");
+  assert.equal(run.controller.get(runId)?.auditSegment?.reducerStatus, "busy");
+
+  await run.controller.cancelRun(runId);
+  assert.equal(synthesisSession.interrupted, 1);
   await run.controller.dispose();
 });
 
@@ -1246,6 +1392,7 @@ test("completion is rejected while a child is still active", async () => {
   const run = harness();
   const runId = run.controller.start(request());
   await settleInitialization();
+  run.controller.setStage(runId, "audit");
   await run.controller.spawnChild(runId, "audit-feature-outcome");
   const facts = {
     outcome: "Feature behavior implemented",
@@ -1279,6 +1426,7 @@ test("dashboard cancellation of an idle root cancels the run and active children
     outcome: { type: "completed", finalText: "waiting for next stage" },
   });
   assert.equal(run.controller.agentView.get(rootId)?.status, "idle");
+  run.controller.setStage(runId, "audit");
   const child = await run.controller.spawnChild(
     runId,
     "audit-reliability-regressions",
@@ -1317,6 +1465,7 @@ test("structured completion delivers one factual handoff without readiness statu
     () => run.controller.complete(runId, { ...facts, workingDir: "/other" }),
     /working_dir must be/,
   );
+  await finishEmbeddedAudit(run, runId);
   run.controller.complete(runId, facts);
   await settleInitialization();
 
@@ -1413,6 +1562,7 @@ test("pipeline inspection does not mutate lifecycle state or consume the automat
     unresolvedItems: [],
     workingDir: "/tmp/work",
   };
+  await finishEmbeddedAudit(run, runId);
   run.controller.complete(runId, facts);
   await settleInitialization();
   const before = structuredClone(run.controller.get(runId));
@@ -1464,6 +1614,7 @@ test("unknown IDs fail closed and cancellation/disposal stop active sessions", a
   const run = harness();
   const runId = run.controller.start(request());
   await settleInitialization();
+  run.controller.setStage(runId, "audit");
   const child = await run.controller.spawnChild(
     runId,
     "audit-logic-invariants",

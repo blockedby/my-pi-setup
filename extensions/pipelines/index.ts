@@ -12,6 +12,7 @@ import { Type } from "typebox";
 import { PipelineController } from "./controller.ts";
 import { showPipelineDashboard } from "./dashboard.ts";
 import {
+  AUDIT_PIPELINE_ID,
   FEATURE_PIPELINE_ID,
   PIPELINE_DEFINITION_IDS,
   type PipelineDefinitionId,
@@ -28,28 +29,76 @@ export { PIPELINE_CHECK_PARAMETERS, PIPELINE_LIST_PARAMETERS };
 
 const HANDOFF_MAX_BYTES = 32 * 1024;
 
-export const PIPELINE_RUN_PARAMETERS = Type.Object({
-  pipeline: Type.Optional(
-    StringEnum(PIPELINE_DEFINITION_IDS, {
+const AUDIT_INITIAL_PARAMETERS = Type.Object(
+  {
+    mode: Type.Literal("initial"),
+    acceptance_criteria: Type.Optional(
+      Type.Array(Type.String({ minLength: 1, maxLength: 8 * 1024 }), {
+        maxItems: 128,
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+const AUDIT_CLOSURE_PARAMETERS = Type.Object(
+  {
+    mode: Type.Literal("closure"),
+    acceptance_criteria: Type.Optional(
+      Type.Array(Type.String({ minLength: 1, maxLength: 8 * 1024 }), {
+        maxItems: 128,
+      }),
+    ),
+    prior_blockers: Type.Array(
+      Type.Object(
+        {
+          id: Type.String({ minLength: 1, maxLength: 256 }),
+          closure_condition: Type.String({ minLength: 1, maxLength: 8 * 1024 }),
+        },
+        { additionalProperties: false },
+      ),
+      { minItems: 1, maxItems: 128 },
+    ),
+    remediation_diff: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+    touched_invariants: Type.Array(
+      Type.String({ minLength: 1, maxLength: 8 * 1024 }),
+      { minItems: 1, maxItems: 128 },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+export const PIPELINE_RUN_PARAMETERS = Type.Object(
+  {
+    pipeline: Type.Optional(
+      StringEnum(PIPELINE_DEFINITION_IDS, {
+        description:
+          "Known hardcoded pipeline definition; defaults to feature-pipeline when omitted.",
+      }),
+    ),
+    task: Type.String({
       description:
-        "Known hardcoded pipeline definition; defaults to feature-pipeline when omitted.",
-    }),
-  ),
-  task: Type.String({
-    description:
-      "Self-contained feature task or planning goal; include known constraints or acceptance criteria when available.",
-    minLength: 1,
-    maxLength: 64 * 1024,
-  }),
-  working_dir: Type.Optional(
-    Type.String({
-      description:
-        "Existing working directory in which the pipeline operates; defaults to the current directory.",
+        "Self-contained feature task, planning goal, or audit scope; include known constraints or acceptance criteria when available. Closure-specific scope belongs in audit.",
       minLength: 1,
-      maxLength: 16 * 1024,
+      maxLength: 64 * 1024,
     }),
-  ),
-});
+    working_dir: Type.Optional(
+      Type.String({
+        description:
+          "Existing working directory in which the pipeline operates; defaults to the current directory.",
+        minLength: 1,
+        maxLength: 16 * 1024,
+      }),
+    ),
+    audit: Type.Optional(
+      Type.Union([AUDIT_INITIAL_PARAMETERS, AUDIT_CLOSURE_PARAMETERS], {
+        description:
+          "Typed initial or closure audit scope for audit-pipeline. No commands or refs are accepted.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
 
 export function resolvePipelineDefinition(requested?: string) {
   if (!requested) return FEATURE_PIPELINE_ID;
@@ -74,6 +123,11 @@ export function handoffText(handoff: PipelineHandoff) {
     `Working directory: ${facts.workingDir}`,
     ...(facts.planPath ? [`Plan path: ${facts.planPath}`] : []),
     `Outcome:\n${facts.outcome}`,
+    ...(facts.auditReport
+      ? [
+          `Structured audit report:\n${JSON.stringify(facts.auditReport, null, 2)}`,
+        ]
+      : []),
     `Changed paths:\n${facts.changedPaths.map((item) => `- ${item}`).join("\n") || "- none reported"}`,
     `Checks and evidence:\n${facts.checks.map((item) => `- ${item}`).join("\n") || "- none reported"}`,
     `Assumptions:\n${facts.assumptions.map((item) => `- ${item}`).join("\n") || "- none reported"}`,
@@ -179,13 +233,13 @@ export default function pipelines(pi: ExtensionAPI) {
     name: "pipeline_run",
     label: "Run Pipeline",
     description:
-      "Start one known hardcoded pipeline in a caller-provided working directory and return its run id immediately. Available definitions are feature-pipeline, small-feature-pipeline, and plan-pipeline. Omit pipeline for feature-pipeline.",
+      "Start one of four known hardcoded pipelines in a caller-provided working directory and return its run id immediately: feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline. Omit pipeline for feature-pipeline.",
     promptSnippet:
-      "Start a background small-feature, full-feature, or planning-only pipeline",
+      "Start a background implementation, planning, or Luna audit pipeline",
     promptGuidelines: [
-      "Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, or plan-pipeline request. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
+      "Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline request. Use audit-pipeline for routine repository initial or closure audits that require four independent Luna tracks and incremental Luna synthesis without remediation. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
       "Automatically use plan-pipeline for a durable audited implementation plan, task breakdown, dependency waves, or test/release plan when at least one complexity signal applies: the goal spans two or more of frontend, backend, data, DevOps, or runtime; it includes migration, rollout, rollback, operational readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies require repository discovery. An explicit plan-pipeline request does not require a complexity signal.",
-      "Do not choose plan-pipeline merely because an implementation request is cross-layer. Do not use any pipeline for bugs, refactors, research-only work, or trivial edits. A small feature is bounded implementation work that still benefits from independent audit; it is not a synonym for a trivial edit. If the user has not made the desired deliverable—plan versus implementation—clear, ask before launching. After launch, do not duplicate its work in the same workspace; use pipeline_check occasionally or /pipelines for live inspection while continuing only unrelated work. Do not poll; completion arrives automatically as a follow-up handoff.",
+      "Do not choose plan-pipeline merely because an implementation request is cross-layer. Do not use implementation or planning pipelines for bugs, refactors, research-only work, or trivial edits; use audit-pipeline only when the requested outcome is a bounded repository audit rather than implementation. A small feature is bounded implementation work that still benefits from independent audit; it is not a synonym for a trivial edit. If the user has not made the desired deliverable—plan versus implementation—clear, ask before launching. After launch, do not duplicate its work in the same workspace; use pipeline_check occasionally or /pipelines for live inspection while continuing only unrelated work. Do not poll; completion arrives automatically as a follow-up handoff.",
     ],
     parameters: PIPELINE_RUN_PARAMETERS,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -197,10 +251,32 @@ export default function pipelines(pi: ExtensionAPI) {
         throw new Error(`working_dir is not a directory: ${workingDir}`);
       }
       const definition = resolvePipelineDefinition(params.pipeline);
+      if (params.audit && definition !== AUDIT_PIPELINE_ID) {
+        throw new Error(
+          "The audit input contract is only valid for audit-pipeline.",
+        );
+      }
+      const audit = params.audit
+        ? {
+            mode: params.audit.mode,
+            acceptanceCriteria: params.audit.acceptance_criteria ?? [],
+            ...(params.audit.mode === "closure"
+              ? {
+                  priorBlockers: params.audit.prior_blockers.map((blocker) => ({
+                    id: blocker.id,
+                    closureCondition: blocker.closure_condition,
+                  })),
+                  remediationDiff: params.audit.remediation_diff,
+                  touchedInvariants: params.audit.touched_invariants,
+                }
+              : {}),
+          }
+        : undefined;
       const runId = getController(ctx).start({
         task: params.task,
         workingDir,
         pipeline: definition,
+        ...(audit ? { audit } : {}),
       });
       return {
         content: [

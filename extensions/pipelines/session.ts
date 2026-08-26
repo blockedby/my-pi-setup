@@ -22,7 +22,10 @@ import {
 } from "../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
 import {
+  AUDIT_PIPELINE_ID,
+  AUDIT_SYNTHESIS_ROLE,
   LUNA_MODEL,
+  PIPELINE_4_LUNA_AUDIT_ROLES,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
@@ -123,11 +126,19 @@ export function pipelineSessionToolPolicy(
   role: string,
 ) {
   if (isRoot) {
+    if (definition === AUDIT_PIPELINE_ID)
+      return readOnlyPipelineChildToolPolicy();
     if (definition === PLAN_PIPELINE_ID) return planPipelineRootToolPolicy();
     if (definition === SMALL_FEATURE_PIPELINE_ID) {
       return readOnlyPipelineRootToolPolicy();
     }
     return pipelineRootToolPolicy();
+  }
+  if (
+    role === AUDIT_SYNTHESIS_ROLE ||
+    PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)
+  ) {
+    return readOnlyPipelineChildToolPolicy();
   }
   if (definition === PLAN_PIPELINE_ID) return planPipelineChildToolPolicy();
   if (definition === SMALL_FEATURE_PIPELINE_ID) {
@@ -240,9 +251,10 @@ export function createPipelineSessionFactory(
       });
       const isRoot = !spec.parentId;
       const definition = options.definitionForRun(spec.scopeId ?? "");
-      const customTools = isRoot
-        ? options.rootTools(spec.scopeId ?? "")
-        : undefined;
+      const customTools =
+        isRoot && definition !== AUDIT_PIPELINE_ID
+          ? options.rootTools(spec.scopeId ?? "")
+          : undefined;
       const { session } = await createAgentSession({
         cwd: spec.cwd,
         model,

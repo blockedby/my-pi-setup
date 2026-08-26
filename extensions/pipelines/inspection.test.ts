@@ -462,6 +462,55 @@ test("settled check details expose completion counts and optional plan path but 
   }
 });
 
+test("audit segment inspection is explicit, bounded, and omits private reducer evidence", () => {
+  const run = snapshot({
+    definition: "audit-pipeline",
+    stage: "audit",
+    agents: [
+      agent({
+        id: "audit-root",
+        role: "audit-synthesis",
+        model: "openai-codex/gpt-5.6-luna",
+        status: "running",
+        transcript: [
+          {
+            kind: "assistant",
+            text: "private raw intermediate report and Git evidence",
+            at: 1,
+          },
+        ],
+      }),
+    ],
+    rootId: "audit-root",
+    auditSegment: {
+      mode: "closure",
+      phase: "synthesizing",
+      expectedReportCount: 4,
+      acceptedReportCount: 3,
+      pendingReportCount: 2,
+      integratedReportCount: 1,
+      reducerStatus: "busy",
+      revision: 1,
+      finalReportValidated: false,
+    },
+  });
+  const projected = projectPipelineCheck(run, now);
+  assert.deepEqual(projected.auditSegment, run.auditSegment);
+  const serialized = JSON.stringify(projected);
+  for (const privateField of [
+    "prompt",
+    "rawReport",
+    "raw intermediate report",
+    "Git evidence",
+    "gitEvidence",
+    "sessionFile",
+    "toolArguments",
+  ]) {
+    assert.equal(serialized.includes(privateField), false);
+  }
+  assert.match(formatPipelineCheck(projected), /reports accepted 3\/4/);
+});
+
 test("active previews and whole check text enforce visible byte and line bounds", () => {
   const oversized = `${"🙂".repeat(700)}\n${Array.from({ length: 30 }, (_, index) => `line-${index}`).join("\n")}`;
   const previewDetails = projectPipelineCheck(

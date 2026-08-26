@@ -47,6 +47,56 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline: "audit-pipeline",
+      task: "Audit the bounded change",
+      working_dir: ".worktrees/audit",
+      audit: {
+        mode: "initial",
+        acceptance_criteria: ["The contract holds"],
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline: "audit-pipeline",
+      task: "Verify prior blockers",
+      audit: {
+        mode: "closure",
+        prior_blockers: [
+          { id: "AUD-001", closure_condition: "The defect is fixed" },
+        ],
+        remediation_diff: "bounded supplied diff",
+        touched_invariants: ["exactly-once delivery"],
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline: "audit-pipeline",
+      task: "Incomplete closure audit",
+      audit: {
+        mode: "closure",
+        prior_blockers: [
+          { id: "AUD-001", closure_condition: "The defect is fixed" },
+        ],
+        remediation_diff: "bounded supplied diff",
+        touched_invariants: [],
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline: "audit-pipeline",
+      task: "Unsafe audit",
+      audit: { mode: "closure", base_ref: "main", command: "git diff" },
+    }),
+    false,
+  );
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
       pipeline: "unknown-pipeline",
       task: "Build a feature",
     }),
@@ -66,6 +116,7 @@ test("pipeline_run defaults to feature-pipeline and rejects unknown definitions"
     "small-feature-pipeline",
   );
   assert.equal(resolvePipelineDefinition("plan-pipeline"), "plan-pipeline");
+  assert.equal(resolvePipelineDefinition("audit-pipeline"), "audit-pipeline");
   assert.throws(
     () => resolvePipelineDefinition("unknown-pipeline"),
     /Unsupported pipeline definition/,

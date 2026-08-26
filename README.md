@@ -5,7 +5,7 @@ Pipi installs the creator's Pi extensions, skills, workflows, GitHub Dark Defaul
 Included resources:
 
 - Codex, Claude, and Pi subagents, including Luna exploration and Terra audit profiles
-- three built-in hardcoded pipelines: `small-feature-pipeline` for bounded Luna implementation/audit/remediation, `feature-pipeline` for broader implementation, and `plan-pipeline` for durable audited implementation plans, with fixed persistent orchestration and nested `/pipelines` control
+- four built-in hardcoded pipelines: `small-feature-pipeline`, `feature-pipeline`, `plan-pipeline`, and the read-only Luna `audit-pipeline`, with bounded fixed orchestration and nested `/pipelines` control
 - background terminals and workflows
 - `fd` file discovery and `rg` content search
 - summaries, Git/model status UI, ask-user, and copy-all tools
@@ -44,11 +44,11 @@ No extra web-search service key or environment file is required. Pipi does not c
 
 ## Pipelines
 
-A pipeline keeps one big task from turning into one giant, opaque prompt. A persistent Luna or Sol drives a fixed route, Luna explores, builds, or checks focused concerns, and the broader pipelines add an independent Terra final audit—so implementation, review, and fixes happen in clear stages.
+A pipeline keeps one big task from turning into one giant, opaque prompt. A persistent Luna or Sol drives a bounded hardcoded route while isolated Luna sessions explore, build, audit, or synthesize focused concerns.
 
-Use `small-feature-pipeline` for a focused build → audit → fix cycle, `feature-pipeline` for broader work with parallel discovery and review, and `plan-pipeline` when you need an audited plan instead of code. Open `/pipelines` for a compact live view: `Enter` expands a run or opens the agent handling a stage, and green/yellow/red status shows how it is going at a glance.
+Use `small-feature-pipeline` for a focused build → audit → fix cycle, `feature-pipeline` for broader work with parallel discovery and review, `plan-pipeline` when you need an audited plan instead of code, and `audit-pipeline` for a read-only initial or closure audit with no remediation. Open `/pipelines` for a compact live view: `Enter` expands a run or opens the agent handling a stage, and green/yellow/red status shows how it is going at a glance.
 
-`pipeline_run` selects one of these three definitions. Omitting `pipeline` remains backward-compatible and starts `feature-pipeline`:
+`pipeline_run` selects one of these four definitions. Omitting `pipeline` remains backward-compatible and starts `feature-pipeline`:
 
 ```json
 { "task": "Implement export support", "working_dir": "/repo/worktree" }
@@ -64,6 +64,22 @@ Select the bounded implementation pipeline for a clear, localized feature that b
 }
 ```
 
+Select the standalone read-only audit pipeline for routine repository review:
+
+```json
+{
+  "pipeline": "audit-pipeline",
+  "task": "Audit the export change against its acceptance contract",
+  "working_dir": "/repo/worktree",
+  "audit": {
+    "mode": "initial",
+    "acceptance_criteria": ["Exports are complete and backward-compatible"]
+  }
+}
+```
+
+Closure mode additionally requires bounded `prior_blockers` with closure conditions, a supplied `remediation_diff`, and `touched_invariants`. The schema accepts no shell commands or Git refs; the host captures repository identity and read-only Git evidence.
+
 Select the planning-only pipeline explicitly when the desired artifact is an implementation plan rather than product code:
 
 ```json
@@ -74,13 +90,13 @@ Select the planning-only pipeline explicitly when the desired artifact is an imp
 }
 ```
 
-Unknown definition names are rejected; this is not a raw-workflow API. `/pipelines` always shows all three definitions and nests each session-scoped run beneath the selected definition, with transcript/takeover, steer, and cancel controls.
+Unknown definition names are rejected; this is not a raw-workflow API. `/pipelines` always shows all four definitions and nests each session-scoped run beneath the selected definition, with transcript/takeover, steer, and cancel controls.
 
 The main agent can use `pipeline_list({})` to list its session-scoped runs newest-first and `pipeline_check({ "id": "pipeline-1" })` for a synchronous, nonblocking snapshot of one run. Checks show bounded stage progress, status counts, every root/child attempt, active model-visible previews, and an open tool name without exposing prompts, thinking, tool data, raw report/completion collections, or session paths. Completed runs show only compact completion counts and an optional plan path. These tools are unavailable inside pipeline agents, direct subagents, and workflow children. They are for occasional inspection, not polling: completion still arrives automatically as a follow-up handoff, while full transcripts and controls remain in `/pipelines`.
 
-Automatic routing uses `small-feature-pipeline` for bounded, well-specified implementation work that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Broader nontrivial feature work that needs discovery and multi-concern audit uses `feature-pipeline`. `plan-pipeline` is selected only when the requested deliverable is a durable audited plan, task breakdown, dependency waves, or test/release plan and the goal has a complexity signal: multiple frontend/backend/data/DevOps/runtime layers; migration, rollout, rollback, operational-readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies that require repository discovery. Explicit pipeline selection overrides automatic routing. Bugs, refactors, research-only work, and trivial edits use no pipeline; a small feature is bounded work that still benefits from independent audit, not a synonym for a trivial edit. The main agent asks when plan versus implementation is ambiguous.
+Automatic routing uses `audit-pipeline` for routine repository initial or closure audits; direct `terra-audit` remains available only for explicit manual escalation. It uses `small-feature-pipeline` for bounded, well-specified implementation work that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Broader nontrivial feature work that needs discovery and multi-concern audit uses `feature-pipeline`. `plan-pipeline` is selected only when the requested deliverable is a durable audited plan, task breakdown, dependency waves, or test/release plan and the goal has a complexity signal: multiple frontend/backend/data/DevOps/runtime layers; migration, rollout, rollback, operational-readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies that require repository discovery. Explicit pipeline selection overrides automatic routing. Bug fixes, refactors, research-only work, and trivial edits do not use implementation/planning pipelines unless the requested outcome is explicitly a bounded audit; a small feature is bounded work that still benefits from independent audit, not a synonym for a trivial edit. The main agent asks when plan versus implementation is ambiguous.
 
-Implementation pipeline audits receive host-collected, read-only Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start. In `feature-pipeline`, every Luna audit receives the captured base and current status/diff, while Terra receives a fresh snapshot after Luna remediation without receiving prior Luna findings. The same four Luna audit roles receive captured-base evidence plus the implementation report in `small-feature-pipeline`; untracked paths remain visible through status and can be inspected with read-only file tools.
+Pipeline audits receive host-collected, bounded, read-only Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start and resolves current head, branch, status, and base-relative diff with argument-array Git commands. `feature-pipeline` and `plan-pipeline` now reuse the same four-track Luna audit segment for final audit; `small-feature-pipeline` retains its existing implementation-report evidence and same-session remediation graph.
 
 `feature-pipeline` creates its persistent Sol session without sending a model prompt, then the controller launches and validates all five Luna discovery tracks programmatically. Failed or malformed discovery gets at most one controller-owned same-session retry. Only after complete fan-in does Sol receive its first message, containing the task and bounded discovery reports, and begin implementation from `build`. Pipeline roots and children are fixed by their graph and do not consume or enforce direct-subagent capacity quotas.
 
@@ -94,6 +110,18 @@ Persistent read-only Luna/medium root
   └─ factual handoff (no readiness verdict)
 ```
 
+`audit-pipeline` is fully controller-owned and read-only:
+
+```text
+Persistent deferred Luna/medium synthesis root
+  ├─ four isolated Luna/medium audit tracks in parallel
+  ├─ synthesis activates when the first valid report settles
+  ├─ later reports queue while synthesis is busy and are delivered when it is idle
+  └─ one validated factual structured audit handoff (no remediation/readiness/Git decision)
+```
+
+The incremental reducer validates and accepts every expected role exactly once, batches arrivals while synthesis is busy, never interrupts an active turn, and finalizes only after all four reports are integrated and a strict final report passes. `pipeline_check` exposes only bounded counts, reducer busy/idle state, revision, and final-validation state—not prompts, raw reports, Git evidence, tool data, or session paths. Feature and plan final-audit phases instantiate this same internal segment; their Sol roots still own final resolution and completion.
+
 `plan-pipeline` runs this fixed graph. Its root and children do not receive shell/edit/write or delegated patch/task tools; Sol writes only through a bounded `docs/plans/*.md` plan tool and receives bounded plan-validation and Git-status tools:
 
 ```text
@@ -102,8 +130,9 @@ Persistent Sol/high root
   ├─ Sol writes docs/plans/<name>.md (no product implementation)
   ├─ four parallel Luna/medium plan audits
   ├─ Sol remediates the plan once
-  ├─ one independent Terra/high final audit
-  └─ Sol remediates once and returns a factual handoff
+  ├─ four read-only Luna/medium final-audit tracks
+  ├─ one persistent Luna/medium incremental synthesizer
+  └─ Sol resolves the synthesis once and returns a factual handoff
 ```
 
 The Markdown artifact records goals/non-goals, evidence and assumptions, candidate acceptance criteria, layer-specific and cross-cutting tasks, stable task IDs and dependencies, implementation waves, test/release/operational checks, risks, rollout/rollback, and unresolved questions. Evidence-backed inapplicable frontend, backend, or DevOps layers are recorded as such instead of receiving invented tasks. The completion handoff identifies the selected definition, plan path, changed paths, checks, assumptions, report summaries, unresolved items, working directory, and Git observations; it does not issue a readiness verdict.
