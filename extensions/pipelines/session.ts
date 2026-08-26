@@ -23,6 +23,7 @@ import {
 import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
 import {
   PLAN_PIPELINE_ID,
+  SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
   type PipelineDefinitionId,
 } from "./domain.ts";
@@ -125,9 +126,9 @@ export function pipelineSessionToolPolicy(
   }
   if (definition === PLAN_PIPELINE_ID) return planPipelineChildToolPolicy();
   if (definition === SMALL_FEATURE_PIPELINE_ID) {
-    return role === "audit-small-feature"
-      ? readOnlyPipelineChildToolPolicy()
-      : smallFeatureImplementerToolPolicy();
+    return role === SMALL_FEATURE_IMPLEMENTER_ROLE
+      ? smallFeatureImplementerToolPolicy()
+      : readOnlyPipelineChildToolPolicy();
   }
   return childToolPolicy();
 }

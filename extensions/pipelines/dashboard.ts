@@ -13,6 +13,8 @@ import { openAgentTakeover } from "../shared/agent-tree/takeover.ts";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import {
   PIPELINE_DEFINITIONS,
+  SMALL_FEATURE_IMPLEMENTER_ROLE,
+  SMALL_FEATURE_PIPELINE_ID,
   stagesForDefinition,
   type PipelineRunSnapshot,
   type PipelineRunStatus,
@@ -56,11 +58,15 @@ export type PipelineRow =
       readonly status: AgentNodeSnapshot["status"];
     };
 
-function childStage(role: string): PipelineStage {
-  if (role === "implement-small-feature") return "build";
-  if (role === "audit-small-feature") return "final-audit";
+function childStage(
+  definition: PipelineRunSnapshot["definition"],
+  role: string,
+): PipelineStage {
+  if (role === SMALL_FEATURE_IMPLEMENTER_ROLE) return "build";
   if (role.startsWith("discover-")) return "discover";
-  if (role.startsWith("audit-")) return "audit";
+  if (role.startsWith("audit-")) {
+    return definition === SMALL_FEATURE_PIPELINE_ID ? "final-audit" : "audit";
+  }
   return "final-audit";
 }
 
@@ -77,13 +83,15 @@ function stageAgentId(
   children: ReadonlyArray<AgentNodeSnapshot>,
 ) {
   const matchingChild = latestAgentId(
-    children.filter((agent) => childStage(agent.role) === stage),
+    children.filter(
+      (agent) => childStage(run.definition, agent.role) === stage,
+    ),
   );
   if (matchingChild) return matchingChild;
-  if (run.definition === "small-feature-pipeline") {
+  if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
     if (stage !== "final-resolve") return undefined;
     return latestAgentId(
-      children.filter((agent) => agent.role === "implement-small-feature"),
+      children.filter((agent) => agent.role === SMALL_FEATURE_IMPLEMENTER_ROLE),
     );
   }
   if (
@@ -162,7 +170,7 @@ export function buildPipelineRows(
           agentId: stageAgentId(run, stage, root, children),
         });
         for (const child of children.filter(
-          (agent) => childStage(agent.role) === stage,
+          (agent) => childStage(run.definition, agent.role) === stage,
         )) {
           rows.push({
             key: `agent:${run.id}:${stage}:${child.id}`,

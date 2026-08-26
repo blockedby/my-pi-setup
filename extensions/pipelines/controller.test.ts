@@ -14,14 +14,13 @@ import { PipelineController } from "./controller.ts";
 import { pipelineSessionToolPolicy } from "./session.ts";
 import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
-  FEATURE_PIPELINE_LUNA_AUDIT_ROLES,
+  PIPELINE_4_LUNA_AUDIT_ROLES,
   FINAL_AUDIT_ROLE,
   LUNA_MODEL,
   PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_AUDIT_ROLES,
   PLAN_PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
-  SMALL_FEATURE_AUDIT_ROLE,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SOL_MODEL,
@@ -149,7 +148,7 @@ function reportForRole(role: string) {
       constraints: [],
     });
   }
-  if (role === "final-audit" || role === "audit-small-feature") {
+  if (role === "final-audit") {
     return JSON.stringify({
       mode: "initial",
       base_sha: "1234567",
@@ -344,18 +343,17 @@ test("root tools are run-scoped and children have coding tools without orchestra
 });
 
 test("definition role policies centralize child context requirements", () => {
-  for (const role of [...FEATURE_PIPELINE_LUNA_AUDIT_ROLES, FINAL_AUDIT_ROLE]) {
+  for (const role of [...PIPELINE_4_LUNA_AUDIT_ROLES, FINAL_AUDIT_ROLE]) {
     assert.deepEqual(childContextPolicyFor("feature-pipeline", role), {
       gitEvidence: true,
     });
   }
-  assert.deepEqual(
-    childContextPolicyFor("small-feature-pipeline", SMALL_FEATURE_AUDIT_ROLE),
-    {
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+    assert.deepEqual(childContextPolicyFor("small-feature-pipeline", role), {
       gitEvidence: true,
       priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
-    },
-  );
+    });
+  }
   assert.deepEqual(
     childContextPolicyFor("feature-pipeline", "discover-problem"),
     {},
@@ -366,7 +364,7 @@ test("definition role policies centralize child context requirements", () => {
   );
 });
 
-test("small-feature Sol and Terra are read-only while Luna keeps coding tools", () => {
+test("small-feature Sol and audit Lunas are read-only while the implementer keeps coding tools", () => {
   const rootDenied = new Set<string>(
     pipelineSessionToolPolicy("small-feature-pipeline", true, "pipeline-root")
       .excludeTools,
@@ -382,7 +380,7 @@ test("small-feature Sol and Terra are read-only while Luna keeps coding tools", 
     pipelineSessionToolPolicy(
       "small-feature-pipeline",
       false,
-      "audit-small-feature",
+      PIPELINE_4_LUNA_AUDIT_ROLES[0],
     ).excludeTools,
   );
   for (const workspaceMutator of ["bash", "edit", "write"]) {
@@ -518,7 +516,7 @@ test("plan-pipeline has fixed staged direct Luna/Terra roles and rejects feature
   fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
-test("small-feature-pipeline reuses one persistent Luna after one Terra audit", async () => {
+test("small-feature-pipeline fans four Luna audits into one same-session remediation", async () => {
   const run = harness();
   const runId = run.controller.start({
     ...request(),
@@ -530,43 +528,64 @@ test("small-feature-pipeline reuses one persistent Luna after one Terra audit", 
   assert.equal(initial?.stage, "build");
   assert.equal(initial?.agents[0]?.title, "Small feature pipeline Sol");
   assert.deepEqual(SMALL_FEATURE_PIPELINE_CHILD_ROLES, [
-    "implement-small-feature",
-    "audit-small-feature",
+    SMALL_FEATURE_IMPLEMENTER_ROLE,
+    ...PIPELINE_4_LUNA_AUDIT_ROLES,
   ]);
 
   const implementer = await run.controller.spawnChild(
     runId,
-    "implement-small-feature",
+    SMALL_FEATURE_IMPLEMENTER_ROLE,
   );
   assert.equal(implementer.model, LUNA_MODEL);
   assert.equal(implementer.persistent, true);
   await assert.rejects(
-    run.controller.spawnChild(runId, "implement-small-feature"),
+    run.controller.spawnChild(runId, SMALL_FEATURE_IMPLEMENTER_ROLE),
     /already has its allowed child session/,
   );
-  settleRole(run, "implement-small-feature");
+  settleRole(run, SMALL_FEATURE_IMPLEMENTER_ROLE);
   assert.equal(run.controller.getAgent(runId, implementer.id).status, "idle");
   await run.controller.waitForChildren(runId, [implementer.id]);
   assert.equal(run.controller.get(runId)?.stage, "final-audit");
 
-  const auditor = await run.controller.spawnChild(runId, "audit-small-feature");
-  assert.equal(auditor.model, TERRA_MODEL);
-  assert.equal(auditor.persistent, false);
-  const auditorSession = run.sessions.find(
-    (session) => session.spec.role === "audit-small-feature",
-  );
-  assert.ok(auditorSession);
-  assert.equal(
-    auditorSession.prompts[0]?.includes(
-      reportForRole("implement-small-feature"),
+  const auditors = await Promise.all(
+    PIPELINE_4_LUNA_AUDIT_ROLES.map((role) =>
+      run.controller.spawnChild(runId, role),
     ),
-    true,
   );
-  settleRole(run, "audit-small-feature");
-  await run.controller.waitForChildren(runId, [auditor.id]);
+  await assert.rejects(
+    run.controller.spawnChild(runId, PIPELINE_4_LUNA_AUDIT_ROLES[0]),
+    /already has its allowed child session/,
+  );
+  for (const [index, role] of PIPELINE_4_LUNA_AUDIT_ROLES.entries()) {
+    const auditor = auditors[index];
+    assert.ok(auditor);
+    assert.equal(auditor.model, LUNA_MODEL);
+    assert.equal(auditor.persistent, false);
+    const auditorSession = run.sessions.find(
+      (session) => session.spec.role === role,
+    );
+    assert.ok(auditorSession);
+    assert.equal(
+      auditorSession.prompts[0]?.includes(
+        reportForRole(SMALL_FEATURE_IMPLEMENTER_ROLE),
+      ),
+      true,
+    );
+  }
+  const firstAuditor = auditors[0];
+  assert.ok(firstAuditor);
+  settleRole(run, PIPELINE_4_LUNA_AUDIT_ROLES[0]);
+  await run.controller.waitForChildren(runId, [firstAuditor.id]);
+  assert.equal(run.controller.get(runId)?.stage, "final-audit");
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES.slice(1))
+    settleRole(run, role);
+  await run.controller.waitForChildren(
+    runId,
+    auditors.slice(1).map((auditor) => auditor.id),
+  );
   assert.equal(run.controller.get(runId)?.stage, "final-resolve");
   await assert.rejects(
-    run.controller.sendChild(runId, auditor.id, "Audit again"),
+    run.controller.sendChild(runId, firstAuditor.id, "Audit again"),
     /cannot be retried or continued/,
   );
   await run.controller.waitForChildren(runId, [implementer.id]);
@@ -576,23 +595,25 @@ test("small-feature-pipeline reuses one persistent Luna after one Terra audit", 
     /requires one same-session Luna remediation pass/,
   );
 
-  const remediationMessage = `Resolve this audit:\n${reportForRole("audit-small-feature")}`;
+  const remediationMessage = "Resolve all audit reports";
   await run.controller.sendChild(runId, implementer.id, remediationMessage);
   const implementerSession = run.sessions.find(
-    (session) => session.spec.role === "implement-small-feature",
+    (session) => session.spec.role === SMALL_FEATURE_IMPLEMENTER_ROLE,
   );
   assert.ok(implementerSession);
   assert.equal(implementerSession.sends.length, 1);
   assert.match(
     implementerSession.sends[0] ?? "",
-    /Independent Terra audit to resolve/,
+    /Independent Luna audit reports to resolve/,
   );
-  assert.equal(
-    implementerSession.sends[0]?.includes(reportForRole("audit-small-feature")),
-    true,
-  );
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+    assert.equal(
+      implementerSession.sends[0]?.includes(reportForRole(role)),
+      true,
+    );
+  }
   assert.equal(implementerSession.sends[0]?.includes(remediationMessage), true);
-  settleRole(run, "implement-small-feature");
+  settleRole(run, SMALL_FEATURE_IMPLEMENTER_ROLE);
   await run.controller.waitForChildren(runId, [implementer.id]);
   assert.equal(run.controller.get(runId)?.stage, "complete");
   await assert.rejects(
@@ -606,7 +627,7 @@ test("small-feature-pipeline reuses one persistent Luna after one Terra audit", 
     checks: ["focused tests passed"],
     assumptions: [],
     git: ["working tree inspected"],
-    reports: ["Luna implementation", "Terra audit", "Luna remediation"],
+    reports: ["Luna implementation", "Four Luna audits", "Luna remediation"],
     unresolvedItems: [],
     workingDir: "/tmp/work",
   };
@@ -650,11 +671,11 @@ test("feature Luna audits and final Terra receive fresh base-relative Git eviden
   fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "after\n");
   run.controller.setStage(runId, "audit");
   await Promise.all(
-    FEATURE_PIPELINE_LUNA_AUDIT_ROLES.map((role) =>
+    PIPELINE_4_LUNA_AUDIT_ROLES.map((role) =>
       run.controller.spawnChild(runId, role),
     ),
   );
-  for (const role of FEATURE_PIPELINE_LUNA_AUDIT_ROLES) {
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
     const lunaAudit = run.sessions.find(
       (session) => session.spec.role === role,
     );
@@ -681,7 +702,7 @@ test("feature Luna audits and final Terra receive fresh base-relative Git eviden
   fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
-test("small-feature Terra receives the captured base and actual workspace diff", async () => {
+test("small-feature Luna audits receive the captured base, implementation report, and actual diff", async () => {
   const workingDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "small-feature-audit-"),
   );
@@ -714,21 +735,33 @@ test("small-feature Terra receives the captured base and actual workspace diff",
   );
   settleRole(run, "implement-small-feature");
   await run.controller.waitForChildren(runId, [implementer.id]);
-  await run.controller.spawnChild(runId, "audit-small-feature");
-
-  const auditorSession = run.sessions.find(
-    (session) => session.spec.role === "audit-small-feature",
+  await Promise.all(
+    PIPELINE_4_LUNA_AUDIT_ROLES.map((role) =>
+      run.controller.spawnChild(runId, role),
+    ),
   );
-  assert.ok(auditorSession);
-  assert.equal(auditorSession.prompts[0]?.includes(baseSha), true);
-  assert.equal(auditorSession.prompts[0]?.includes("-before"), true);
-  assert.equal(auditorSession.prompts[0]?.includes("+after"), true);
+
+  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+    const auditorSession = run.sessions.find(
+      (session) => session.spec.role === role,
+    );
+    assert.ok(auditorSession);
+    assert.equal(auditorSession.prompts[0]?.includes(baseSha), true);
+    assert.equal(auditorSession.prompts[0]?.includes("-before"), true);
+    assert.equal(auditorSession.prompts[0]?.includes("+after"), true);
+    assert.equal(
+      auditorSession.prompts[0]?.includes(
+        reportForRole(SMALL_FEATURE_IMPLEMENTER_ROLE),
+      ),
+      true,
+    );
+  }
 
   await run.controller.dispose();
   fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
-test("small-feature-pipeline fails closed on a malformed child report", async () => {
+test("small-feature-pipeline fails closed on a malformed implementation report", async () => {
   const run = harness();
   const runId = run.controller.start({
     ...request(),
@@ -759,6 +792,40 @@ test("small-feature-pipeline fails closed on a malformed child report", async ()
       .status,
     "cancelled",
   );
+  await run.controller.dispose();
+});
+
+test("small-feature-pipeline fails closed on a malformed Luna audit report", async () => {
+  const run = harness();
+  const runId = run.controller.start({
+    ...request(),
+    pipeline: "small-feature-pipeline",
+  });
+  await settleInitialization();
+  const implementer = await run.controller.spawnChild(
+    runId,
+    SMALL_FEATURE_IMPLEMENTER_ROLE,
+  );
+  settleRole(run, SMALL_FEATURE_IMPLEMENTER_ROLE);
+  await run.controller.waitForChildren(runId, [implementer.id]);
+
+  const auditRole = PIPELINE_4_LUNA_AUDIT_ROLES[0];
+  const auditor = await run.controller.spawnChild(runId, auditRole);
+  const auditorSession = run.sessions.find(
+    (session) => session.spec.role === auditRole,
+  );
+  assert.ok(auditorSession);
+  auditorSession.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "not structured JSON" },
+  });
+
+  await run.controller.waitForChildren(runId, [auditor.id]);
+
+  assert.equal(run.controller.get(runId)?.status, "failed");
+  assert.equal(run.controller.get(runId)?.stage, "final-audit");
+  assert.equal(run.handoffs[0]?.status, "failed");
+  assert.match(run.handoffs[0]?.error ?? "", /valid report/);
   await run.controller.dispose();
 });
 

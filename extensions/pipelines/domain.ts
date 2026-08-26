@@ -49,28 +49,27 @@ export const FEATURE_CORRECTNESS_AUDIT_ROLE =
 export const FEATURE_RELIABILITY_AUDIT_ROLE =
   "audit-reliability-regressions" as const;
 
-export const FEATURE_PIPELINE_LUNA_AUDIT_ROLES = [
+export const PIPELINE_4_LUNA_AUDIT_ROLES = [
   FEATURE_OUTCOME_AUDIT_ROLE,
   FEATURE_LOGIC_AUDIT_ROLE,
   FEATURE_CORRECTNESS_AUDIT_ROLE,
   FEATURE_RELIABILITY_AUDIT_ROLE,
 ] as const;
-export type FeaturePipelineLunaAuditRole =
-  (typeof FEATURE_PIPELINE_LUNA_AUDIT_ROLES)[number];
+export type PipelineLunaAuditRole =
+  (typeof PIPELINE_4_LUNA_AUDIT_ROLES)[number];
 
 export const FEATURE_PIPELINE_CHILD_ROLES = [
   ...FEATURE_PIPELINE_DISCOVERY_ROLES,
-  ...FEATURE_PIPELINE_LUNA_AUDIT_ROLES,
+  ...PIPELINE_4_LUNA_AUDIT_ROLES,
   FINAL_AUDIT_ROLE,
 ] as const;
 
 export const SMALL_FEATURE_IMPLEMENTER_ROLE =
   "implement-small-feature" as const;
-export const SMALL_FEATURE_AUDIT_ROLE = "audit-small-feature" as const;
 
 export const SMALL_FEATURE_PIPELINE_CHILD_ROLES = [
   SMALL_FEATURE_IMPLEMENTER_ROLE,
-  SMALL_FEATURE_AUDIT_ROLE,
+  ...PIPELINE_4_LUNA_AUDIT_ROLES,
 ] as const;
 
 export const PLAN_PIPELINE_DISCOVERY_ROLES = [
@@ -127,7 +126,19 @@ export const PIPELINE_CHILD_CONTEXT_POLICIES: PipelineChildContextPolicies = {
     [FINAL_AUDIT_ROLE]: { gitEvidence: true },
   },
   [SMALL_FEATURE_PIPELINE_ID]: {
-    [SMALL_FEATURE_AUDIT_ROLE]: {
+    [FEATURE_OUTCOME_AUDIT_ROLE]: {
+      gitEvidence: true,
+      priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
+    },
+    [FEATURE_LOGIC_AUDIT_ROLE]: {
+      gitEvidence: true,
+      priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
+    },
+    [FEATURE_CORRECTNESS_AUDIT_ROLE]: {
+      gitEvidence: true,
+      priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
+    },
+    [FEATURE_RELIABILITY_AUDIT_ROLE]: {
       gitEvidence: true,
       priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
     },
@@ -247,9 +258,7 @@ export interface PipelineHandoff {
 }
 
 export function modelForRole(role: PipelineChildRole) {
-  return role === FINAL_AUDIT_ROLE || role === SMALL_FEATURE_AUDIT_ROLE
-    ? TERRA_MODEL
-    : LUNA_MODEL;
+  return role === FINAL_AUDIT_ROLE ? TERRA_MODEL : LUNA_MODEL;
 }
 
 export function titleForRole(role: PipelineChildRole) {

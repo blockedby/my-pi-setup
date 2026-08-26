@@ -10,7 +10,10 @@ import {
   type PipelineRow,
   type PipelineSelection,
 } from "./dashboard.ts";
-import type { PipelineRunSnapshot } from "./domain.ts";
+import {
+  PIPELINE_4_LUNA_AUDIT_ROLES,
+  type PipelineRunSnapshot,
+} from "./domain.ts";
 import { handoffText } from "./index.ts";
 
 function agent(
@@ -299,17 +302,19 @@ test("small-feature dashboard shows only its fixed stages and child placement", 
     persistent: true,
     status: "idle",
   });
-  const auditor = agent("terra-1", {
-    parentId: root.id,
-    role: "audit-small-feature",
-    model: "openai-codex/gpt-5.6-terra",
-    persistent: false,
-    status: "done",
-  });
+  const auditors = PIPELINE_4_LUNA_AUDIT_ROLES.map((role, index) =>
+    agent(`audit-luna-${index + 1}`, {
+      parentId: root.id,
+      role,
+      model: "openai-codex/gpt-5.6-luna",
+      persistent: false,
+      status: "done",
+    }),
+  );
   const run = {
     ...pipelineRun(
       "run-1",
-      [root, implementer, auditor],
+      [root, implementer, ...auditors],
       "small-feature-pipeline",
     ),
     stage: "final-resolve" as const,
@@ -333,12 +338,14 @@ test("small-feature dashboard shows only its fixed stages and child placement", 
       ?.key.includes(":build:"),
     true,
   );
-  assert.equal(
-    rows
-      .find((row) => row.kind === "agent" && row.agentId === auditor.id)
-      ?.key.includes(":final-audit:"),
-    true,
-  );
+  for (const auditor of auditors) {
+    assert.equal(
+      rows
+        .find((row) => row.kind === "agent" && row.agentId === auditor.id)
+        ?.key.includes(":final-audit:"),
+      true,
+    );
+  }
   const finalResolve = rows.find(
     (row): row is Extract<(typeof rows)[number], { kind: "stage" }> =>
       row.kind === "stage" && row.stage === "final-resolve",
