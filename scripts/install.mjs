@@ -65,9 +65,10 @@ Options:
   --pi PATH             Pi executable override (default: isolated version from package.json)
   --codex-tools PATH    Local pi-codex-tools package (default: ../pi-codex)
   --bin-dir PATH        Launcher directory (default: ~/.local/bin)
-  --share-auth          Symlink regular Pi auth into Pipi (opt-in)
-  --skip-dependencies   Skip npm dependency installation
-  --help                Show this help
+  --share-auth                    Symlink regular Pi auth into Pipi (opt-in)
+  --skip-dependencies             Skip repository and isolated runtime dependency installation
+  --skip-repository-dependencies  Skip only repository dependency installation
+  --help                          Show this help
 `;
 
 const parseArgs = (args) => {
@@ -77,6 +78,7 @@ const parseArgs = (args) => {
     binDir: undefined,
     shareAuth: false,
     skipDependencies: false,
+    skipRepositoryDependencies: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -91,6 +93,10 @@ const parseArgs = (args) => {
     }
     if (argument === "--skip-dependencies") {
       options.skipDependencies = true;
+      continue;
+    }
+    if (argument === "--skip-repository-dependencies") {
+      options.skipRepositoryDependencies = true;
       continue;
     }
     if (["--pi", "--codex-tools", "--bin-dir"].includes(argument)) {
@@ -438,7 +444,9 @@ const install = () => {
   if (!reviewerAssetsRoot || !backlogSkillDir)
     throw new Error("Required submodule skill configuration is missing");
   const reviewerSkillDir = join(reviewerAssetsRoot, "skills", "code-review");
-  if (!options.skipDependencies) installDependencies();
+  if (!options.skipDependencies && !options.skipRepositoryDependencies) {
+    installDependencies();
+  }
 
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
