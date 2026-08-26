@@ -2,7 +2,8 @@
 - avoid explicit return types unless absolutely needed
 - `as any` should be an absolute last resort. always use real type safety. lean on type inference instead of manually writing new types over and over again
 - apply Sol/Terra/Luna concurrency quotas only to direct subagents; pipeline graphs predeclare their roots and children, so pipelines must not enforce, inherit, queue on, or otherwise account for direct-subagent capacity limits
-- after every user-requested Pipi operation, append a durable entry to `docs/pipi-setup-record.md`; record the request, action, affected paths or values, verification performed, and any pending step
+- after every user-requested Pipi operation that changes source, configuration, installed runtime state, or external Pipi-managed state, append a durable entry to `docs/pipi-setup-record.md`; record the request, action, affected paths or values, verification performed, and any pending step
+- Git-only delivery actions—commit, push, PR creation/merge, branch or worktree cleanup, and target synchronization—are already durable in Git/GitHub; do not record them in `docs/pipi-setup-record.md`, and never create a follow-up commit, branch, or PR solely to record a merge or other Git-only action
 - keep Pipi's GPT context-window overrides recorded in `config/pipi-model-overrides.json`; when those values change, sync the runtime copy at `~/.pipi/agent/models.json` and update `docs/pipi-setup-record.md`
 - never put secrets in the operation log or repository; do not commit authentication data or copy anything from `~/.pipi/agent/auth.json`
 - treat `vendor/gpt5.6-reviewer` and `vendor/plan-gh-backlog` as read-only Git submodules sourced from their URLs in `config/submodules.json`; do not edit files inside them directly

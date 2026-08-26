@@ -1055,3 +1055,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** This operation record only. No pipeline definition, tool schema, prompt, model policy, direct-subagent routing, installed Pipi state, dependency, submodule, setting, credential, or runtime session changed.
 - **Verification:** Static inspection confirmed the existing reusable four-Luna audit roles and Git-evidence policies, the merged controller-owned deferred-root fan-in pattern, pipeline capacity independence, and the canonical initial/closure review requirements. No implementation, tests, live models, installation, or reload ran.
 - **Pending:** If authorized, define the exact audit input/report schema and implement the new hardcoded pipeline separately; decide whether Terra is retained as explicit escalation (recommended) or removed from audit routing entirely.
+
+## Operation entry: stop recording Git-only delivery actions
+
+- **Request:** Update `AGENTS.md` so merges and other Git delivery actions are not written into the Pipi operation record, avoiding a second record-only merge for each feature.
+- **Action:** Narrowed durable operation logging to user-requested Pipi operations that change source, configuration, installed runtime state, or external Pipi-managed state. Added an explicit prohibition on recording commits, pushes, PR creation/merge, branch/worktree cleanup, or target synchronization because Git and GitHub already retain that history; follow-up record-only commits, branches, and PRs are forbidden.
+- **Affected paths or values:** `AGENTS.md` and this operation entry only. Runtime behavior, pipeline graphs, direct-subagent quotas, installed Pipi state, dependencies, submodules, model overrides, credentials, and external services are unchanged.
+- **Verification:** Reviewed the two rules together to ensure source/runtime operations still receive one durable entry within their implementation change while Git-only delivery metadata produces no extra repository change; `git diff --check` passes.
+- **Pending:** None.
