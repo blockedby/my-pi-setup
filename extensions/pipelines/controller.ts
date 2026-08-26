@@ -11,12 +11,13 @@ import type {
   AgentTreeSessionFactory,
 } from "../shared/agent-tree/domain.ts";
 import {
+  AUDIT_PIPELINE_ID,
+  AUDIT_SYNTHESIS_ROLE,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
   PIPELINE_4_LUNA_AUDIT_ROLES,
   PIPELINE_STAGES,
   PLAN_PIPELINE_AUDIT_ROLES,
-  PLAN_PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
@@ -30,6 +31,7 @@ import {
   rolesForDefinition,
   stagesForDefinition,
   titleForRole,
+  type AuditPipelineInput,
   type FeaturePipelineDiscoveryRole,
   type PipelineChildRole,
   type PipelineCompletionFacts,
@@ -49,6 +51,12 @@ import {
   buildPipelinePrompt,
   type FeatureDiscoveryReportContext,
 } from "./prompt.ts";
+import {
+  AuditSegment,
+  buildAuditTrackPrompt,
+  type AuditGitIdentity,
+  type AuditSegmentContext,
+} from "./audit-segment.ts";
 
 const FEATURE_DISCOVERY_REPORT_MAX_BYTES = 32 * 1024;
 
@@ -72,6 +80,8 @@ interface MutableRun {
   error?: string;
   rootId?: string;
   featureDiscoveryBootstrapped: boolean;
+  auditSegment?: AuditSegment;
+  auditSegmentStarting?: Promise<ReadonlyArray<AgentNodeSnapshot>>;
   completion?: PipelineCompletionFacts;
   planArtifactsWritten: Map<
     string,
@@ -134,6 +144,7 @@ export class PipelineController {
   private readonly listeners = new Set<() => void>();
   private readonly handoffs = new Set<string>();
   private readonly childContinuations = new Map<string, number>();
+  private readonly auditPumps = new Set<string>();
   private readonly tree: AgentTreeController;
   private readonly onHandoff: PipelineControllerOptions["onHandoff"];
   private readonly makeRunId: () => string;
@@ -205,6 +216,9 @@ export class PipelineController {
       ...(run.error ? { error: run.error } : {}),
       ...(run.rootId ? { rootId: run.rootId } : {}),
       ...(run.completion ? { completion: run.completion } : {}),
+      ...(run.auditSegment
+        ? { auditSegment: run.auditSegment.progress() }
+        : {}),
       agents: this.agentsFor(run.id),
     };
   }
@@ -212,13 +226,34 @@ export class PipelineController {
   start(request: PipelineRunRequest) {
     if (this.shuttingDown)
       throw new Error("Pipeline controller is shutting down.");
+    const definition = request.pipeline ?? FEATURE_PIPELINE_ID;
+    if (request.audit && definition !== AUDIT_PIPELINE_ID) {
+      throw new Error("Audit input is only valid for audit-pipeline.");
+    }
+    const audit: AuditPipelineInput = request.audit ?? {
+      mode: "initial",
+      acceptanceCriteria: [],
+    };
+    if (
+      definition === AUDIT_PIPELINE_ID &&
+      audit.mode === "closure" &&
+      (!audit.priorBlockers?.length ||
+        !audit.remediationDiff ||
+        !audit.touchedInvariants?.length)
+    ) {
+      throw new Error(
+        "Closure audit requires prior blockers, closure conditions, a remediation diff, and at least one directly touched invariant.",
+      );
+    }
+    const normalizedRequest =
+      definition === AUDIT_PIPELINE_ID ? { ...request, audit } : request;
     const id = this.makeRunId();
     const run: MutableRun = {
       id,
-      definition: request.pipeline ?? FEATURE_PIPELINE_ID,
-      request,
+      definition,
+      request: normalizedRequest,
       baseSha: gitHead(request.workingDir),
-      stage: initialStageForDefinition(request.pipeline ?? FEATURE_PIPELINE_ID),
+      stage: initialStageForDefinition(definition),
       status: "starting",
       startedAt: Date.now(),
       featureDiscoveryBootstrapped: false,
@@ -234,14 +269,19 @@ export class PipelineController {
     try {
       const root = await this.tree.spawn({
         scopeId: run.id,
-        role: "pipeline-root",
+        role:
+          run.definition === AUDIT_PIPELINE_ID
+            ? AUDIT_SYNTHESIS_ROLE
+            : "pipeline-root",
         attempt: 1,
         title: definitionFor(run.definition).rootTitle,
         model: definitionFor(run.definition).rootModel,
         cwd: run.request.workingDir,
         prompt: buildPipelinePrompt(run.definition, run.request),
         persistent: true,
-        deferPrompt: run.definition === FEATURE_PIPELINE_ID,
+        deferPrompt:
+          run.definition === FEATURE_PIPELINE_ID ||
+          run.definition === AUDIT_PIPELINE_ID,
         shouldStart: () => run.status === "starting",
       });
       run.rootId = root.id;
@@ -267,6 +307,16 @@ export class PipelineController {
             root.id,
             buildPipelinePrompt(run.definition, run.request, discoveryReports),
           );
+        } else if (run.definition === AUDIT_PIPELINE_ID) {
+          run.auditSegmentStarting = this.startAuditSegment(run, {
+            acceptanceContract:
+              run.request.audit?.acceptanceCriteria.join("\n") ||
+              "Use the task statement as the bounded acceptance contract.",
+            assumptions: [],
+            checks: [],
+            standalone: true,
+          });
+          await run.auditSegmentStarting;
         }
       }
     } catch (error) {
@@ -375,6 +425,272 @@ export class PipelineController {
     return reports;
   }
 
+  private auditGitIdentity(run: MutableRun): AuditGitIdentity {
+    let branch = "UNAVAILABLE";
+    try {
+      branch =
+        execFileSync("git", ["branch", "--show-current"], {
+          cwd: run.request.workingDir,
+          encoding: "utf8",
+          maxBuffer: 16 * 1024,
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim() || "DETACHED";
+    } catch {
+      // Explicit unavailable evidence is safer than guessing repository state.
+    }
+    return {
+      baseSha: run.baseSha,
+      headSha: gitHead(run.request.workingDir),
+      worktreeLabel: "WORKTREE",
+      workingDir: run.request.workingDir,
+      branch,
+      status: this.gitStatus(run.id).slice(0, 64 * 1024),
+      diff: this.gitDiff(run.id).slice(0, 64 * 1024),
+    };
+  }
+
+  private async startAuditSegment(
+    run: MutableRun,
+    options: {
+      acceptanceContract: string;
+      assumptions: ReadonlyArray<string>;
+      checks: ReadonlyArray<string>;
+      standalone: boolean;
+    },
+  ) {
+    if (run.auditSegment) {
+      throw new Error("This pipeline run already has an audit segment.");
+    }
+    if (!run.rootId) throw new Error(`Pipeline run "${run.id}" has no root.`);
+    const input = run.request.audit ?? {
+      mode: "initial" as const,
+      acceptanceCriteria: [],
+    };
+    const context: AuditSegmentContext = {
+      task: run.request.task,
+      acceptanceContract: options.acceptanceContract.slice(0, 64 * 1024),
+      assumptions: options.assumptions.slice(0, 128),
+      checks: options.checks.slice(0, 128),
+      input,
+      git: this.auditGitIdentity(run),
+    };
+    const segment = new AuditSegment(context);
+    run.auditSegment = segment;
+    this.notify();
+
+    if (options.standalone) {
+      segment.registerSynthesis(run.rootId);
+    } else {
+      const synthesis = await this.tree.spawn({
+        scopeId: run.id,
+        parentId: run.rootId,
+        role: AUDIT_SYNTHESIS_ROLE,
+        attempt: 1,
+        title: titleForRole(AUDIT_SYNTHESIS_ROLE),
+        model: modelForRole(AUDIT_SYNTHESIS_ROLE),
+        cwd: run.request.workingDir,
+        prompt: "Controller-deferred audit synthesis.",
+        persistent: true,
+        deferPrompt: true,
+        shouldStart: () => run.status === "running",
+      });
+      segment.registerSynthesis(synthesis.id);
+    }
+
+    const tracks = await Promise.all(
+      PIPELINE_4_LUNA_AUDIT_ROLES.map(async (role) => {
+        const attempt =
+          this.agentsFor(run.id).filter((agent) => agent.role === role).length +
+          1;
+        const child = await this.tree.spawn({
+          scopeId: run.id,
+          parentId: run.rootId,
+          role,
+          attempt,
+          title: titleForRole(role),
+          model: modelForRole(role),
+          cwd: run.request.workingDir,
+          prompt: buildAuditTrackPrompt(role, context),
+          shouldStart: () => run.status === "running",
+        });
+        segment.registerTrack(role, child.id);
+        return child;
+      }),
+    );
+    await this.pumpAuditSegment(run);
+    const synthesis = this.tree.view.get(segment.synthesizerId!);
+    return synthesis ? [...tracks, synthesis] : tracks;
+  }
+
+  async startFinalAudit(
+    runId: string,
+    context: {
+      acceptanceContract: string;
+      assumptions: ReadonlyArray<string>;
+      checks: ReadonlyArray<string>;
+    },
+  ) {
+    const run = this.requireActiveRun(runId);
+    if (
+      run.definition !== FEATURE_PIPELINE_ID &&
+      run.definition !== PLAN_PIPELINE_ID
+    ) {
+      throw new Error(
+        "Embedded audit segments are available only to feature-pipeline and plan-pipeline.",
+      );
+    }
+    if (run.stage !== "final-audit") {
+      throw new Error(
+        "The pipeline must enter final-audit before starting its audit segment.",
+      );
+    }
+    if (run.auditSegmentStarting || run.auditSegment) {
+      throw new Error(
+        "This pipeline run already started its final audit segment.",
+      );
+    }
+    const starting = this.startAuditSegment(run, {
+      ...context,
+      standalone: false,
+    });
+    run.auditSegmentStarting = starting;
+    try {
+      return await starting;
+    } catch (error) {
+      this.failRun(
+        run,
+        error instanceof Error ? error.message : String(error),
+        true,
+      );
+      throw error;
+    }
+  }
+
+  private async pumpAuditSegment(run: MutableRun) {
+    const segment = run.auditSegment;
+    if (
+      !segment ||
+      this.auditPumps.has(run.id) ||
+      (run.status !== "starting" && run.status !== "running")
+    ) {
+      return;
+    }
+    this.auditPumps.add(run.id);
+    try {
+      for (const [role, id] of segment.tracks) {
+        const child = this.tree.view.get(id);
+        if (
+          !child ||
+          child.status === "starting" ||
+          child.status === "running"
+        ) {
+          continue;
+        }
+        if (child.status === "error" || child.status === "cancelled") {
+          throw new Error(`Audit track ${role} failed before a valid report.`);
+        }
+        segment.accept(role, child.finalText, child.attempt);
+      }
+
+      const synthesisId = segment.synthesizerId;
+      if (!synthesisId) return;
+      let synthesizer = this.tree.view.get(synthesisId);
+      if (!synthesizer)
+        throw new Error("Audit synthesis session is unavailable.");
+
+      if (
+        segment.progress().reducerStatus === "busy" &&
+        synthesizer.status === "idle"
+      ) {
+        segment.settle(synthesizer.finalText);
+      } else if (
+        segment.progress().reducerStatus === "busy" &&
+        (synthesizer.status === "error" || synthesizer.status === "cancelled")
+      ) {
+        throw new Error(
+          "Audit synthesis failed before returning a valid report.",
+        );
+      }
+
+      const finalReport = segment.finalReport;
+      if (finalReport) {
+        if (run.definition === AUDIT_PIPELINE_ID) {
+          this.completeStandaloneAudit(run, finalReport);
+        } else if (run.stage === "final-audit") {
+          run.stage = "final-resolve";
+          this.notify();
+        }
+        return;
+      }
+
+      synthesizer = this.tree.view.get(synthesisId)!;
+      if (synthesizer.status !== "idle") return;
+      const next = segment.nextPrompt();
+      if (!next) return;
+      if (synthesizer.finalText || synthesizer.transcript.length > 0) {
+        await this.tree.send(synthesisId, next.prompt);
+      } else {
+        await this.tree.startDeferred(synthesisId, next.prompt);
+      }
+    } catch (error) {
+      this.failRun(
+        run,
+        error instanceof Error ? error.message : String(error),
+        true,
+      );
+    } finally {
+      this.auditPumps.delete(run.id);
+      this.notify();
+      const synthesisId = segment.synthesizerId;
+      const synthesizer = synthesisId
+        ? this.tree.view.get(synthesisId)
+        : undefined;
+      if (
+        (run.status === "starting" || run.status === "running") &&
+        segment.progress().reducerStatus === "busy" &&
+        synthesizer?.status === "idle"
+      ) {
+        void this.pumpAuditSegment(run);
+      }
+    }
+  }
+
+  private completeStandaloneAudit(
+    run: MutableRun,
+    report: NonNullable<PipelineCompletionFacts["auditReport"]>,
+  ) {
+    if (run.status !== "running") return;
+    const progress = run.auditSegment?.progress();
+    run.stage = "complete";
+    run.status = "completed";
+    run.finishedAt = Date.now();
+    run.completion = {
+      outcome: report.summary,
+      changedPaths: [],
+      checks: [
+        `${progress?.integratedReportCount ?? 0} validated Luna audit reports integrated exactly once.`,
+        `${progress?.revision ?? 0} serialized synthesis revision(s) completed.`,
+        `Captured review identity: ${report.baseSha}..${report.headSha} (WORKTREE).`,
+      ],
+      assumptions: [],
+      git: [
+        `Review base ${report.baseSha}`,
+        `Review head ${report.headSha} with WORKTREE evidence`,
+      ],
+      reports: [
+        `Validated ${report.mode} audit synthesis: ${report.findings.length} finding(s), ${report.unresolvedConflicts.length} unresolved conflict(s), ${report.unprovenChecks.length} unproven check(s).`,
+      ],
+      unresolvedItems: [
+        ...report.unresolvedConflicts.map((item) => item.description),
+        ...report.unprovenChecks.map((item) => item.claim),
+      ],
+      workingDir: run.request.workingDir,
+      auditReport: report,
+    };
+    this.notify();
+    this.deliver(run);
+  }
+
   private onTreeChange() {
     if (this.shuttingDown) return;
     for (const run of this.runs.values()) {
@@ -389,6 +705,9 @@ export class PipelineController {
         this.deliver(run);
       } else if (root.status === "error") {
         this.failRun(run, root.error ?? "Pipeline root failed.");
+      }
+      if (run.status === "starting" || run.status === "running") {
+        void this.pumpAuditSegment(run);
       }
     }
     this.notify();
@@ -506,23 +825,24 @@ export class PipelineController {
       }
       return;
     }
-    const roles = rolesForDefinition(run.definition).filter((role) =>
+    const roles =
       run.stage === "discover"
-        ? role.startsWith("discover-")
+        ? run.definition === FEATURE_PIPELINE_ID
+          ? FEATURE_PIPELINE_DISCOVERY_ROLES
+          : PLAN_PIPELINE_DISCOVERY_ROLES
         : run.stage === "audit"
-          ? role.startsWith("audit-")
-          : run.stage === "final-audit"
-            ? role === "final-audit"
-            : false,
-    );
+          ? run.definition === FEATURE_PIPELINE_ID
+            ? PIPELINE_4_LUNA_AUDIT_ROLES
+            : run.definition === PLAN_PIPELINE_ID
+              ? PLAN_PIPELINE_AUDIT_ROLES
+              : []
+          : [];
     const nextStage =
       run.stage === "discover"
         ? "build"
         : run.stage === "audit"
           ? "audit-resolve"
-          : run.stage === "final-audit"
-            ? "final-resolve"
-            : undefined;
+          : undefined;
     if (
       !nextStage ||
       !waitedChildren.some((child) =>
@@ -573,6 +893,8 @@ export class PipelineController {
           stage,
         );
       }
+    } else if (run.definition === AUDIT_PIPELINE_ID) {
+      throw new Error("audit-pipeline stages are controller-owned.");
     } else if (
       run.definition === FEATURE_PIPELINE_ID &&
       stage === "discover" &&
@@ -580,6 +902,14 @@ export class PipelineController {
     ) {
       throw new Error(
         "feature-pipeline cannot return to controller-owned discovery after bootstrap.",
+      );
+    } else if (
+      run.definition === FEATURE_PIPELINE_ID &&
+      stage === "final-resolve" &&
+      !run.auditSegment?.finalReport
+    ) {
+      throw new Error(
+        "feature-pipeline final-resolve requires a validated Luna audit synthesis.",
       );
     } else if (run.definition === PLAN_PIPELINE_ID) {
       const currentIndex = PIPELINE_STAGES.indexOf(run.stage);
@@ -602,8 +932,10 @@ export class PipelineController {
         throw new Error(
           "Cannot enter final-audit before writing a plan artifact.",
         );
-      } else if (stage === "final-resolve") {
-        this.requireValidReports(run, ["final-audit"], stage);
+      } else if (stage === "final-resolve" && !run.auditSegment?.finalReport) {
+        throw new Error(
+          "plan-pipeline final-resolve requires a validated Luna audit synthesis.",
+        );
       }
     }
     run.stage = stage;
@@ -634,6 +966,16 @@ export class PipelineController {
     if (!roleBelongsToDefinition(run.definition, role)) {
       throw new Error(`Unsupported ${run.definition} child role "${role}".`);
     }
+    if (
+      run.definition === AUDIT_PIPELINE_ID ||
+      role === AUDIT_SYNTHESIS_ROLE ||
+      ((run.definition === FEATURE_PIPELINE_ID ||
+        run.definition === PLAN_PIPELINE_ID) &&
+        PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role) &&
+        run.stage === "final-audit")
+    ) {
+      throw new Error(`${role} is controller-owned by the Luna audit segment.`);
+    }
     if (!run.rootId)
       throw new Error(`Pipeline run "${runId}" has no root yet.`);
     const priorAttempts = this.agentsFor(runId).filter(
@@ -654,6 +996,15 @@ export class PipelineController {
         );
       }
     }
+    if (
+      run.definition === FEATURE_PIPELINE_ID &&
+      PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role) &&
+      run.stage !== "audit"
+    ) {
+      throw new Error(
+        `${role} can only start during feature-pipeline stage audit.`,
+      );
+    }
     if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
       const requiredStage =
         role === SMALL_FEATURE_IMPLEMENTER_ROLE ? "build" : "final-audit";
@@ -668,11 +1019,12 @@ export class PipelineController {
         );
       }
     } else if (run.definition === PLAN_PIPELINE_ID) {
-      const requiredStage = role.startsWith("discover-")
-        ? "discover"
-        : role.startsWith("audit-")
-          ? "audit"
-          : "final-audit";
+      if (PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)) {
+        throw new Error(
+          `${role} is controller-owned by the Luna audit segment.`,
+        );
+      }
+      const requiredStage = role.startsWith("discover-") ? "discover" : "audit";
       if (run.stage !== requiredStage) {
         throw new Error(
           `${role} can only start during plan-pipeline stage ${requiredStage}.`,
@@ -680,7 +1032,6 @@ export class PipelineController {
       }
       const latest = priorAttempts.at(-1);
       const replacementAllowed =
-        role !== "final-audit" &&
         priorAttempts.length === 1 &&
         latest?.status === "error" &&
         !latest.sessionFile;
@@ -786,6 +1137,14 @@ export class PipelineController {
     const agent = this.getAgent(runId, id);
     if (!agent.parentId) throw new Error(`Agent "${id}" is the pipeline root.`);
     if (
+      agent.role === AUDIT_SYNTHESIS_ROLE ||
+      [...(run.auditSegment?.tracks.values() ?? [])].includes(id)
+    ) {
+      throw new Error(
+        "Controller-owned audit segment sessions cannot be retried or continued.",
+      );
+    }
+    if (
       run.definition === FEATURE_PIPELINE_ID &&
       isFeatureDiscoveryRole(agent.role)
     ) {
@@ -864,8 +1223,17 @@ export class PipelineController {
   }
 
   async cancelChild(runId: string, id: string) {
+    const run = this.requireRun(runId);
     const agent = this.getAgent(runId, id);
     if (!agent.parentId) throw new Error(`Agent "${id}" is the pipeline root.`);
+    if (
+      agent.role === AUDIT_SYNTHESIS_ROLE ||
+      [...(run.auditSegment?.tracks.values() ?? [])].includes(id)
+    ) {
+      throw new Error(
+        "Controller-owned audit segment sessions can only be cancelled with the whole pipeline run.",
+      );
+    }
     return this.tree.cancel(id);
   }
 
@@ -902,6 +1270,7 @@ export class PipelineController {
         cwd: run.request.workingDir,
         encoding: "utf8",
         maxBuffer: 64 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
       }).trim();
     } catch (error) {
       return `Git status unavailable: ${error instanceof Error ? error.message : String(error)}`;
@@ -933,6 +1302,7 @@ export class PipelineController {
           cwd: run.request.workingDir,
           encoding: "utf8",
           maxBuffer: 128 * 1024,
+          stdio: ["ignore", "pipe", "pipe"],
         },
       )
         .trim()
@@ -960,6 +1330,11 @@ export class PipelineController {
       );
     }
     let completion = facts;
+    if (run.definition === AUDIT_PIPELINE_ID) {
+      throw new Error(
+        "audit-pipeline completion is controller-owned and requires a validated final synthesis report.",
+      );
+    }
     if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
       if (run.stage !== "complete") {
         throw new Error(
@@ -975,7 +1350,16 @@ export class PipelineController {
       if (run.stage !== "complete") {
         throw new Error("plan-pipeline must enter complete before completion.");
       }
-      this.requireValidReports(run, PLAN_PIPELINE_CHILD_ROLES, "complete");
+      this.requireValidReports(
+        run,
+        [...PLAN_PIPELINE_DISCOVERY_ROLES, ...PLAN_PIPELINE_AUDIT_ROLES],
+        "complete",
+      );
+      if (!run.auditSegment?.finalReport) {
+        throw new Error(
+          "plan-pipeline completion requires a validated Luna audit synthesis.",
+        );
+      }
       if (!facts.planPath) {
         throw new Error("plan-pipeline completion requires plan_path.");
       }
@@ -1005,6 +1389,13 @@ export class PipelineController {
           ...new Set([...facts.changedPaths, artifact.relativePath]),
         ],
       };
+    } else if (
+      run.definition === FEATURE_PIPELINE_ID &&
+      !run.auditSegment?.finalReport
+    ) {
+      throw new Error(
+        "feature-pipeline completion requires a validated Luna audit synthesis.",
+      );
     }
     run.stage = "complete";
     run.status = "completed";
@@ -1028,14 +1419,12 @@ export class PipelineController {
     const run = this.requireRun(runId);
     if (run.status !== "starting" && run.status !== "running")
       return this.snapshot(run);
+    run.status = "cancelled";
+    run.finishedAt = Date.now();
+    this.notify();
     await this.cancelActiveChildren(run);
     if (run.rootId) await this.tree.cancel(run.rootId);
-    if (run.status === "starting" || run.status === "running") {
-      run.status = "cancelled";
-      run.finishedAt = Date.now();
-      this.notify();
-      this.deliver(run);
-    }
+    this.deliver(run);
     return this.snapshot(run);
   }
 
@@ -1056,7 +1445,14 @@ export class PipelineController {
   createRootTools(runId: string): ToolDefinition[] {
     const controller = this;
     const run = this.requireRun(runId);
-    const roles = rolesForDefinition(run.definition);
+    const roles = rolesForDefinition(run.definition).filter(
+      (role) =>
+        role !== AUDIT_SYNTHESIS_ROLE &&
+        !(
+          run.definition === PLAN_PIPELINE_ID &&
+          PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)
+        ),
+    );
     const tools: ToolDefinition[] = [
       defineTool({
         name: "pipeline_stage",
@@ -1076,7 +1472,7 @@ export class PipelineController {
       defineTool({
         name: "pipeline_child_spawn",
         label: "Spawn Pipeline Child",
-        description: `Start one allowed ${run.definition} Luna or Terra role.`,
+        description: `Start one allowed agent-driven ${run.definition} Luna role.`,
         parameters: Type.Object({
           role: StringEnum(roles),
           context: Type.Optional(Type.String({ maxLength: 64 * 1024 })),
@@ -1139,11 +1535,14 @@ export class PipelineController {
           const child = controller.getAgent(runId, params.id);
           if (!child.parentId)
             throw new Error(`Agent "${params.id}" is the pipeline root.`);
-          const issues = validatePipelineReport(
-            run.definition,
-            child.role,
-            child.finalText,
-          );
+          const issues =
+            child.role === AUDIT_SYNTHESIS_ROLE
+              ? []
+              : validatePipelineReport(
+                  run.definition,
+                  child.role,
+                  child.finalText,
+                );
           const warning = issues.length
             ? `\n\n[Report contract violation: ${issues.join(" ")}]`
             : "";
@@ -1187,11 +1586,14 @@ export class PipelineController {
                 type: "text",
                 text: children
                   .map((child) => {
-                    const issues = validatePipelineReport(
-                      run.definition,
-                      child.role,
-                      child.finalText,
-                    );
+                    const issues =
+                      child.role === AUDIT_SYNTHESIS_ROLE
+                        ? []
+                        : validatePipelineReport(
+                            run.definition,
+                            child.role,
+                            child.finalText,
+                          );
                     const warning = issues.length
                       ? `\n\n[Report contract violation: ${issues.join(" ")}]`
                       : "";
@@ -1278,6 +1680,63 @@ export class PipelineController {
         },
       }),
     ];
+    if (
+      run.definition === FEATURE_PIPELINE_ID ||
+      run.definition === PLAN_PIPELINE_ID
+    ) {
+      tools.splice(
+        tools.length - 1,
+        0,
+        defineTool({
+          name: "pipeline_audit_start",
+          label: "Start Luna Audit Segment",
+          description:
+            "Start this hardcoded pipeline's controller-owned four-track Luna final audit and persistent incremental synthesizer.",
+          parameters: Type.Object(
+            {
+              acceptance_contract: Type.String({
+                minLength: 1,
+                maxLength: 64 * 1024,
+              }),
+              assumptions: Type.Array(
+                Type.String({ minLength: 1, maxLength: 8 * 1024 }),
+                { maxItems: 128 },
+              ),
+              checks_evidence: Type.Array(
+                Type.String({ minLength: 1, maxLength: 8 * 1024 }),
+                { maxItems: 128 },
+              ),
+            },
+            { additionalProperties: false },
+          ),
+          async execute(_toolId, params) {
+            const agents = await controller.startFinalAudit(runId, {
+              acceptanceContract: params.acceptance_contract,
+              assumptions: params.assumptions,
+              checks: params.checks_evidence,
+            });
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Started controller-owned Luna audit segment: ${agents
+                    .map((agent) => agent.id)
+                    .join(", ")}.`,
+                },
+              ],
+              details: {
+                runId,
+                agents: agents.map((agent) => ({
+                  id: agent.id,
+                  role: agent.role,
+                  model: agent.model,
+                })),
+              },
+            };
+          },
+        }),
+      );
+    }
     if (run.definition === PLAN_PIPELINE_ID) {
       tools.splice(
         1,

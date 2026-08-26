@@ -5,7 +5,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
-import { stagesForDefinition, type PipelineRunSnapshot } from "./domain.ts";
+import {
+  AUDIT_SYNTHESIS_ROLE,
+  PIPELINE_4_LUNA_AUDIT_ROLES,
+  stagesForDefinition,
+  type PipelineRunSnapshot,
+} from "./domain.ts";
 
 export const PIPELINE_CHECK_MAX_BYTES = 16 * 1024;
 export const PIPELINE_PREVIEW_MAX_BYTES = 2 * 1024;
@@ -151,6 +156,15 @@ function completionProjection(run: PipelineRunSnapshot) {
     gitObservationCount: run.completion.git.length,
     reportCount: run.completion.reports.length,
     unresolvedItemCount: run.completion.unresolvedItems.length,
+    ...(run.completion.auditReport
+      ? {
+          auditFindingCount: run.completion.auditReport.findings.length,
+          auditConflictCount:
+            run.completion.auditReport.unresolvedConflicts.length,
+          auditClosureResultCount:
+            run.completion.auditReport.closureResults.length,
+        }
+      : {}),
     ...(run.completion.planPath ? { planPath: run.completion.planPath } : {}),
   };
 }
@@ -197,7 +211,11 @@ export function projectPipelineCheck(
   );
   const projectedAgents = agents.map((agent) => {
     const active = agent.status === "starting" || agent.status === "running";
-    const preview = active ? previewFor(agent) : undefined;
+    const auditReportAgent =
+      Boolean(run.auditSegment) &&
+      (agent.role === AUDIT_SYNTHESIS_ROLE ||
+        PIPELINE_4_LUNA_AUDIT_ROLES.some((role) => role === agent.role));
+    const preview = active && !auditReportAgent ? previewFor(agent) : undefined;
     const openTool = active ? openToolFor(agent) : undefined;
     return {
       id: agent.id,
@@ -217,6 +235,19 @@ export function projectPipelineCheck(
     run.status === "starting" || run.status === "running"
       ? undefined
       : completionProjection(run);
+  const auditSegment = run.auditSegment
+    ? {
+        mode: run.auditSegment.mode,
+        phase: run.auditSegment.phase,
+        expectedReportCount: run.auditSegment.expectedReportCount,
+        acceptedReportCount: run.auditSegment.acceptedReportCount,
+        pendingReportCount: run.auditSegment.pendingReportCount,
+        integratedReportCount: run.auditSegment.integratedReportCount,
+        reducerStatus: run.auditSegment.reducerStatus,
+        revision: run.auditSegment.revision,
+        finalReportValidated: run.auditSegment.finalReportValidated,
+      }
+    : undefined;
 
   return {
     id: run.id,
@@ -234,6 +265,7 @@ export function projectPipelineCheck(
     rootStatus: root?.status ?? "not-started",
     agentStatusCounts: agentStatusCounts(agents),
     agents: projectedAgents,
+    ...(auditSegment ? { auditSegment } : {}),
     ...(completion ? { completion } : {}),
   };
 }
@@ -320,12 +352,23 @@ export function formatPipelineCheck(details: ProjectedPipelineCheck) {
     }
   }
 
+  if (details.auditSegment) {
+    lines.push(
+      `Audit segment: ${details.auditSegment.mode} · ${details.auditSegment.phase} · reports accepted ${details.auditSegment.acceptedReportCount}/${details.auditSegment.expectedReportCount} · pending ${details.auditSegment.pendingReportCount} · integrated ${details.auditSegment.integratedReportCount} · reducer ${details.auditSegment.reducerStatus} · revision ${details.auditSegment.revision} · final ${details.auditSegment.finalReportValidated ? "validated" : "pending"}`,
+    );
+  }
+
   if (details.completion) {
     lines.push(
       `Completion counts: changed paths ${details.completion.changedPathCount}, checks ${details.completion.checkCount}, assumptions ${details.completion.assumptionCount}, Git observations ${details.completion.gitObservationCount}, reports ${details.completion.reportCount}, unresolved items ${details.completion.unresolvedItemCount}`,
     );
     if (details.completion.planPath) {
       lines.push(`Plan path: ${details.completion.planPath}`);
+    }
+    if ("auditFindingCount" in details.completion) {
+      lines.push(
+        `Audit completion counts: findings ${details.completion.auditFindingCount}, conflicts ${details.completion.auditConflictCount}, closure results ${details.completion.auditClosureResultCount}`,
+      );
     }
   }
 

@@ -143,7 +143,7 @@ test("run expansion toggles without moving the stable run selection", () => {
     togglePipelineRunExpansion(expandedRunIds, expandedRunRow),
     true,
   );
-  assert.equal(buildPipelineRows([run], expandedRunIds).length, 4);
+  assert.equal(buildPipelineRows([run], expandedRunIds).length, 5);
   assert.equal(
     togglePipelineRunExpansion(expandedRunIds, {
       key: "definition:feature-pipeline",
@@ -255,6 +255,7 @@ test("dashboard lists all definitions and nests runs under the selected definiti
       ["definition", "feature-pipeline"],
       ["definition", "small-feature-pipeline"],
       ["definition", "plan-pipeline"],
+      ["definition", "audit-pipeline"],
     ],
   );
   const feature = pipelineRun("feature-run", [agent("feature-root")]);
