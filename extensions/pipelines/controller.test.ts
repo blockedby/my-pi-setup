@@ -818,7 +818,10 @@ test("successful audit fan-in atomically enters audit-resolve", async () => {
 
   const snapshot = run.controller.get(runId);
   assert.equal(snapshot?.stage, "audit-resolve");
-  const rows = buildPipelineRows(snapshot ? [snapshot] : []);
+  const rows = buildPipelineRows(
+    snapshot ? [snapshot] : [],
+    new Set(snapshot ? [snapshot.id] : []),
+  );
   assert.equal(
     rows.find((row) => row.kind === "stage" && row.stage === "audit-resolve")
       ?.label,
@@ -1000,9 +1003,10 @@ test("dashboard cancellation of an idle root cancels the run and active children
     runId,
     "audit-reliability-regressions",
   );
-  const rootRow = buildPipelineRows([run.controller.get(runId)!]).find(
-    (row) => row.kind === "agent" && row.agentId === rootId,
-  );
+  const rootRow = buildPipelineRows(
+    [run.controller.get(runId)!],
+    new Set([runId]),
+  ).find((row) => row.kind === "agent" && row.agentId === rootId);
   assert.ok(rootRow);
 
   await cancelPipelineRow(run.controller, rootRow);

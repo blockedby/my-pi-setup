@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import {
+  agentIdForPipelineRow,
   buildPipelineRows,
   glyphStatusForPipelineRow,
   reconcilePipelineSelection,
+  togglePipelineRunExpansion,
+  type PipelineRow,
   type PipelineSelection,
 } from "./dashboard.ts";
 import type { PipelineRunSnapshot } from "./domain.ts";
@@ -49,6 +52,106 @@ function pipelineRun(
   };
 }
 
+test("runs are collapsed by default with textual and colored summary status", () => {
+  const statuses = [
+    ["starting", "running"],
+    ["running", "running"],
+    ["completed", "done"],
+    ["failed", "error"],
+    ["cancelled", "cancelled"],
+  ] as const;
+  const rows = buildPipelineRows(
+    statuses.map(([status]) => ({
+      ...pipelineRun(`run-${status}`, []),
+      status,
+    })),
+  );
+  const runRows = rows.filter(
+    (row): row is Extract<(typeof rows)[number], { kind: "run" }> =>
+      row.kind === "run",
+  );
+
+  assert.equal(
+    rows.some((row) => row.kind === "stage"),
+    false,
+  );
+  assert.equal(
+    rows.some((row) => row.kind === "agent"),
+    false,
+  );
+  assert.deepEqual(
+    runRows.map((row) => [row.label, glyphStatusForPipelineRow(row)]),
+    statuses.map(([status, glyph]) => [
+      `▸ run-${status} · ${status} · /tmp/work`,
+      glyph,
+    ]),
+  );
+});
+
+test("only explicitly expanded runs expose selectable descendants", () => {
+  const first = pipelineRun("run-1", [agent("root-1")]);
+  const second = {
+    ...pipelineRun("run-2", [agent("root-2")]),
+    rootId: "root-2",
+  };
+  const rows = buildPipelineRows([first, second], new Set(["run-2"]));
+
+  assert.equal(
+    rows.find((row) => row.key === "run:run-1")?.label.startsWith("▸"),
+    true,
+  );
+  assert.equal(
+    rows.find((row) => row.key === "run:run-2")?.label.startsWith("▾"),
+    true,
+  );
+  assert.equal(
+    rows.some((row) => row.kind === "stage" && row.runId === "run-1"),
+    false,
+  );
+  assert.equal(
+    rows.some((row) => row.kind === "stage" && row.runId === "run-2"),
+    true,
+  );
+});
+
+test("run expansion toggles without moving the stable run selection", () => {
+  const expandedRunIds = new Set<string>();
+  const run = pipelineRun("run-1", [agent("root-1")]);
+  const collapsedRows = buildPipelineRows([run], expandedRunIds);
+  const runRow = collapsedRows.find((row) => row.kind === "run");
+  assert.ok(runRow);
+  const selection: PipelineSelection = {
+    key: runRow.key,
+    index: collapsedRows.indexOf(runRow),
+  };
+
+  assert.equal(togglePipelineRunExpansion(expandedRunIds, runRow), true);
+  const expandedRows = buildPipelineRows([run], expandedRunIds);
+  reconcilePipelineSelection(selection, expandedRows);
+  assert.equal(expandedRows[selection.index]?.key, runRow.key);
+  assert.equal(
+    expandedRows.some((row) => row.kind === "stage"),
+    true,
+  );
+
+  const expandedRunRow = expandedRows[selection.index];
+  assert.ok(expandedRunRow);
+  assert.equal(
+    togglePipelineRunExpansion(expandedRunIds, expandedRunRow),
+    true,
+  );
+  assert.equal(buildPipelineRows([run], expandedRunIds).length, 4);
+  assert.equal(
+    togglePipelineRunExpansion(expandedRunIds, {
+      key: "definition:feature-pipeline",
+      kind: "definition",
+      depth: 0,
+      label: "feature-pipeline",
+    }),
+    false,
+  );
+});
+
 test("nested UI model is definition to run to root, stages, and child attempts", () => {
   const root = agent("root-1");
   const discover = agent("child-1", {
@@ -59,7 +162,10 @@ test("nested UI model is definition to run to root, stages, and child attempts",
     model: "openai-codex/gpt-5.6-luna",
     persistent: false,
   });
-  const rows = buildPipelineRows([pipelineRun("run-1", [root, discover])]);
+  const rows = buildPipelineRows(
+    [pipelineRun("run-1", [root, discover])],
+    new Set(["run-1"]),
+  );
 
   assert.equal(rows[0]?.kind, "definition");
   assert.equal(rows[0]?.depth, 0);
@@ -69,7 +175,7 @@ test("nested UI model is definition to run to root, stages, and child attempts",
     rows.slice(0, 3).map((row) => [row.kind, row.depth, row.label]),
     [
       ["definition", 0, "feature-pipeline"],
-      ["run", 1, "run-1 · running · /tmp/work"],
+      ["run", 1, "▾ run-1 · running · /tmp/work"],
       ["agent", 2, "root-1 · running"],
     ],
   );
@@ -99,9 +205,10 @@ test("running glyph follows the active stage instead of the persistent root", ()
     role: "discover-problem",
     status: "done",
   });
-  const rows = buildPipelineRows([
-    { ...pipelineRun("run-1", [root, child]), stage: "build" },
-  ]);
+  const rows = buildPipelineRows(
+    [{ ...pipelineRun("run-1", [root, child]), stage: "build" }],
+    new Set(["run-1"]),
+  );
   const rootRow = rows.find(
     (row) => row.kind === "agent" && row.agentId === root.id,
   );
@@ -109,7 +216,8 @@ test("running glyph follows the active stage instead of the persistent root", ()
     (row) => row.kind === "agent" && row.agentId === child.id,
   );
   const buildRow = rows.find(
-    (row) => row.kind === "stage" && row.stage === "build",
+    (row): row is Extract<(typeof rows)[number], { kind: "stage" }> =>
+      row.kind === "stage" && row.stage === "build",
   );
   assert.ok(rootRow);
   assert.ok(childRow);
@@ -119,6 +227,22 @@ test("running glyph follows the active stage instead of the persistent root", ()
   assert.equal(glyphStatusForPipelineRow(childRow), "done");
   assert.equal(glyphStatusForPipelineRow(buildRow), "running");
   assert.equal(buildRow.label, "build · running");
+  assert.equal(buildRow.agentId, root.id);
+});
+
+test("feature final-resolve stage opens the persistent Sol agent", () => {
+  const root = agent("root-1", { status: "running" });
+  const run = {
+    ...pipelineRun("run-1", [root]),
+    stage: "final-resolve" as const,
+  };
+  const finalResolve = buildPipelineRows([run], new Set([run.id])).find(
+    (row): row is Extract<PipelineRow, { kind: "stage" }> =>
+      row.kind === "stage" && row.stage === "final-resolve",
+  );
+
+  assert.ok(finalResolve);
+  assert.equal(agentIdForPipelineRow(finalResolve), root.id);
 });
 
 test("dashboard lists all definitions and nests runs under the selected definition", () => {
@@ -190,7 +314,7 @@ test("small-feature dashboard shows only its fixed stages and child placement", 
     ),
     stage: "final-resolve" as const,
   };
-  const rows = buildPipelineRows([run]);
+  const rows = buildPipelineRows([run], new Set(["run-1"]));
   const stages = rows
     .filter(
       (row): row is Extract<(typeof rows)[number], { kind: "stage" }> =>
@@ -215,10 +339,20 @@ test("small-feature dashboard shows only its fixed stages and child placement", 
       ?.key.includes(":final-audit:"),
     true,
   );
+  const finalResolve = rows.find(
+    (row): row is Extract<(typeof rows)[number], { kind: "stage" }> =>
+      row.kind === "stage" && row.stage === "final-resolve",
+  );
+  assert.ok(finalResolve);
+  assert.equal(finalResolve.agentId, implementer.id);
+  assert.equal(agentIdForPipelineRow(finalResolve), implementer.id);
 });
 
 test("pipeline selection follows a stable nested row and reconciles removal", () => {
-  const rows = buildPipelineRows([pipelineRun("run-1", [agent("root-1")])]);
+  const rows = buildPipelineRows(
+    [pipelineRun("run-1", [agent("root-1")])],
+    new Set(["run-1"]),
+  );
   const target = rows.find(
     (row) => row.kind === "stage" && row.stage === "audit",
   );
@@ -228,10 +362,13 @@ test("pipeline selection follows a stable nested row and reconciles removal", ()
     index: rows.indexOf(target),
   };
 
-  const withNewRun = buildPipelineRows([
-    pipelineRun("run-2", [agent("root-2", { scopeId: "run-2" })]),
-    pipelineRun("run-1", [agent("root-1")]),
-  ]);
+  const withNewRun = buildPipelineRows(
+    [
+      pipelineRun("run-2", [agent("root-2", { scopeId: "run-2" })]),
+      pipelineRun("run-1", [agent("root-1")]),
+    ],
+    new Set(["run-1"]),
+  );
   reconcilePipelineSelection(selection, withNewRun);
   assert.equal(selection.key, target.key);
   assert.equal(withNewRun[selection.index]?.key, target.key);
