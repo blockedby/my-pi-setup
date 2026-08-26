@@ -22,6 +22,7 @@ import {
   SMALL_FEATURE_PIPELINE_ID,
   SOL_MODEL,
   TERRA_MODEL,
+  childContextPolicyFor,
   definitionFor,
   initialStageForDefinition,
   modelForRole,
@@ -520,25 +521,16 @@ export class PipelineController {
       }
     }
     const attempt = priorAttempts.length + 1;
-    const receivesGitEvidence =
-      (run.definition === FEATURE_PIPELINE_ID &&
-        (role.startsWith("audit-") || role === "final-audit")) ||
-      (run.definition === SMALL_FEATURE_PIPELINE_ID &&
-        role === "audit-small-feature");
-    const gitEvidence = receivesGitEvidence
-      ? this.gitEvidence(runId)
+    const contextPolicy = childContextPolicyFor(run.definition, role);
+    const priorReportRole = contextPolicy.priorReportRole;
+    const priorReport = priorReportRole
+      ? this.agentsFor(runId).find((agent) => agent.role === priorReportRole)
       : undefined;
     const promptContext = [
-      ...(run.definition === SMALL_FEATURE_PIPELINE_ID &&
-      role === "audit-small-feature"
-        ? [
-            "Luna implementation report:",
-            this.agentsFor(runId).find(
-              (agent) => agent.role === "implement-small-feature",
-            )?.finalText ?? "",
-          ]
+      ...(priorReport && priorReportRole
+        ? [`${titleForRole(priorReportRole)} report:`, priorReport.finalText]
         : []),
-      gitEvidence ?? "",
+      ...(contextPolicy.gitEvidence ? [this.gitEvidence(runId)] : []),
       additionalContext,
     ]
       .filter((item) => item.trim())

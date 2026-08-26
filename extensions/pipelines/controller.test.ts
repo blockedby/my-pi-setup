@@ -14,14 +14,19 @@ import { PipelineController } from "./controller.ts";
 import { pipelineSessionToolPolicy } from "./session.ts";
 import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
+  FEATURE_PIPELINE_LUNA_AUDIT_ROLES,
+  FINAL_AUDIT_ROLE,
   LUNA_MODEL,
   PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_AUDIT_ROLES,
   PLAN_PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
+  SMALL_FEATURE_AUDIT_ROLE,
+  SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SOL_MODEL,
   TERRA_MODEL,
+  childContextPolicyFor,
   type PipelineChildRole,
   type PipelineHandoff,
 } from "./domain.ts";
@@ -338,6 +343,29 @@ test("root tools are run-scoped and children have coding tools without orchestra
   await run.controller.dispose();
 });
 
+test("definition role policies centralize child context requirements", () => {
+  for (const role of [...FEATURE_PIPELINE_LUNA_AUDIT_ROLES, FINAL_AUDIT_ROLE]) {
+    assert.deepEqual(childContextPolicyFor("feature-pipeline", role), {
+      gitEvidence: true,
+    });
+  }
+  assert.deepEqual(
+    childContextPolicyFor("small-feature-pipeline", SMALL_FEATURE_AUDIT_ROLE),
+    {
+      gitEvidence: true,
+      priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
+    },
+  );
+  assert.deepEqual(
+    childContextPolicyFor("feature-pipeline", "discover-problem"),
+    {},
+  );
+  assert.deepEqual(
+    childContextPolicyFor("plan-pipeline", "audit-decomposition-dag"),
+    {},
+  );
+});
+
 test("small-feature Sol and Terra are read-only while Luna keeps coding tools", () => {
   const rootDenied = new Set<string>(
     pipelineSessionToolPolicy("small-feature-pipeline", true, "pipeline-root")
@@ -621,13 +649,12 @@ test("feature Luna audits and final Terra receive fresh base-relative Git eviden
   await settleInitialization();
   fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "after\n");
   run.controller.setStage(runId, "audit");
-  const auditRoles = PIPELINE_CHILD_ROLES.filter((role) =>
-    role.startsWith("audit-"),
-  );
   await Promise.all(
-    auditRoles.map((role) => run.controller.spawnChild(runId, role)),
+    FEATURE_PIPELINE_LUNA_AUDIT_ROLES.map((role) =>
+      run.controller.spawnChild(runId, role),
+    ),
   );
-  for (const role of auditRoles) {
+  for (const role of FEATURE_PIPELINE_LUNA_AUDIT_ROLES) {
     const lunaAudit = run.sessions.find(
       (session) => session.spec.role === role,
     );
