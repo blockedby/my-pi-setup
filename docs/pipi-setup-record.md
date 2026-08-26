@@ -900,4 +900,5 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Review:** Independent Terra initial review returned `READY` with no actionable introduced or regressed findings.
 - **Pull request:** Opened [PR #27](https://github.com/blockedby/my-pi-setup/pull/27) from `fix/pipi-branding` to `main`. Rebased onto the latest `origin/main`; the only conflict was this operation record, resolved by retaining the merged 0.84.3 rollout facts and the branding entry.
 - **Post-rebase verification:** The target preparation helper required regression reruns because of the resolved conflict. Fresh checks again passed 30/30 installer tests, 180/180 deterministic extension tests, 22/22 file-search tests, exact submodule validation, TypeScript, formatting, `git diff --check`, and the installed branded-runtime check.
-- **Pending:** Force-push the refreshed branch with lease, then review/merge PR #27 and reload or restart this current Pipi session before visually checking the new PIPI welcome header.
+- **Publish:** Force-pushed the rebased branch with lease; PR #27 now points to the reviewed, post-rebase implementation and evidence.
+- **Pending:** Review/merge PR #27 and reload or restart this current Pipi session before visually checking the new PIPI welcome header.
