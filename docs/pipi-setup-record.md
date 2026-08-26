@@ -923,4 +923,5 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Pull request:** Committed the implementation as `f513a85`, pushed `feat/small-feature-pipeline`, and opened [PR #29](https://github.com/blockedby/my-pi-setup/pull/29) against `main`.
 - **Target preparation:** Rebased onto `origin/main` after branding PRs #27/#28. The only conflict was this append-only operation record; resolved it by retaining the complete merged branding history and this small-feature entry. The rebased implementation commit is `b5c396b`.
 - **Post-rebase verification:** Fresh checks passed 30/30 installer tests, 187/187 deterministic extension tests, 22/22 file-search tests, exact submodule validation, aligned Pipi 0.84.3 metadata, TypeScript, formatting, and `git diff --check`.
-- **Pending:** Commit this post-rebase evidence, force-push the rebased branch with lease, and leave PR #29 open for review. Do not merge or install unless separately requested.
+- **Publish:** Committed the post-rebase evidence and force-pushed the rebased branch with lease; PR #29 now targets current `main` with a clean worktree and the verified graph implementation.
+- **Pending:** Review PR #29. Do not merge or install unless separately requested.
