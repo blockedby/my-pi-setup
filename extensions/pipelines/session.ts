@@ -14,11 +14,18 @@ import {
   pipelineRootToolPolicy,
   planPipelineChildToolPolicy,
   planPipelineRootToolPolicy,
+  readOnlyPipelineChildToolPolicy,
+  readOnlyPipelineRootToolPolicy,
   resolveStandaloneChildProjectTrust,
   shutdownAndDisposeChildSession,
+  smallFeatureImplementerToolPolicy,
 } from "../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
-import { PLAN_PIPELINE_ID, type PipelineDefinitionId } from "./domain.ts";
+import {
+  PLAN_PIPELINE_ID,
+  SMALL_FEATURE_PIPELINE_ID,
+  type PipelineDefinitionId,
+} from "./domain.ts";
 import type {
   AgentNodeSpec,
   AgentTreeSessionEvent,
@@ -102,6 +109,27 @@ function lastAssistant(session: AgentSession) {
     if (message.role === "assistant") return message;
   }
   return undefined;
+}
+
+export function pipelineSessionToolPolicy(
+  definition: PipelineDefinitionId,
+  isRoot: boolean,
+  role: string,
+) {
+  if (isRoot) {
+    if (definition === PLAN_PIPELINE_ID) return planPipelineRootToolPolicy();
+    if (definition === SMALL_FEATURE_PIPELINE_ID) {
+      return readOnlyPipelineRootToolPolicy();
+    }
+    return pipelineRootToolPolicy();
+  }
+  if (definition === PLAN_PIPELINE_ID) return planPipelineChildToolPolicy();
+  if (definition === SMALL_FEATURE_PIPELINE_ID) {
+    return role === "audit-small-feature"
+      ? readOnlyPipelineChildToolPolicy()
+      : smallFeatureImplementerToolPolicy();
+  }
+  return childToolPolicy();
 }
 
 function finalText(session: AgentSession) {
@@ -206,7 +234,6 @@ export function createPipelineSessionFactory(
       });
       const isRoot = !spec.parentId;
       const definition = options.definitionForRun(spec.scopeId ?? "");
-      const isPlan = definition === PLAN_PIPELINE_ID;
       const customTools = isRoot
         ? options.rootTools(spec.scopeId ?? "")
         : undefined;
@@ -222,13 +249,7 @@ export function createPipelineSessionFactory(
         settingsManager: resources.settingsManager,
         resourceLoader: resources.loader,
         ...(customTools ? { customTools: [...customTools] } : {}),
-        ...(isRoot
-          ? isPlan
-            ? planPipelineRootToolPolicy()
-            : pipelineRootToolPolicy()
-          : isPlan
-            ? planPipelineChildToolPolicy()
-            : childToolPolicy()),
+        ...pipelineSessionToolPolicy(definition, isRoot, spec.role),
       });
       try {
         await bindChildSessionExtensions(session);

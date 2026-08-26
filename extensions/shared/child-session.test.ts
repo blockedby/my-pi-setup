@@ -21,8 +21,11 @@ import {
   pipelineRootToolPolicy,
   planPipelineChildToolPolicy,
   planPipelineRootToolPolicy,
+  readOnlyPipelineChildToolPolicy,
+  readOnlyPipelineRootToolPolicy,
   resolveStandaloneChildProjectTrust,
   shutdownAndDisposeChildSession,
+  smallFeatureImplementerToolPolicy,
   type DisposableChildSession,
 } from "./child-session.ts";
 
@@ -210,6 +213,36 @@ test("pipeline root policy denies outer orchestration but keeps run-scoped tools
     assert.equal(active.has("pipeline_run"), false);
     await shutdownAndDisposeChildSession(session);
   });
+});
+
+test("small-feature policies isolate read-only roles and keep Luna workspace tools", () => {
+  const rootDenied = new Set<string>(
+    readOnlyPipelineRootToolPolicy().excludeTools,
+  );
+  const auditorDenied = new Set<string>(
+    readOnlyPipelineChildToolPolicy().excludeTools,
+  );
+  const implementerDenied = new Set<string>(
+    smallFeatureImplementerToolPolicy().excludeTools,
+  );
+  for (const workspaceMutator of ["bash", "edit", "write"]) {
+    assert.equal(rootDenied.has(workspaceMutator), true);
+    assert.equal(auditorDenied.has(workspaceMutator), true);
+    assert.equal(implementerDenied.has(workspaceMutator), false);
+  }
+  for (const delegatedOrExternalMutator of [
+    "apply_patch_codex",
+    "bg_start",
+    "bg_kill",
+    "codex_task",
+    "mcp",
+  ]) {
+    assert.equal(rootDenied.has(delegatedOrExternalMutator), true);
+    assert.equal(auditorDenied.has(delegatedOrExternalMutator), true);
+    assert.equal(implementerDenied.has(delegatedOrExternalMutator), true);
+  }
+  assert.equal(rootDenied.has("pipeline_child_spawn"), false);
+  assert.equal(auditorDenied.has("pipeline_child_spawn"), true);
 });
 
 test("plan pipeline policies deny mutators and keep bounded root plan tools", () => {

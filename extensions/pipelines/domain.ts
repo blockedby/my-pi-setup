@@ -1,9 +1,11 @@
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 
 export const FEATURE_PIPELINE_ID = "feature-pipeline" as const;
+export const SMALL_FEATURE_PIPELINE_ID = "small-feature-pipeline" as const;
 export const PLAN_PIPELINE_ID = "plan-pipeline" as const;
 export const PIPELINE_DEFINITION_IDS = [
   FEATURE_PIPELINE_ID,
+  SMALL_FEATURE_PIPELINE_ID,
   PLAN_PIPELINE_ID,
 ] as const;
 export type PipelineDefinitionId = (typeof PIPELINE_DEFINITION_IDS)[number];
@@ -23,6 +25,13 @@ export const PIPELINE_STAGES = [
 ] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 
+export const SMALL_FEATURE_PIPELINE_STAGES = [
+  "build",
+  "final-audit",
+  "final-resolve",
+  "complete",
+] as const satisfies ReadonlyArray<PipelineStage>;
+
 export const FEATURE_PIPELINE_CHILD_ROLES = [
   "discover-problem",
   "discover-outcome",
@@ -34,6 +43,11 @@ export const FEATURE_PIPELINE_CHILD_ROLES = [
   "audit-functional-correctness",
   "audit-reliability-regressions",
   "final-audit",
+] as const;
+
+export const SMALL_FEATURE_PIPELINE_CHILD_ROLES = [
+  "implement-small-feature",
+  "audit-small-feature",
 ] as const;
 
 export const PLAN_PIPELINE_DISCOVERY_ROLES = [
@@ -61,9 +75,13 @@ export const PLAN_PIPELINE_CHILD_ROLES = [
 export const PIPELINE_CHILD_ROLES = FEATURE_PIPELINE_CHILD_ROLES;
 export type FeaturePipelineChildRole =
   (typeof FEATURE_PIPELINE_CHILD_ROLES)[number];
+export type SmallFeaturePipelineChildRole =
+  (typeof SMALL_FEATURE_PIPELINE_CHILD_ROLES)[number];
 export type PlanPipelineChildRole = (typeof PLAN_PIPELINE_CHILD_ROLES)[number];
 export type PipelineChildRole =
-  FeaturePipelineChildRole | PlanPipelineChildRole;
+  | FeaturePipelineChildRole
+  | SmallFeaturePipelineChildRole
+  | PlanPipelineChildRole;
 
 export interface PipelineDefinition {
   readonly id: PipelineDefinitionId;
@@ -80,6 +98,12 @@ export const PIPELINE_DEFINITIONS: ReadonlyArray<PipelineDefinition> = [
     childRoles: FEATURE_PIPELINE_CHILD_ROLES,
   },
   {
+    id: SMALL_FEATURE_PIPELINE_ID,
+    title: "Small feature pipeline",
+    rootTitle: "Small feature pipeline Sol",
+    childRoles: SMALL_FEATURE_PIPELINE_CHILD_ROLES,
+  },
+  {
     id: PLAN_PIPELINE_ID,
     title: "Plan pipeline",
     rootTitle: "Plan pipeline Sol",
@@ -92,9 +116,23 @@ export function definitionFor(id: PipelineDefinitionId) {
 }
 
 export function rolesForDefinition(id: PipelineDefinitionId) {
-  return id === FEATURE_PIPELINE_ID
-    ? FEATURE_PIPELINE_CHILD_ROLES
-    : PLAN_PIPELINE_CHILD_ROLES;
+  if (id === FEATURE_PIPELINE_ID) return FEATURE_PIPELINE_CHILD_ROLES;
+  if (id === SMALL_FEATURE_PIPELINE_ID) {
+    return SMALL_FEATURE_PIPELINE_CHILD_ROLES;
+  }
+  return PLAN_PIPELINE_CHILD_ROLES;
+}
+
+export function stagesForDefinition(
+  id: PipelineDefinitionId,
+): ReadonlyArray<PipelineStage> {
+  return id === SMALL_FEATURE_PIPELINE_ID
+    ? SMALL_FEATURE_PIPELINE_STAGES
+    : PIPELINE_STAGES;
+}
+
+export function initialStageForDefinition(id: PipelineDefinitionId) {
+  return id === SMALL_FEATURE_PIPELINE_ID ? "build" : "discover";
 }
 
 export function roleBelongsToDefinition(
@@ -150,7 +188,9 @@ export interface PipelineHandoff {
 }
 
 export function modelForRole(role: PipelineChildRole) {
-  return role === "final-audit" ? TERRA_MODEL : LUNA_MODEL;
+  return role === "final-audit" || role === "audit-small-feature"
+    ? TERRA_MODEL
+    : LUNA_MODEL;
 }
 
 export function titleForRole(role: PipelineChildRole) {

@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { PLAN_PIPELINE_ID, type PipelineDefinitionId } from "./domain.ts";
+import {
+  PLAN_PIPELINE_ID,
+  SMALL_FEATURE_PIPELINE_ID,
+  type PipelineDefinitionId,
+} from "./domain.ts";
 
 export const PLAN_REQUIRED_SECTIONS = [
   "Goal and non-goals",
@@ -381,6 +385,27 @@ function validUnprovenCheck(value: unknown) {
   );
 }
 
+function validImplementationReport(report: Record<string, unknown>) {
+  const validStrings = (value: unknown, minimum = 0) =>
+    Array.isArray(value) &&
+    value.length >= minimum &&
+    value.every((item) => nonEmptyString(item));
+  return (
+    exactKeys(report, [
+      "summary",
+      "changedPaths",
+      "checks",
+      "assumptions",
+      "unresolvedItems",
+    ]) &&
+    nonEmptyString(report.summary) &&
+    validStrings(report.changedPaths, 1) &&
+    validStrings(report.checks, 1) &&
+    validStrings(report.assumptions) &&
+    validStrings(report.unresolvedItems)
+  );
+}
+
 function validLunaAuditReport(report: Record<string, unknown>) {
   return (
     exactKeys(report, ["track", "findings", "unprovenChecks"]) &&
@@ -510,9 +535,29 @@ export function validatePipelineReport(
   role: string,
   text: string,
 ) {
-  if (definition !== PLAN_PIPELINE_ID) return [];
+  if (
+    definition !== PLAN_PIPELINE_ID &&
+    definition !== SMALL_FEATURE_PIPELINE_ID
+  ) {
+    return [];
+  }
   const report = parseJsonReport(text);
   if (!isRecord(report)) return ["Report must be exactly one JSON object."];
+
+  if (definition === SMALL_FEATURE_PIPELINE_ID) {
+    if (role === "implement-small-feature") {
+      return validImplementationReport(report)
+        ? []
+        : [
+            "Implementation report must contain exactly a non-empty summary, non-empty changedPaths and checks string arrays, plus assumptions and unresolvedItems string arrays.",
+          ];
+    }
+    return role === "audit-small-feature" && validCanonicalInitialReview(report)
+      ? []
+      : [
+          "Small-feature audit must use the complete canonical initial-review JSON result schema.",
+        ];
+  }
 
   if (role.startsWith("discover-")) {
     return validDiscoveryReport(report)

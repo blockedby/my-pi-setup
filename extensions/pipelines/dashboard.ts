@@ -13,7 +13,7 @@ import { openAgentTakeover } from "../shared/agent-tree/takeover.ts";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import {
   PIPELINE_DEFINITIONS,
-  PIPELINE_STAGES,
+  stagesForDefinition,
   type PipelineRunSnapshot,
   type PipelineStage,
 } from "./domain.ts";
@@ -53,6 +53,8 @@ export type PipelineRow =
     };
 
 function childStage(role: string): PipelineStage {
+  if (role === "implement-small-feature") return "build";
+  if (role === "audit-small-feature") return "final-audit";
   if (role.startsWith("discover-")) return "discover";
   if (role.startsWith("audit-")) return "audit";
   return "final-audit";
@@ -92,8 +94,9 @@ export function buildPipelineRows(runs: ReadonlyArray<PipelineRunSnapshot>) {
           status: root.status,
         });
       }
-      const currentStageIndex = PIPELINE_STAGES.indexOf(run.stage);
-      for (const [stageIndex, stage] of PIPELINE_STAGES.entries()) {
+      const stages = stagesForDefinition(run.definition);
+      const currentStageIndex = stages.indexOf(run.stage);
+      for (const [stageIndex, stage] of stages.entries()) {
         const stageStatus =
           stageIndex < currentStageIndex
             ? "done"

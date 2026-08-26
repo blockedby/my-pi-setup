@@ -41,6 +41,14 @@ export const CHILD_EXCLUDED_TOOL_NAMES = [
   ...PIPELINE_ORCHESTRATION_TOOL_NAMES,
 ] as const;
 
+export const SMALL_FEATURE_IMPLEMENTER_EXCLUDED_TOOL_NAMES = [
+  "apply_patch_codex",
+  "bg_start",
+  "bg_kill",
+  "codex_task",
+  "mcp",
+] as const;
+
 export const PLAN_PIPELINE_MUTATING_TOOL_NAMES = [
   "bash",
   "edit",
@@ -62,7 +70,16 @@ export function pipelineRootToolPolicy() {
   return { excludeTools: [...PIPELINE_ROOT_EXCLUDED_TOOL_NAMES] };
 }
 
-export function planPipelineRootToolPolicy() {
+export function smallFeatureImplementerToolPolicy() {
+  return {
+    excludeTools: [
+      ...CHILD_EXCLUDED_TOOL_NAMES,
+      ...SMALL_FEATURE_IMPLEMENTER_EXCLUDED_TOOL_NAMES,
+    ],
+  };
+}
+
+export function readOnlyPipelineRootToolPolicy() {
   return {
     excludeTools: [
       ...PIPELINE_ROOT_EXCLUDED_TOOL_NAMES,
@@ -71,13 +88,21 @@ export function planPipelineRootToolPolicy() {
   };
 }
 
-export function planPipelineChildToolPolicy() {
+export function readOnlyPipelineChildToolPolicy() {
   return {
     excludeTools: [
       ...CHILD_EXCLUDED_TOOL_NAMES,
       ...PLAN_PIPELINE_MUTATING_TOOL_NAMES,
     ],
   };
+}
+
+export function planPipelineRootToolPolicy() {
+  return readOnlyPipelineRootToolPolicy();
+}
+
+export function planPipelineChildToolPolicy() {
+  return readOnlyPipelineChildToolPolicy();
 }
 
 export interface ChildResourceOptions {

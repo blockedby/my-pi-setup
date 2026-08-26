@@ -18,12 +18,16 @@ import {
   PLAN_PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
+  SMALL_FEATURE_PIPELINE_CHILD_ROLES,
+  SMALL_FEATURE_PIPELINE_ID,
   SOL_MODEL,
   TERRA_MODEL,
   definitionFor,
+  initialStageForDefinition,
   modelForRole,
   roleBelongsToDefinition,
   rolesForDefinition,
+  stagesForDefinition,
   titleForRole,
   type PipelineChildRole,
   type PipelineCompletionFacts,
@@ -44,6 +48,7 @@ interface MutableRun {
   id: string;
   definition: PipelineDefinitionId;
   request: PipelineRunRequest;
+  baseSha: string;
   stage: PipelineStage;
   status: PipelineRunSnapshot["status"];
   startedAt: number;
@@ -55,6 +60,19 @@ interface MutableRun {
     string,
     { digest: string; device: number; inode: number }
   >;
+}
+
+function gitHead(workingDir: string) {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: workingDir,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return "UNAVAILABLE";
+  }
 }
 
 export interface PipelineControllerOptions {
@@ -185,7 +203,8 @@ export class PipelineController {
       id,
       definition: request.pipeline ?? FEATURE_PIPELINE_ID,
       request,
-      stage: "discover",
+      baseSha: gitHead(request.workingDir),
+      stage: initialStageForDefinition(request.pipeline ?? FEATURE_PIPELINE_ID),
       status: "starting",
       startedAt: Date.now(),
       planArtifactsWritten: new Map(),
@@ -250,12 +269,15 @@ export class PipelineController {
     this.notify();
   }
 
-  private failRun(run: MutableRun, error: string) {
+  private failRun(run: MutableRun, error: string, cancelRoot = false) {
     if (run.status !== "starting" && run.status !== "running") return;
     run.status = "failed";
     run.finishedAt = Date.now();
     run.error = error.slice(0, 16 * 1024);
     void this.cancelActiveChildren(run);
+    if (cancelRoot && run.rootId) {
+      void this.tree.cancel(run.rootId).catch(() => {});
+    }
     this.notify();
     this.deliver(run);
   }
@@ -314,6 +336,42 @@ export class PipelineController {
     run: MutableRun,
     waitedChildren: ReadonlyArray<AgentNodeSnapshot>,
   ) {
+    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+      const boundary =
+        run.stage === "build"
+          ? {
+              role: "implement-small-feature" as const,
+              nextStage: "final-audit" as const,
+            }
+          : run.stage === "final-audit"
+            ? {
+                role: "audit-small-feature" as const,
+                nextStage: "final-resolve" as const,
+              }
+            : run.stage === "final-resolve"
+              ? {
+                  role: "implement-small-feature" as const,
+                  nextStage: "complete" as const,
+                }
+              : undefined;
+      const waitedChild = boundary
+        ? waitedChildren.find((child) => child.role === boundary.role)
+        : undefined;
+      const remediationComplete =
+        run.stage !== "final-resolve" ||
+        (waitedChild !== undefined &&
+          this.childContinuations.get(waitedChild.id) === 1);
+      if (
+        boundary &&
+        waitedChild &&
+        remediationComplete &&
+        this.roleHasValidReport(run, boundary.role)
+      ) {
+        run.stage = boundary.nextStage;
+        this.notify();
+      }
+      return;
+    }
     const roles = rolesForDefinition(run.definition).filter((role) =>
       run.stage === "discover"
         ? role.startsWith("discover-")
@@ -346,7 +404,42 @@ export class PipelineController {
 
   setStage(runId: string, stage: PipelineStage) {
     const run = this.requireActiveRun(runId);
-    if (run.definition === PLAN_PIPELINE_ID) {
+    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+      const stages = stagesForDefinition(run.definition);
+      const currentIndex = stages.indexOf(run.stage);
+      const nextIndex = stages.indexOf(stage);
+      if (
+        nextIndex < 0 ||
+        nextIndex < currentIndex ||
+        nextIndex > currentIndex + 1
+      ) {
+        throw new Error(
+          `Invalid small-feature-pipeline stage transition: ${run.stage} to ${stage}.`,
+        );
+      }
+      if (stage === "final-audit") {
+        this.requireValidReports(run, ["implement-small-feature"], stage);
+      } else if (stage === "final-resolve") {
+        this.requireValidReports(run, ["audit-small-feature"], stage);
+      } else if (stage === "complete") {
+        if (
+          this.childContinuations.get(
+            this.agentsFor(runId).find(
+              (agent) => agent.role === "implement-small-feature",
+            )?.id ?? "",
+          ) !== 1
+        ) {
+          throw new Error(
+            "small-feature-pipeline completion requires one same-session Luna remediation pass.",
+          );
+        }
+        this.requireValidReports(
+          run,
+          SMALL_FEATURE_PIPELINE_CHILD_ROLES,
+          stage,
+        );
+      }
+    } else if (run.definition === PLAN_PIPELINE_ID) {
       const currentIndex = PIPELINE_STAGES.indexOf(run.stage);
       const nextIndex = PIPELINE_STAGES.indexOf(stage);
       if (nextIndex < currentIndex || nextIndex > currentIndex + 1) {
@@ -390,7 +483,20 @@ export class PipelineController {
     const priorAttempts = this.agentsFor(runId).filter(
       (agent) => agent.role === role,
     );
-    if (run.definition === PLAN_PIPELINE_ID) {
+    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+      const requiredStage =
+        role === "implement-small-feature" ? "build" : "final-audit";
+      if (run.stage !== requiredStage) {
+        throw new Error(
+          `${role} can only start during small-feature-pipeline stage ${requiredStage}.`,
+        );
+      }
+      if (priorAttempts.length > 0) {
+        throw new Error(
+          `small-feature-pipeline role ${role} already has its allowed child session.`,
+        );
+      }
+    } else if (run.definition === PLAN_PIPELINE_ID) {
       const requiredStage = role.startsWith("discover-")
         ? "discover"
         : role.startsWith("audit-")
@@ -414,6 +520,27 @@ export class PipelineController {
       }
     }
     const attempt = priorAttempts.length + 1;
+    const promptContext =
+      run.definition === SMALL_FEATURE_PIPELINE_ID &&
+      role === "audit-small-feature"
+        ? [
+            "Luna implementation report:",
+            this.agentsFor(runId).find(
+              (agent) => agent.role === "implement-small-feature",
+            )?.finalText ?? "",
+            "Workspace review base:",
+            run.baseSha,
+            "Workspace review head:",
+            "WORKTREE",
+            "Workspace Git status:",
+            this.gitStatus(runId),
+            "Workspace Git diff:",
+            this.gitDiff(runId),
+            additionalContext,
+          ]
+            .filter((item) => item.trim())
+            .join("\n")
+        : additionalContext;
     return this.tree.spawn({
       scopeId: runId,
       parentId: run.rootId,
@@ -426,8 +553,11 @@ export class PipelineController {
         run.definition,
         role,
         run.request,
-        additionalContext,
+        promptContext,
       ),
+      persistent:
+        run.definition === SMALL_FEATURE_PIPELINE_ID &&
+        role === "implement-small-feature",
     });
   }
 
@@ -457,6 +587,28 @@ export class PipelineController {
     }
     const children = await this.tree.wait(ids, signal);
     const run = this.requireRun(runId);
+    if (
+      run.definition === SMALL_FEATURE_PIPELINE_ID &&
+      (run.status === "starting" || run.status === "running")
+    ) {
+      const invalid = children.find((child) => {
+        if (child.status === "error" || child.status === "cancelled") {
+          return true;
+        }
+        return (
+          validatePipelineReport(run.definition, child.role, child.finalText)
+            .length > 0
+        );
+      });
+      if (invalid) {
+        this.failRun(
+          run,
+          `small-feature-pipeline child ${invalid.role} did not complete with a valid report.`,
+          true,
+        );
+        return children;
+      }
+    }
     if (run.status === "starting" || run.status === "running") {
       this.advanceStageAfterFanIn(run, children);
     }
@@ -467,7 +619,29 @@ export class PipelineController {
     const run = this.requireActiveRun(runId);
     const agent = this.getAgent(runId, id);
     if (!agent.parentId) throw new Error(`Agent "${id}" is the pipeline root.`);
-    if (run.definition === PLAN_PIPELINE_ID) {
+    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+      if (agent.role !== "implement-small-feature") {
+        throw new Error(
+          "small-feature-pipeline Terra audit cannot be retried or continued.",
+        );
+      }
+      if (run.stage !== "final-resolve") {
+        throw new Error(
+          "small-feature-pipeline Luna remediation can only run during final-resolve.",
+        );
+      }
+      this.requireValidReports(run, ["audit-small-feature"], run.stage);
+      if (agent.status !== "idle") {
+        throw new Error(
+          "small-feature-pipeline Luna must be idle before remediation.",
+        );
+      }
+      if ((this.childContinuations.get(id) ?? 0) >= 1) {
+        throw new Error(
+          "small-feature-pipeline Luna already completed its remediation pass.",
+        );
+      }
+    } else if (run.definition === PLAN_PIPELINE_ID) {
       if (agent.role === "final-audit") {
         throw new Error("plan-pipeline final-audit cannot be retried.");
       }
@@ -489,8 +663,22 @@ export class PipelineController {
         );
       }
     }
-    await this.tree.send(id, text);
-    if (run.definition === PLAN_PIPELINE_ID) {
+    const continuationText =
+      run.definition === SMALL_FEATURE_PIPELINE_ID
+        ? [
+            "Independent Terra audit to resolve:",
+            this.agentsFor(runId).find(
+              (candidate) => candidate.role === "audit-small-feature",
+            )?.finalText ?? "",
+            "Sol remediation instruction:",
+            text,
+          ].join("\n")
+        : text;
+    await this.tree.send(id, continuationText);
+    if (
+      run.definition === PLAN_PIPELINE_ID ||
+      run.definition === SMALL_FEATURE_PIPELINE_ID
+    ) {
       this.childContinuations.set(
         id,
         (this.childContinuations.get(id) ?? 0) + 1,
@@ -544,6 +732,26 @@ export class PipelineController {
     }
   }
 
+  private gitDiff(runId: string) {
+    const run = this.requireActiveRun(runId);
+    try {
+      const revision = run.baseSha === "UNAVAILABLE" ? [] : [run.baseSha];
+      return execFileSync(
+        "git",
+        ["diff", "--no-ext-diff", "--no-color", ...revision, "--"],
+        {
+          cwd: run.request.workingDir,
+          encoding: "utf8",
+          maxBuffer: 128 * 1024,
+        },
+      )
+        .trim()
+        .slice(0, 64 * 1024);
+    } catch (error) {
+      return `Git diff unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
   complete(runId: string, facts: PipelineCompletionFacts) {
     const run = this.requireActiveRun(runId);
     const activeChildren = this.agentsFor(runId).filter(
@@ -562,7 +770,18 @@ export class PipelineController {
       );
     }
     let completion = facts;
-    if (run.definition === PLAN_PIPELINE_ID) {
+    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+      if (run.stage !== "complete") {
+        throw new Error(
+          "small-feature-pipeline must finish same-session Luna remediation before completion.",
+        );
+      }
+      this.requireValidReports(
+        run,
+        SMALL_FEATURE_PIPELINE_CHILD_ROLES,
+        "complete",
+      );
+    } else if (run.definition === PLAN_PIPELINE_ID) {
       if (run.stage !== "complete") {
         throw new Error("plan-pipeline must enter complete before completion.");
       }
@@ -653,7 +872,9 @@ export class PipelineController {
         name: "pipeline_stage",
         label: "Pipeline Stage",
         description: `Record the current ${run.definition} stage.`,
-        parameters: Type.Object({ stage: StringEnum(PIPELINE_STAGES) }),
+        parameters: Type.Object({
+          stage: StringEnum(stagesForDefinition(run.definition)),
+        }),
         async execute(_id, params) {
           const run = controller.setStage(runId, params.stage);
           return {
