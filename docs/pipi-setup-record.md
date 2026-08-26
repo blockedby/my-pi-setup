@@ -839,6 +839,14 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Verification:** Explanation was grounded in the implemented controller/session/tool contracts and the completed 12-session live acceptance that produced a valid 22-task frontend/backend/DevOps/test plan without product-code mutation.
 - **Pending:** Reload/restart Pipi before interactive use; review PR #23.
 
+## Operation entry: clarify automatic plan-pipeline routing
+
+- **Request:** Clarify whether the main agent understands when the planning pipeline is appropriate and what criteria trigger it.
+- **Action:** Explained the implemented model-facing routing guidance and distinguished semantic main-agent selection from host-enforced contracts. The current hard semantic signal is an explicit `plan-pipeline` request or a requested durable audited implementation plan; nontriviality/cross-layer scope is a model judgment rather than a host-side classifier. Bugs, refactors, research-only work, trivial edits, and direct implementation outcomes are intentionally routed elsewhere. No prompt, runtime, tool schema, pipeline, model backend, configuration, commit, push, or external state was changed.
+- **Affected paths or values:** This operation record only; product/runtime behavior, credentials, model overrides, dependencies, and submodules are unchanged.
+- **Verification:** Compared the explanation with the implemented `pipeline_run` description/guidelines and bounded selector contract in `extensions/pipelines/index.ts`.
+- **Pending:** Superseded by the approved routing-guidance update recorded below; reload/restart Pipi before interactive use and review PR #23.
+
 ## Operation entry: publish pipeline stage-status correction to PR
 
 - **Request:** Open a pull request for the pipeline stage-status correction.
@@ -854,3 +862,12 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** GitHub PR #23, local/remote `main` at `9cf2e50`, dependencies refreshed under the primary checkout, managed launcher `/home/kcnc/.local/bin/pipi`, Pipi settings under `~/.pipi/agent/settings.json`, and this operation record. Installed Pipi remains 0.84.2 with MCP 2.15.0.
 - **Verification:** GitHub reports PR #23 merged. The target sync helper reported `sync_status=fast_forwarded` with no stash. `pipi list` now contains `/home/kcnc/code/tools/pipi-alias` and no pipelines feature-worktree duplicate. `npm run check:pipi-install` passed; `pipi --version` returned 0.84.2; the isolated runtime has no unreviewed install scripts. Fresh post-merge pipeline tests passed 22/22, followed by TypeScript and formatting checks.
 - **Pending:** Reload or restart the currently running Pipi session before visually confirming the merged dashboard behavior. Feature-worktree cleanup remains deferred because it contains an unrelated uncommitted operation-log entry.
+
+## Operation entry: strengthen automatic pipeline routing criteria
+
+- **Request:** Make the plan-pipeline launch criteria explicit for the main agent.
+- **Action:** Revised the `pipeline_run` model-facing guidance with selection precedence and observable routing signals. Explicit pipeline requests are honored. Automatic `plan-pipeline` routing now requires a planning deliverable plus at least one complexity signal: two or more frontend/backend/data/DevOps/runtime layers; migration, rollout, rollback, operational-readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies requiring repository discovery. Cross-layer implementation requests remain `feature-pipeline`; bugs, refactors, research-only work, and trivial edits use neither; ambiguous plan-versus-implementation intent requires clarification. Added the same concise routing contract to README. No host-side semantic classifier or exact prompt-wording test was added.
+- **Affected paths or values:** `extensions/pipelines/index.ts`, `README.md`, this operation record, and follow-up branch `feat/pipeline-routing-criteria`. Pipeline schemas, graphs, models, quotas, runtime installation, credentials, model overrides, dependencies, and submodules are unchanged. PR #23 had already merged as `9cf2e50`; while preparing the follow-up, `origin/main` advanced again to the merge/install record `bcc9786`, so the operation histories were combined and the routing change remains isolated above current `main`.
+- **Verification:** Before and after the target refresh, focused pipeline tool-contract tests passed 3/3, the full deterministic extension suite passed 178/178, and TypeScript, formatting, and `git diff --check` passed. The branch-preparation conflict was limited to combining the newer merge/install operation record with this entry; README and routing guidance replayed without conflict. No live backend evaluation was needed for this bounded guidance change.
+- **Pull request:** Prepared and pushed `feat/pipeline-routing-criteria`, then opened [PR #24](https://github.com/blockedby/my-pi-setup/pull/24) against current `main`.
+- **Pending:** Review and merge PR #24, reinstall or synchronize the primary package if needed, then reload/restart Pipi so the main agent receives the revised tool guidance.
