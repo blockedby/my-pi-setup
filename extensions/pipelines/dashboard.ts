@@ -15,6 +15,7 @@ import {
   PIPELINE_DEFINITIONS,
   stagesForDefinition,
   type PipelineRunSnapshot,
+  type PipelineRunStatus,
   type PipelineStage,
 } from "./domain.ts";
 import type { PipelineController } from "./controller.ts";
@@ -32,6 +33,8 @@ export type PipelineRow =
       readonly depth: 1;
       readonly label: string;
       readonly runId: string;
+      readonly status: PipelineRunStatus;
+      readonly expanded: boolean;
     }
   | {
       readonly key: string;
@@ -41,6 +44,7 @@ export type PipelineRow =
       readonly runId: string;
       readonly stage: PipelineStage;
       readonly status: "pending" | "running" | "done" | "failed" | "cancelled";
+      readonly agentId?: string;
     }
   | {
       readonly key: string;
@@ -60,7 +64,43 @@ function childStage(role: string): PipelineStage {
   return "final-audit";
 }
 
-export function buildPipelineRows(runs: ReadonlyArray<PipelineRunSnapshot>) {
+function latestAgentId(agents: ReadonlyArray<AgentNodeSnapshot>) {
+  return (
+    agents.filter((agent) => agent.status === "running").at(-1) ?? agents.at(-1)
+  )?.id;
+}
+
+function stageAgentId(
+  run: PipelineRunSnapshot,
+  stage: PipelineStage,
+  root: AgentNodeSnapshot | undefined,
+  children: ReadonlyArray<AgentNodeSnapshot>,
+) {
+  const matchingChild = latestAgentId(
+    children.filter((agent) => childStage(agent.role) === stage),
+  );
+  if (matchingChild) return matchingChild;
+  if (run.definition === "small-feature-pipeline") {
+    if (stage !== "final-resolve") return undefined;
+    return latestAgentId(
+      children.filter((agent) => agent.role === "implement-small-feature"),
+    );
+  }
+  if (
+    stage === "build" ||
+    stage === "audit-resolve" ||
+    stage === "final-resolve" ||
+    stage === "complete"
+  ) {
+    return root?.id;
+  }
+  return undefined;
+}
+
+export function buildPipelineRows(
+  runs: ReadonlyArray<PipelineRunSnapshot>,
+  expandedRunIds: ReadonlySet<string> = new Set(),
+) {
   const rows: PipelineRow[] = [];
   for (const definition of PIPELINE_DEFINITIONS) {
     rows.push({
@@ -70,13 +110,17 @@ export function buildPipelineRows(runs: ReadonlyArray<PipelineRunSnapshot>) {
       label: definition.id,
     });
     for (const run of runs.filter((run) => run.definition === definition.id)) {
+      const expanded = expandedRunIds.has(run.id);
       rows.push({
         key: `run:${run.id}`,
         kind: "run",
         depth: 1,
-        label: `${run.id} · ${run.status} · ${run.workingDir}`,
+        label: `${expanded ? "▾" : "▸"} ${run.id} · ${run.status} · ${run.workingDir}`,
         runId: run.id,
+        status: run.status,
+        expanded,
       });
+      if (!expanded) continue;
       const root = run.rootId
         ? run.agents.find((agent) => agent.id === run.rootId)
         : undefined;
@@ -115,6 +159,7 @@ export function buildPipelineRows(runs: ReadonlyArray<PipelineRunSnapshot>) {
           runId: run.id,
           stage,
           status: stageStatus,
+          agentId: stageAgentId(run, stage, root, children),
         });
         for (const child of children.filter(
           (agent) => childStage(agent.role) === stage,
@@ -171,7 +216,28 @@ export function reconcilePipelineSelection(
   selection.key = rows[selection.index]?.key;
 }
 
+export function agentIdForPipelineRow(row: PipelineRow) {
+  if (row.kind === "agent" || row.kind === "stage") return row.agentId;
+  return undefined;
+}
+
+export function togglePipelineRunExpansion(
+  expandedRunIds: Set<string>,
+  row: PipelineRow,
+) {
+  if (row.kind !== "run") return false;
+  if (row.expanded) expandedRunIds.delete(row.runId);
+  else expandedRunIds.add(row.runId);
+  return true;
+}
+
 export function glyphStatusForPipelineRow(row: PipelineRow) {
+  if (row.kind === "run") {
+    if (row.status === "completed") return "done";
+    if (row.status === "failed") return "error";
+    if (row.status === "cancelled") return "cancelled";
+    return "running";
+  }
   if (row.kind === "stage") {
     if (row.status === "failed") return "error";
     if (row.status === "running" || row.status === "cancelled")
@@ -194,6 +260,7 @@ class PipelineDashboard implements Component {
   private readonly keybindings: KeybindingsManager;
   private readonly controller: PipelineController;
   private readonly selection: PipelineSelection;
+  private readonly expandedRunIds: Set<string>;
   private readonly done: (value: string | null) => void;
   private readonly unsubscribe: () => void;
   private readonly ticker: ReturnType<typeof setInterval>;
@@ -205,6 +272,7 @@ class PipelineDashboard implements Component {
     keybindings: KeybindingsManager,
     controller: PipelineController,
     selection: PipelineSelection,
+    expandedRunIds: Set<string>,
     done: (value: string | null) => void,
   ) {
     this.tui = tui;
@@ -212,13 +280,14 @@ class PipelineDashboard implements Component {
     this.keybindings = keybindings;
     this.controller = controller;
     this.selection = selection;
+    this.expandedRunIds = expandedRunIds;
     this.done = done;
     this.unsubscribe = controller.subscribe(() => tui.requestRender());
     this.ticker = setInterval(() => tui.requestRender(), 1_000);
   }
 
   private rows() {
-    return buildPipelineRows(this.controller.list());
+    return buildPipelineRows(this.controller.list(), this.expandedRunIds);
   }
 
   private cleanup() {
@@ -264,7 +333,20 @@ class PipelineDashboard implements Component {
     }
     const selected = rows[this.selection.index];
     if (this.keybindings.matches(data, "tui.select.confirm")) {
-      if (selected?.kind === "agent") this.close(selected.agentId);
+      const selectedAgentId = selected
+        ? agentIdForPipelineRow(selected)
+        : undefined;
+      if (selectedAgentId) {
+        this.close(selectedAgentId);
+        return;
+      }
+      if (
+        selected &&
+        togglePipelineRunExpansion(this.expandedRunIds, selected)
+      ) {
+        reconcilePipelineSelection(this.selection, this.rows());
+        this.tui.requestRender();
+      }
       return;
     }
     if (
@@ -323,7 +405,7 @@ class PipelineDashboard implements Component {
       truncateToWidth(
         this.theme.fg(
           "dim",
-          " j/k or up/down select · enter transcript/takeover · x cancel · esc close",
+          " j/k or up/down select · enter expand/collapse or transcript · x cancel · esc close",
         ),
         width,
       ),
@@ -336,6 +418,7 @@ export async function showPipelineDashboard(
   controller: PipelineController,
 ) {
   const selection: PipelineSelection = { index: 0 };
+  const expandedRunIds = new Set<string>();
   while (true) {
     const picked = await ctx.ui.custom<string | null>(
       (tui, theme, keybindings, done) =>
@@ -345,6 +428,7 @@ export async function showPipelineDashboard(
           keybindings,
           controller,
           selection,
+          expandedRunIds,
           done,
         ),
       {
