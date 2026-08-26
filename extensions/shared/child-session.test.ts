@@ -18,6 +18,9 @@ import {
   CHILD_EXCLUDED_TOOL_NAMES,
   childToolPolicy,
   createChildResources,
+  pipelineRootToolPolicy,
+  planPipelineChildToolPolicy,
+  planPipelineRootToolPolicy,
   resolveStandaloneChildProjectTrust,
   shutdownAndDisposeChildSession,
   type DisposableChildSession,
@@ -106,6 +109,18 @@ test("child denylist keeps extension and workflow structured tools available", a
         "subagent_list",
         "workflow",
         "ask_user",
+        "pipeline_run",
+        "pipeline_stage",
+        "pipeline_child_spawn",
+        "pipeline_child_list",
+        "pipeline_child_check",
+        "pipeline_child_wait",
+        "pipeline_child_send",
+        "pipeline_child_cancel",
+        "pipeline_complete",
+        "pipeline_plan_write",
+        "pipeline_plan_validate",
+        "pipeline_git_status",
       ],
     );
     const allTools = new Set(session.getAllTools().map((tool) => tool.name));
@@ -137,6 +152,88 @@ test("child denylist keeps extension and workflow structured tools available", a
     ]);
     assert.equal(shutdowns, 1);
   });
+});
+
+test("pipeline root policy denies outer orchestration but keeps run-scoped tools", async () => {
+  await withTempDir(async (directory) => {
+    const settingsManager = SettingsManager.inMemory(undefined, {
+      projectTrusted: false,
+    });
+    const loader = new DefaultResourceLoader({
+      cwd: directory,
+      agentDir: path.join(directory, "agent"),
+      settingsManager,
+      extensionFactories: [
+        (pi) => {
+          for (const name of ["subagent_spawn", "workflow", "pipeline_run"]) {
+            pi.registerTool({
+              name,
+              label: name,
+              description: name,
+              parameters: Type.Object({}),
+              async execute() {
+                return {
+                  content: [{ type: "text", text: "ok" }],
+                  details: {},
+                };
+              },
+            });
+          }
+        },
+      ],
+    });
+    await loader.reload();
+    const stage = defineTool({
+      name: "pipeline_stage",
+      label: "stage",
+      description: "stage",
+      parameters: Type.Object({}),
+      async execute() {
+        return {
+          content: [{ type: "text", text: "ok" }],
+          details: {},
+        };
+      },
+    });
+    const { session } = await createAgentSession({
+      cwd: directory,
+      resourceLoader: loader,
+      settingsManager,
+      sessionManager: SessionManager.inMemory(directory),
+      customTools: [stage],
+      ...pipelineRootToolPolicy(),
+    });
+    const active = new Set(session.getActiveToolNames());
+    assert.equal(active.has("pipeline_stage"), true);
+    assert.equal(active.has("subagent_spawn"), false);
+    assert.equal(active.has("workflow"), false);
+    assert.equal(active.has("pipeline_run"), false);
+    await shutdownAndDisposeChildSession(session);
+  });
+});
+
+test("plan pipeline policies deny mutators and keep bounded root plan tools", () => {
+  const rootDenied = new Set<string>(planPipelineRootToolPolicy().excludeTools);
+  const childDenied = new Set<string>(
+    planPipelineChildToolPolicy().excludeTools,
+  );
+  for (const mutator of [
+    "bash",
+    "edit",
+    "write",
+    "apply_patch_codex",
+    "codex_task",
+    "bg_start",
+    "bg_kill",
+    "mcp",
+  ]) {
+    assert.equal(rootDenied.has(mutator), true);
+    assert.equal(childDenied.has(mutator), true);
+  }
+  assert.equal(rootDenied.has("read"), false);
+  assert.equal(rootDenied.has("pipeline_plan_write"), false);
+  assert.equal(childDenied.has("pipeline_plan_write"), true);
+  assert.equal(childDenied.has("pipeline_child_spawn"), true);
 });
 
 test("resource loading gates project extensions but retains global extensions", async () => {

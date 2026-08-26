@@ -11,7 +11,7 @@ import {
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 /** Tools that headless children must not receive. Everything else stays enabled. */
-export const CHILD_EXCLUDED_TOOL_NAMES = [
+export const PIPELINE_ROOT_EXCLUDED_TOOL_NAMES = [
   "subagent_spawn",
   "subagent_wait",
   "subagent_cancel",
@@ -19,11 +19,65 @@ export const CHILD_EXCLUDED_TOOL_NAMES = [
   "subagent_list",
   "workflow",
   "ask_user",
+  "pipeline_run",
+] as const;
+
+export const PIPELINE_ORCHESTRATION_TOOL_NAMES = [
+  "pipeline_stage",
+  "pipeline_child_spawn",
+  "pipeline_child_list",
+  "pipeline_child_check",
+  "pipeline_child_wait",
+  "pipeline_child_send",
+  "pipeline_child_cancel",
+  "pipeline_complete",
+  "pipeline_plan_write",
+  "pipeline_plan_validate",
+  "pipeline_git_status",
+] as const;
+
+export const CHILD_EXCLUDED_TOOL_NAMES = [
+  ...PIPELINE_ROOT_EXCLUDED_TOOL_NAMES,
+  ...PIPELINE_ORCHESTRATION_TOOL_NAMES,
+] as const;
+
+export const PLAN_PIPELINE_MUTATING_TOOL_NAMES = [
+  "bash",
+  "edit",
+  "write",
+  "apply_patch_codex",
+  "codex_task",
+  "bg_start",
+  "bg_kill",
+  "mcp",
 ] as const;
 
 /** Fresh SDK options avoid turning the denylist into an accidental allowlist. */
 export function childToolPolicy() {
   return { excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES] };
+}
+
+/** Pipeline roots keep only their run-scoped orchestration tools. */
+export function pipelineRootToolPolicy() {
+  return { excludeTools: [...PIPELINE_ROOT_EXCLUDED_TOOL_NAMES] };
+}
+
+export function planPipelineRootToolPolicy() {
+  return {
+    excludeTools: [
+      ...PIPELINE_ROOT_EXCLUDED_TOOL_NAMES,
+      ...PLAN_PIPELINE_MUTATING_TOOL_NAMES,
+    ],
+  };
+}
+
+export function planPipelineChildToolPolicy() {
+  return {
+    excludeTools: [
+      ...CHILD_EXCLUDED_TOOL_NAMES,
+      ...PLAN_PIPELINE_MUTATING_TOOL_NAMES,
+    ],
+  };
 }
 
 export interface ChildResourceOptions {

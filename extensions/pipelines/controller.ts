@@ -1,0 +1,952 @@
+import { execFileSync } from "node:child_process";
+import { StringEnum } from "@earendil-works/pi-ai";
+import {
+  defineTool,
+  type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { AgentTreeController } from "../shared/agent-tree/control.ts";
+import type {
+  AgentNodeSnapshot,
+  AgentTreeSessionFactory,
+} from "../shared/agent-tree/domain.ts";
+import {
+  FEATURE_PIPELINE_ID,
+  LUNA_MODEL,
+  PIPELINE_STAGES,
+  PLAN_PIPELINE_AUDIT_ROLES,
+  PLAN_PIPELINE_CHILD_ROLES,
+  PLAN_PIPELINE_DISCOVERY_ROLES,
+  PLAN_PIPELINE_ID,
+  SOL_MODEL,
+  TERRA_MODEL,
+  definitionFor,
+  modelForRole,
+  roleBelongsToDefinition,
+  rolesForDefinition,
+  titleForRole,
+  type PipelineChildRole,
+  type PipelineCompletionFacts,
+  type PipelineDefinitionId,
+  type PipelineHandoff,
+  type PipelineRunRequest,
+  type PipelineRunSnapshot,
+  type PipelineStage,
+} from "./domain.ts";
+import {
+  resolvePlanArtifact,
+  validatePipelineReport,
+  writePlanArtifact,
+} from "./plan-contract.ts";
+import { buildPipelineChildPrompt, buildPipelinePrompt } from "./prompt.ts";
+
+interface MutableRun {
+  id: string;
+  definition: PipelineDefinitionId;
+  request: PipelineRunRequest;
+  stage: PipelineStage;
+  status: PipelineRunSnapshot["status"];
+  startedAt: number;
+  finishedAt?: number;
+  error?: string;
+  rootId?: string;
+  completion?: PipelineCompletionFacts;
+  planArtifactsWritten: Map<
+    string,
+    { digest: string; device: number; inode: number }
+  >;
+}
+
+export interface PipelineControllerOptions {
+  readonly createSessionFactory: (
+    rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
+    definitionForRun: (runId: string) => PipelineDefinitionId,
+  ) => AgentTreeSessionFactory;
+  readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
+  readonly makeRunId?: () => string;
+  readonly makeAgentId?: () => string;
+}
+
+function completionSchema() {
+  return Type.Object({
+    outcome: Type.String({ maxLength: 32_768 }),
+    plan_path: Type.Optional(Type.String({ maxLength: 16_384 })),
+    changed_paths: Type.Array(Type.String({ maxLength: 4_096 }), {
+      maxItems: 512,
+    }),
+    checks_evidence: Type.Array(Type.String({ maxLength: 8_192 }), {
+      maxItems: 512,
+    }),
+    assumptions: Type.Array(Type.String({ maxLength: 8_192 }), {
+      maxItems: 256,
+    }),
+    git_commits: Type.Array(Type.String({ maxLength: 8_192 }), {
+      maxItems: 256,
+    }),
+    report_summaries_references: Type.Array(
+      Type.String({ maxLength: 16_384 }),
+      { maxItems: 256 },
+    ),
+    unresolved_items: Type.Array(Type.String({ maxLength: 16_384 }), {
+      maxItems: 256,
+    }),
+    working_dir: Type.String({ maxLength: 16_384 }),
+  });
+}
+
+export class PipelineController {
+  private readonly runs = new Map<string, MutableRun>();
+  private readonly listeners = new Set<() => void>();
+  private readonly handoffs = new Set<string>();
+  private readonly childContinuations = new Map<string, number>();
+  private readonly tree: AgentTreeController;
+  private readonly onHandoff: PipelineControllerOptions["onHandoff"];
+  private readonly makeRunId: () => string;
+  private runSequence = 0;
+  private shuttingDown = false;
+
+  constructor(options: PipelineControllerOptions) {
+    this.onHandoff = options.onHandoff;
+    this.makeRunId =
+      options.makeRunId ?? (() => `pipeline-${++this.runSequence}`);
+    this.tree = new AgentTreeController({
+      factory: options.createSessionFactory(
+        (runId) => this.createRootTools(runId),
+        (runId) => this.requireRun(runId).definition,
+      ),
+      capacity: {
+        [SOL_MODEL]: 4,
+        [TERRA_MODEL]: 8,
+        [LUNA_MODEL]: 16,
+      },
+      makeId: options.makeAgentId,
+    });
+    this.tree.view.subscribe(() => this.onTreeChange());
+  }
+
+  get agentView() {
+    return this.tree.view;
+  }
+
+  subscribe(listener: () => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify() {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch {
+        // Dashboard listeners cannot alter run state.
+      }
+    }
+  }
+
+  private agentsFor(runId: string) {
+    return this.tree.view
+      .list()
+      .filter((agent) => agent.scopeId === runId)
+      .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  list() {
+    return [...this.runs.values()]
+      .map((run) => this.snapshot(run))
+      .sort((left, right) => right.startedAt - left.startedAt);
+  }
+
+  get(runId: string) {
+    const run = this.runs.get(runId);
+    return run ? this.snapshot(run) : undefined;
+  }
+
+  private snapshot(run: MutableRun): PipelineRunSnapshot {
+    return {
+      id: run.id,
+      definition: run.definition,
+      workingDir: run.request.workingDir,
+      stage: run.stage,
+      status: run.status,
+      startedAt: run.startedAt,
+      ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
+      ...(run.error ? { error: run.error } : {}),
+      ...(run.rootId ? { rootId: run.rootId } : {}),
+      ...(run.completion ? { completion: run.completion } : {}),
+      agents: this.agentsFor(run.id),
+    };
+  }
+
+  start(request: PipelineRunRequest) {
+    if (this.shuttingDown)
+      throw new Error("Pipeline controller is shutting down.");
+    const id = this.makeRunId();
+    const run: MutableRun = {
+      id,
+      definition: request.pipeline ?? FEATURE_PIPELINE_ID,
+      request,
+      stage: "discover",
+      status: "starting",
+      startedAt: Date.now(),
+      planArtifactsWritten: new Map(),
+    };
+    this.runs.set(id, run);
+    this.notify();
+    void this.initialize(run);
+    return id;
+  }
+
+  private async initialize(run: MutableRun) {
+    try {
+      const root = await this.tree.spawn({
+        scopeId: run.id,
+        role: "pipeline-root",
+        attempt: 1,
+        title: definitionFor(run.definition).rootTitle,
+        model: SOL_MODEL,
+        cwd: run.request.workingDir,
+        prompt: buildPipelinePrompt(run.definition, run.request),
+        persistent: true,
+        shouldStart: () => run.status === "starting",
+      });
+      run.rootId = root.id;
+      if (run.status !== "starting") {
+        this.notify();
+        return;
+      }
+      if (root.status === "error") {
+        this.failRun(run, root.error ?? "Pipeline root failed.");
+      } else if (root.status === "cancelled") {
+        run.status = "cancelled";
+        run.finishedAt = Date.now();
+        run.error = root.error;
+        this.notify();
+        this.deliver(run);
+      } else {
+        run.status = "running";
+        this.notify();
+      }
+    } catch (error) {
+      this.failRun(run, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private onTreeChange() {
+    if (this.shuttingDown) return;
+    for (const run of this.runs.values()) {
+      if (run.status !== "starting" && run.status !== "running") continue;
+      const root = run.rootId ? this.tree.view.get(run.rootId) : undefined;
+      if (!root) continue;
+      if (root.status === "cancelled") {
+        run.status = "cancelled";
+        run.finishedAt = Date.now();
+        run.error = root.error;
+        void this.cancelActiveChildren(run);
+        this.deliver(run);
+      } else if (root.status === "error") {
+        this.failRun(run, root.error ?? "Pipeline root failed.");
+      }
+    }
+    this.notify();
+  }
+
+  private failRun(run: MutableRun, error: string) {
+    if (run.status !== "starting" && run.status !== "running") return;
+    run.status = "failed";
+    run.finishedAt = Date.now();
+    run.error = error.slice(0, 16 * 1024);
+    void this.cancelActiveChildren(run);
+    this.notify();
+    this.deliver(run);
+  }
+
+  private factsForFailure(run: MutableRun): PipelineCompletionFacts {
+    return {
+      outcome: "The pipeline did not produce a structured completion.",
+      changedPaths: [],
+      checks: [],
+      assumptions: [],
+      git: [],
+      reports: [],
+      unresolvedItems: [run.error ?? "Pipeline ended before completion."],
+      workingDir: run.request.workingDir,
+    };
+  }
+
+  private deliver(run: MutableRun) {
+    if (this.shuttingDown || this.handoffs.has(run.id)) return;
+    if (run.status === "starting" || run.status === "running") return;
+    this.handoffs.add(run.id);
+    const handoff: PipelineHandoff = {
+      runId: run.id,
+      definition: run.definition,
+      status: run.status,
+      facts: run.completion ?? this.factsForFailure(run),
+      ...(run.error ? { error: run.error } : {}),
+    };
+    void Promise.resolve(this.onHandoff(handoff)).catch(() => {});
+  }
+
+  private roleHasValidReport(run: MutableRun, role: PipelineChildRole) {
+    return this.agentsFor(run.id).some(
+      (agent) =>
+        agent.role === role &&
+        (agent.status === "done" || agent.status === "idle") &&
+        validatePipelineReport(run.definition, agent.role, agent.finalText)
+          .length === 0,
+    );
+  }
+
+  private requireValidReports(
+    run: MutableRun,
+    roles: ReadonlyArray<PipelineChildRole>,
+    transition: PipelineStage,
+  ) {
+    const missing = roles.filter((role) => !this.roleHasValidReport(run, role));
+    if (missing.length > 0) {
+      throw new Error(
+        `Cannot enter ${transition}; missing valid reports: ${missing.join(", ")}.`,
+      );
+    }
+  }
+
+  private advanceStageAfterFanIn(
+    run: MutableRun,
+    waitedChildren: ReadonlyArray<AgentNodeSnapshot>,
+  ) {
+    const roles = rolesForDefinition(run.definition).filter((role) =>
+      run.stage === "discover"
+        ? role.startsWith("discover-")
+        : run.stage === "audit"
+          ? role.startsWith("audit-")
+          : run.stage === "final-audit"
+            ? role === "final-audit"
+            : false,
+    );
+    const nextStage =
+      run.stage === "discover"
+        ? "build"
+        : run.stage === "audit"
+          ? "audit-resolve"
+          : run.stage === "final-audit"
+            ? "final-resolve"
+            : undefined;
+    if (
+      !nextStage ||
+      !waitedChildren.some((child) =>
+        roles.some((role) => role === child.role),
+      ) ||
+      roles.some((role) => !this.roleHasValidReport(run, role))
+    ) {
+      return;
+    }
+    run.stage = nextStage;
+    this.notify();
+  }
+
+  setStage(runId: string, stage: PipelineStage) {
+    const run = this.requireActiveRun(runId);
+    if (run.definition === PLAN_PIPELINE_ID) {
+      const currentIndex = PIPELINE_STAGES.indexOf(run.stage);
+      const nextIndex = PIPELINE_STAGES.indexOf(stage);
+      if (nextIndex < currentIndex || nextIndex > currentIndex + 1) {
+        throw new Error(
+          `Invalid plan-pipeline stage transition: ${run.stage} to ${stage}.`,
+        );
+      }
+      if (stage === "build") {
+        this.requireValidReports(run, PLAN_PIPELINE_DISCOVERY_ROLES, stage);
+      } else if (stage === "audit" && run.planArtifactsWritten.size === 0) {
+        throw new Error("Cannot enter audit before writing a plan artifact.");
+      } else if (stage === "audit-resolve") {
+        this.requireValidReports(run, PLAN_PIPELINE_AUDIT_ROLES, stage);
+      } else if (
+        stage === "final-audit" &&
+        run.planArtifactsWritten.size === 0
+      ) {
+        throw new Error(
+          "Cannot enter final-audit before writing a plan artifact.",
+        );
+      } else if (stage === "final-resolve") {
+        this.requireValidReports(run, ["final-audit"], stage);
+      }
+    }
+    run.stage = stage;
+    this.notify();
+    return this.snapshot(run);
+  }
+
+  async spawnChild(
+    runId: string,
+    role: PipelineChildRole,
+    additionalContext = "",
+  ) {
+    const run = this.requireActiveRun(runId);
+    if (!roleBelongsToDefinition(run.definition, role)) {
+      throw new Error(`Unsupported ${run.definition} child role "${role}".`);
+    }
+    if (!run.rootId)
+      throw new Error(`Pipeline run "${runId}" has no root yet.`);
+    const priorAttempts = this.agentsFor(runId).filter(
+      (agent) => agent.role === role,
+    );
+    if (run.definition === PLAN_PIPELINE_ID) {
+      const requiredStage = role.startsWith("discover-")
+        ? "discover"
+        : role.startsWith("audit-")
+          ? "audit"
+          : "final-audit";
+      if (run.stage !== requiredStage) {
+        throw new Error(
+          `${role} can only start during plan-pipeline stage ${requiredStage}.`,
+        );
+      }
+      const latest = priorAttempts.at(-1);
+      const replacementAllowed =
+        role !== "final-audit" &&
+        priorAttempts.length === 1 &&
+        latest?.status === "error" &&
+        !latest.sessionFile;
+      if (priorAttempts.length > 0 && !replacementAllowed) {
+        throw new Error(
+          `plan-pipeline role ${role} already has its allowed child session.`,
+        );
+      }
+    }
+    const attempt = priorAttempts.length + 1;
+    return this.tree.spawn({
+      scopeId: runId,
+      parentId: run.rootId,
+      role,
+      attempt,
+      title: titleForRole(role),
+      model: modelForRole(role),
+      cwd: run.request.workingDir,
+      prompt: buildPipelineChildPrompt(
+        run.definition,
+        role,
+        run.request,
+        additionalContext,
+      ),
+    });
+  }
+
+  listChildren(runId: string) {
+    const run = this.requireRun(runId);
+    return run.rootId ? this.tree.view.childrenOf(run.rootId) : [];
+  }
+
+  getAgent(runId: string, id: string) {
+    this.requireRun(runId);
+    const agent = this.tree.view.get(id);
+    if (!agent || agent.scopeId !== runId) {
+      throw new Error(`Unknown agent id "${id}" for pipeline run "${runId}".`);
+    }
+    return agent;
+  }
+
+  async waitForChildren(
+    runId: string,
+    ids: ReadonlyArray<string>,
+    signal?: AbortSignal,
+  ) {
+    for (const id of ids) {
+      const agent = this.getAgent(runId, id);
+      if (!agent.parentId)
+        throw new Error(`Agent "${id}" is the pipeline root.`);
+    }
+    const children = await this.tree.wait(ids, signal);
+    const run = this.requireRun(runId);
+    if (run.status === "starting" || run.status === "running") {
+      this.advanceStageAfterFanIn(run, children);
+    }
+    return children;
+  }
+
+  async sendChild(runId: string, id: string, text: string) {
+    const run = this.requireActiveRun(runId);
+    const agent = this.getAgent(runId, id);
+    if (!agent.parentId) throw new Error(`Agent "${id}" is the pipeline root.`);
+    if (run.definition === PLAN_PIPELINE_ID) {
+      if (agent.role === "final-audit") {
+        throw new Error("plan-pipeline final-audit cannot be retried.");
+      }
+      if ((this.childContinuations.get(id) ?? 0) >= 1) {
+        throw new Error(`plan-pipeline child "${id}" already used its retry.`);
+      }
+      const issues = validatePipelineReport(
+        run.definition,
+        agent.role,
+        agent.finalText,
+      );
+      const retryable =
+        agent.status === "error" ||
+        ((agent.status === "done" || agent.status === "idle") &&
+          issues.length > 0);
+      if (!retryable) {
+        throw new Error(
+          `plan-pipeline child "${id}" has no failed or malformed report to retry.`,
+        );
+      }
+    }
+    await this.tree.send(id, text);
+    if (run.definition === PLAN_PIPELINE_ID) {
+      this.childContinuations.set(
+        id,
+        (this.childContinuations.get(id) ?? 0) + 1,
+      );
+    }
+    return this.getAgent(runId, id);
+  }
+
+  async cancelChild(runId: string, id: string) {
+    const agent = this.getAgent(runId, id);
+    if (!agent.parentId) throw new Error(`Agent "${id}" is the pipeline root.`);
+    return this.tree.cancel(id);
+  }
+
+  writePlan(runId: string, planPath: string, content: string) {
+    const run = this.requireActiveRun(runId);
+    if (run.definition !== PLAN_PIPELINE_ID) {
+      throw new Error("Plan artifacts can only be written by plan-pipeline.");
+    }
+    const artifact = writePlanArtifact(
+      run.request.workingDir,
+      planPath,
+      content,
+    );
+    run.planArtifactsWritten.set(artifact.relativePath, {
+      digest: artifact.digest,
+      device: artifact.device,
+      inode: artifact.inode,
+    });
+    return artifact;
+  }
+
+  validatePlan(runId: string, planPath: string) {
+    const run = this.requireActiveRun(runId);
+    if (run.definition !== PLAN_PIPELINE_ID) {
+      throw new Error("Plan artifacts can only be validated by plan-pipeline.");
+    }
+    return resolvePlanArtifact(run.request.workingDir, planPath);
+  }
+
+  gitStatus(runId: string) {
+    const run = this.requireActiveRun(runId);
+    try {
+      return execFileSync("git", ["status", "--short", "--branch"], {
+        cwd: run.request.workingDir,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024,
+      }).trim();
+    } catch (error) {
+      return `Git status unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  complete(runId: string, facts: PipelineCompletionFacts) {
+    const run = this.requireActiveRun(runId);
+    const activeChildren = this.agentsFor(runId).filter(
+      (agent) =>
+        agent.parentId &&
+        (agent.status === "starting" || agent.status === "running"),
+    );
+    if (activeChildren.length > 0) {
+      throw new Error(
+        `Cannot complete pipeline run "${runId}" while children are active: ${activeChildren.map((agent) => agent.id).join(", ")}.`,
+      );
+    }
+    if (facts.workingDir !== run.request.workingDir) {
+      throw new Error(
+        `pipeline_complete working_dir must be ${run.request.workingDir}.`,
+      );
+    }
+    let completion = facts;
+    if (run.definition === PLAN_PIPELINE_ID) {
+      if (run.stage !== "complete") {
+        throw new Error("plan-pipeline must enter complete before completion.");
+      }
+      this.requireValidReports(run, PLAN_PIPELINE_CHILD_ROLES, "complete");
+      if (!facts.planPath) {
+        throw new Error("plan-pipeline completion requires plan_path.");
+      }
+      const artifact = resolvePlanArtifact(
+        run.request.workingDir,
+        facts.planPath,
+      );
+      const written = run.planArtifactsWritten.get(artifact.relativePath);
+      if (!written) {
+        throw new Error(
+          "plan_path must identify an artifact written by this plan-pipeline run.",
+        );
+      }
+      if (
+        written.digest !== artifact.digest ||
+        written.device !== artifact.device ||
+        written.inode !== artifact.inode
+      ) {
+        throw new Error(
+          "plan_path changed after this plan-pipeline run wrote it.",
+        );
+      }
+      completion = {
+        ...facts,
+        planPath: artifact.relativePath,
+        changedPaths: [
+          ...new Set([...facts.changedPaths, artifact.relativePath]),
+        ],
+      };
+    }
+    run.stage = "complete";
+    run.status = "completed";
+    run.finishedAt = Date.now();
+    run.completion = completion;
+    this.notify();
+    this.deliver(run);
+    return this.snapshot(run);
+  }
+
+  private async cancelActiveChildren(run: MutableRun) {
+    const active = this.agentsFor(run.id).filter(
+      (agent) =>
+        agent.parentId &&
+        (agent.status === "starting" || agent.status === "running"),
+    );
+    await Promise.allSettled(active.map((agent) => this.tree.cancel(agent.id)));
+  }
+
+  async cancelRun(runId: string) {
+    const run = this.requireRun(runId);
+    if (run.status !== "starting" && run.status !== "running")
+      return this.snapshot(run);
+    await this.cancelActiveChildren(run);
+    if (run.rootId) await this.tree.cancel(run.rootId);
+    if (run.status === "starting" || run.status === "running") {
+      run.status = "cancelled";
+      run.finishedAt = Date.now();
+      this.notify();
+      this.deliver(run);
+    }
+    return this.snapshot(run);
+  }
+
+  private requireRun(runId: string) {
+    const run = this.runs.get(runId);
+    if (!run) throw new Error(`Unknown pipeline run id "${runId}".`);
+    return run;
+  }
+
+  private requireActiveRun(runId: string) {
+    const run = this.requireRun(runId);
+    if (run.status !== "starting" && run.status !== "running") {
+      throw new Error(`Pipeline run "${runId}" is ${run.status}.`);
+    }
+    return run;
+  }
+
+  createRootTools(runId: string): ToolDefinition[] {
+    const controller = this;
+    const run = this.requireRun(runId);
+    const roles = rolesForDefinition(run.definition);
+    const tools: ToolDefinition[] = [
+      defineTool({
+        name: "pipeline_stage",
+        label: "Pipeline Stage",
+        description: `Record the current ${run.definition} stage.`,
+        parameters: Type.Object({ stage: StringEnum(PIPELINE_STAGES) }),
+        async execute(_id, params) {
+          const run = controller.setStage(runId, params.stage);
+          return {
+            content: [{ type: "text", text: `Pipeline stage: ${run.stage}` }],
+            details: { runId, stage: run.stage },
+          };
+        },
+      }),
+      defineTool({
+        name: "pipeline_child_spawn",
+        label: "Spawn Pipeline Child",
+        description: `Start one allowed ${run.definition} Luna or Terra role.`,
+        parameters: Type.Object({
+          role: StringEnum(roles),
+          context: Type.Optional(Type.String({ maxLength: 64 * 1024 })),
+        }),
+        async execute(_id, params) {
+          const child = await controller.spawnChild(
+            runId,
+            params.role,
+            params.context,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Started ${child.id}: ${child.role} attempt ${child.attempt} (${child.model}).`,
+              },
+            ],
+            details: {
+              runId,
+              id: child.id,
+              role: child.role,
+              attempt: child.attempt,
+              model: child.model,
+            },
+          };
+        },
+      }),
+      defineTool({
+        name: "pipeline_child_list",
+        label: "List Pipeline Children",
+        description: "List children and attempts in this pipeline run.",
+        parameters: Type.Object({}),
+        async execute() {
+          const children = controller.listChildren(runId);
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  children.length === 0
+                    ? "No pipeline children."
+                    : children
+                        .map(
+                          (child) =>
+                            `${child.id} [${child.status}] ${child.role} attempt ${child.attempt} (${child.model})`,
+                        )
+                        .join("\n"),
+              },
+            ],
+            details: { runId, children },
+          };
+        },
+      }),
+      defineTool({
+        name: "pipeline_child_check",
+        label: "Check Pipeline Child",
+        description: "Inspect one child status and latest report.",
+        parameters: Type.Object({ id: Type.String() }),
+        async execute(_toolId, params) {
+          const child = controller.getAgent(runId, params.id);
+          if (!child.parentId)
+            throw new Error(`Agent "${params.id}" is the pipeline root.`);
+          const issues = validatePipelineReport(
+            run.definition,
+            child.role,
+            child.finalText,
+          );
+          const warning = issues.length
+            ? `\n\n[Report contract violation: ${issues.join(" ")}]`
+            : "";
+          return {
+            content: [
+              {
+                type: "text",
+                text: `${child.id} [${child.status}] ${child.role} attempt ${child.attempt}\n\n${child.error ?? (child.finalText || "(no report yet)")}${warning}`.slice(
+                  0,
+                  24 * 1024,
+                ),
+              },
+            ],
+            details: { runId, id: child.id, status: child.status },
+          };
+        },
+      }),
+      defineTool({
+        name: "pipeline_child_wait",
+        label: "Wait for Pipeline Children",
+        description:
+          "Wait for known children, return their reports in this Sol context, and atomically enter the next stage when the full current-stage fan-in is valid.",
+        parameters: Type.Object({
+          ids: Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
+        }),
+        async execute(_toolId, params, signal, onUpdate) {
+          onUpdate?.({
+            content: [
+              { type: "text", text: `Waiting for ${params.ids.join(", ")}...` },
+            ],
+            details: { runId, pending: params.ids },
+          });
+          const children = await controller.waitForChildren(
+            runId,
+            params.ids,
+            signal,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: children
+                  .map((child) => {
+                    const issues = validatePipelineReport(
+                      run.definition,
+                      child.role,
+                      child.finalText,
+                    );
+                    const warning = issues.length
+                      ? `\n\n[Report contract violation: ${issues.join(" ")}]`
+                      : "";
+                    return `## ${child.id} · ${child.role} · attempt ${child.attempt} · ${child.status}\n\n${child.error ?? (child.finalText || "(no report)")}${warning}`;
+                  })
+                  .join("\n\n---\n\n")
+                  .slice(0, 48 * 1024),
+              },
+            ],
+            details: {
+              runId,
+              results: children.map((child) => ({
+                id: child.id,
+                role: child.role,
+                attempt: child.attempt,
+                status: child.status,
+              })),
+            },
+          };
+        },
+      }),
+      defineTool({
+        name: "pipeline_child_send",
+        label: "Send to Pipeline Child",
+        description:
+          "Continue or retry one known child in its existing session context.",
+        parameters: Type.Object({
+          id: Type.String(),
+          message: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+        }),
+        async execute(_toolId, params) {
+          const child = await controller.sendChild(
+            runId,
+            params.id,
+            params.message,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Sent a continuation to ${child.id} (${child.role}).`,
+              },
+            ],
+            details: { runId, id: child.id, status: child.status },
+          };
+        },
+      }),
+      defineTool({
+        name: "pipeline_child_cancel",
+        label: "Cancel Pipeline Child",
+        description: "Cancel one known child in this pipeline run.",
+        parameters: Type.Object({ id: Type.String() }),
+        async execute(_toolId, params) {
+          const child = await controller.cancelChild(runId, params.id);
+          return {
+            content: [{ type: "text", text: `Cancelled ${child.id}.` }],
+            details: { runId, id: child.id, status: child.status },
+          };
+        },
+      }),
+      defineTool({
+        name: "pipeline_complete",
+        label: "Complete Pipeline",
+        description:
+          "Finish this run with factual handoff data and no readiness label.",
+        parameters: completionSchema(),
+        async execute(_toolId, params) {
+          controller.complete(runId, {
+            outcome: params.outcome,
+            ...(params.plan_path ? { planPath: params.plan_path } : {}),
+            changedPaths: params.changed_paths,
+            checks: params.checks_evidence,
+            assumptions: params.assumptions,
+            git: params.git_commits,
+            reports: params.report_summaries_references,
+            unresolvedItems: params.unresolved_items,
+            workingDir: params.working_dir,
+          });
+          return {
+            content: [{ type: "text", text: `Pipeline ${runId} completed.` }],
+            details: { runId },
+            terminate: true,
+          };
+        },
+      }),
+    ];
+    if (run.definition === PLAN_PIPELINE_ID) {
+      tools.splice(
+        1,
+        0,
+        defineTool({
+          name: "pipeline_plan_write",
+          label: "Write Pipeline Plan",
+          description:
+            "Write or replace this run's validated repository-local docs/plans Markdown artifact.",
+          parameters: Type.Object({
+            path: Type.String({ minLength: 1, maxLength: 16_384 }),
+            content: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+          }),
+          async execute(_toolId, params) {
+            const artifact = controller.writePlan(
+              runId,
+              params.path,
+              params.content,
+            );
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Validated plan written: ${artifact.relativePath}`,
+                },
+              ],
+              details: {
+                runId,
+                path: artifact.relativePath,
+                bytes: Buffer.byteLength(artifact.content, "utf8"),
+              },
+            };
+          },
+        }),
+        defineTool({
+          name: "pipeline_plan_validate",
+          label: "Validate Pipeline Plan",
+          description:
+            "Freshly validate one repository-local docs/plans Markdown artifact without modifying it.",
+          parameters: Type.Object({
+            path: Type.String({ minLength: 1, maxLength: 16_384 }),
+          }),
+          async execute(_toolId, params) {
+            const artifact = controller.validatePlan(runId, params.path);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Plan contract passed: ${artifact.relativePath} (${Buffer.byteLength(artifact.content, "utf8")} bytes).`,
+                },
+              ],
+              details: { runId, path: artifact.relativePath },
+            };
+          },
+        }),
+        defineTool({
+          name: "pipeline_git_status",
+          label: "Pipeline Git Status",
+          description:
+            "Read the planning workspace Git branch and changed-path state without modifying it.",
+          parameters: Type.Object({}),
+          async execute() {
+            const status = controller.gitStatus(runId);
+            return {
+              content: [
+                { type: "text", text: status || "Working tree clean." },
+              ],
+              details: { runId },
+            };
+          },
+        }),
+      );
+    }
+    return tools;
+  }
+
+  async dispose() {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    await this.tree.dispose();
+    this.listeners.clear();
+  }
+}
