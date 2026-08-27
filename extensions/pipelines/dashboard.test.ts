@@ -478,6 +478,10 @@ test("small-feature dashboard shows only its fixed stages and child placement", 
     "complete",
   ]);
   assert.equal(
+    rows.find((row) => row.kind === "stage" && row.stage === "complete")?.label,
+    "completion stage · pending",
+  );
+  assert.equal(
     rows
       .find((row) => row.kind === "agent" && row.agentId === implementer.id)
       ?.key.includes(":build:"),

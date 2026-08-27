@@ -61,6 +61,10 @@ export type PipelineRow =
       readonly status: AgentNodeSnapshot["status"];
     };
 
+function stageLabel(stage: PipelineStage) {
+  return stage === "complete" ? "completion stage" : stage;
+}
+
 function isPipelineAuditRole(role: string) {
   return AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role);
 }
@@ -206,7 +210,7 @@ export function buildPipelineRows(
           key: `stage:${run.id}:${stage}`,
           kind: "stage",
           depth: 2,
-          label: `${stage} · ${stageStatus}`,
+          label: `${stageLabel(stage)} · ${stageStatus}`,
           runId: run.id,
           stage,
           status: stageStatus,
