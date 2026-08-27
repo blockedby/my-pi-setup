@@ -1225,3 +1225,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `README.md` and this record. Runtime behavior, installed Pipi state, dependencies, credentials, model overrides, and submodule pins are unchanged.
 - **Verification:** Final README is 94 lines instead of 190, all referenced local files exist, repository formatting passes, and `git diff --check` passes.
 - **Pending:** None.
+
+## Operation entry: require explicit requests for codex_task
+
+- **Request:** Change `codex_task` guidance so it is used only when the user explicitly asks for Codex or `codex_task`; push the source change to `pi-codex` `main` before refreshing local Pipi setup.
+- **Action:** Updated both the canonical `codex-tools` skill and the extension-injected tool guidance, committed as `d5ca947`, and pushed `blockedby/pi-codex` `main`. Then reran the managed Pipi installer from primary `pipi-alias` `main` with repository dependency installation skipped.
+- **Affected paths or values:** `/home/kcnc/code/tools/pi-codex/skills/codex-tools/SKILL.md`, `/home/kcnc/code/tools/pi-codex/extensions/codex-tools.ts`, managed Pipi wiring under `~/.pipi/agent`, and this record. Versions, credentials, model overrides, and submodule pins are unchanged.
+- **Verification:** `node --check`, source-policy searches, and `git diff --check` passed before the clean two-file commit. Remote `pi-codex/main` accepted `d5ca947`; `npm run check:pipi-install` passed, and `pipi list` resolves the updated sibling `pi-codex` checkout.
+- **Pending:** Restart or reload active sessions so their generated tool guidance includes the explicit-request-only rule.
