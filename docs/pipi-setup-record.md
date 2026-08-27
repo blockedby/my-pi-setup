@@ -1153,3 +1153,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/dashboard.ts`, `extensions/pipelines/dashboard.test.ts`, and this record. Installed Pipi, credentials, model overrides, external state, and submodule pins are unchanged until the authorized post-merge rollout.
 - **Verification:** Fresh focused dashboard tests pass 13/13. After the stage-selection edge-case correction, the full deterministic extension suite passes 254/254; repository TypeScript, formatting, exact-submodule verification, and `git diff --check` pass.
 - **Pending:** Commit, push, squash-merge through a PR, synchronize `main`, reinstall Pipi, verify installed state, and reload sessions created before rollout.
+
+## Operation entry: roll out dashboard final-audit placement fix
+
+- **Request:** Merge the accepted feature-pipeline dashboard placement correction and reinstall Pipi.
+- **Action:** Squash-merged PR #61 as `5fc12b27774839b234d825f1f47dd197f1571664`, synchronized the clean primary `main`, and reinstalled Pipi with repository dependency installation skipped. The managed launcher/package registration was refreshed while preserving Pipi 0.84.3, MCP 2.15.0, isolated authentication, existing model overrides, the official Herdr integration, and exact canonical submodules. No credentials were read or recorded.
+- **Affected paths or values:** Git `main`, managed Pipi state under `~/.pipi/agent`, launcher `~/.local/bin/pipi`, and this record. Model overrides, credentials, external services, and submodule pins were unchanged.
+- **Verification:** Pre-merge acceptance passed focused dashboard tests 13/13, deterministic extension tests 254/254, TypeScript, formatting, exact-submodule validation, and `git diff --check`. Post-merge `npm run check:pipi-install` verified installed Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration; `npm run check:submodules` verified both exact pins. Primary `main` was clean and aligned with `origin/main` after installation.
+- **Pending:** Reload or restart sessions created before this rollout so the in-memory `/pipelines` dashboard uses the corrected final-audit grouping and active-agent selection.
