@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import {
   AUDIT_SYNTHESIS_ROLE,
-  PIPELINE_4_LUNA_AUDIT_ROLES,
+  AUDIT_SEGMENT_LUNA_ROLES,
   stagesForDefinition,
   type PipelineRunSnapshot,
 } from "./domain.ts";
@@ -163,6 +163,13 @@ function completionProjection(run: PipelineRunSnapshot) {
             run.completion.auditReport.unresolvedConflicts.length,
           auditClosureResultCount:
             run.completion.auditReport.closureResults.length,
+          auditExecutedCheckCount:
+            run.completion.auditReport.executedChecks.length,
+          auditWorkspaceChangeCount:
+            run.completion.auditReport.workspaceChangesObserved.length,
+          auditHostWorkspaceChanged:
+            run.completion.auditReport.hostWorkspaceObservation
+              .workspaceChanged,
         }
       : {}),
     ...(run.completion.planPath ? { planPath: run.completion.planPath } : {}),
@@ -214,7 +221,7 @@ export function projectPipelineCheck(
     const auditReportAgent =
       Boolean(run.auditSegment) &&
       (agent.role === AUDIT_SYNTHESIS_ROLE ||
-        PIPELINE_4_LUNA_AUDIT_ROLES.some((role) => role === agent.role));
+        AUDIT_SEGMENT_LUNA_ROLES.some((role) => role === agent.role));
     const preview = active && !auditReportAgent ? previewFor(agent) : undefined;
     const openTool = active ? openToolFor(agent) : undefined;
     return {
@@ -367,7 +374,7 @@ export function formatPipelineCheck(details: ProjectedPipelineCheck) {
     }
     if ("auditFindingCount" in details.completion) {
       lines.push(
-        `Audit completion counts: findings ${details.completion.auditFindingCount}, conflicts ${details.completion.auditConflictCount}, closure results ${details.completion.auditClosureResultCount}`,
+        `Audit completion counts: findings ${details.completion.auditFindingCount}, conflicts ${details.completion.auditConflictCount}, closure results ${details.completion.auditClosureResultCount}, executor checks ${details.completion.auditExecutedCheckCount}, observed workspace changes ${details.completion.auditWorkspaceChangeCount}, host workspace changed ${details.completion.auditHostWorkspaceChanged}`,
       );
     }
   }

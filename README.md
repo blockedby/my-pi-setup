@@ -97,7 +97,7 @@ The main agent can use `pipeline_list({})` to list its session-scoped runs newes
 
 Automatic routing uses `audit-pipeline` for routine repository initial or closure audits; direct `terra-audit` remains available only for explicit manual escalation. It uses `small-feature-pipeline` for bounded, well-specified implementation work that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Broader nontrivial feature work that needs discovery and multi-concern audit uses `feature-pipeline`. `plan-pipeline` is selected only when the requested deliverable is a durable audited plan, task breakdown, dependency waves, or test/release plan and the goal has a complexity signal: multiple frontend/backend/data/DevOps/runtime layers; migration, rollout, rollback, operational-readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies that require repository discovery. Explicit pipeline selection overrides automatic routing. Bug fixes, refactors, research-only work, and trivial edits do not use implementation/planning pipelines unless the requested outcome is explicitly a bounded audit; a small feature is bounded work that still benefits from independent audit, not a synonym for a trivial edit. The main agent asks when plan versus implementation is ambiguous.
 
-Pipeline audits receive host-collected, bounded, read-only Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start and resolves current head, branch/status, base ancestry, bounded base-to-head commits, committed diff, dirty HEAD-to-worktree diff, and combined base-to-worktree diff with argument-array Git commands. Each item explicitly reports available, truncated, or unavailable evidence. `feature-pipeline`, `plan-pipeline`, `audit-pipeline`, and `small-feature-pipeline` reuse this evidence where their audit tracks apply.
+Pipeline audits receive host-collected, bounded Git evidence rather than agent-facing Git mutation tools. The controller captures the workspace base at run start and resolves current head, branch/status, base ancestry, bounded base-to-head commits, committed diff, dirty HEAD-to-worktree diff, and combined base-to-worktree diff with argument-array Git commands. After executor-audit settles, it captures fresh bounded status/diff evidence so observed execution effects survive synthesis and the factual final report; detection is observational and performs no rollback. Each item explicitly reports available, truncated, or unavailable evidence. `feature-pipeline`, `plan-pipeline`, `audit-pipeline`, and `small-feature-pipeline` reuse this evidence where their audit tracks apply.
 
 `git_commit` is optional and defaults to false. It is accepted only by `small-feature-pipeline`; true grants only the same persistent `implement-small-feature` Luna session permission to make ordinary commits in the supplied current branch. It never permits push, merge, rebase, reset/history rewriting, branch or worktree operations. The permission is authoritative and is never inferred from task prose; false leaves implementation changes uncommitted.
 
@@ -115,17 +115,20 @@ Persistent read-only Luna/medium root
   └─ factual handoff (no readiness verdict)
 ```
 
-`audit-pipeline` is fully controller-owned and read-only:
+`audit-pipeline` is fully controller-owned and factual:
 
 ```text
 Persistent deferred Luna/medium synthesis root
-  ├─ four isolated Luna/medium audit tracks in parallel
+  ├─ four isolated read-only Luna/medium static audit tracks in parallel
+  ├─ one isolated Luna/medium executor-audit contributor with ordinary bash
   ├─ synthesis activates when the first valid report settles
   ├─ later reports queue while synthesis is busy and are delivered when it is idle
   └─ one validated factual structured audit handoff (no remediation/readiness/Git decision)
 ```
 
-The incremental reducer validates and accepts every expected role exactly once, batches arrivals while synthesis is busy, never interrupts an active turn, and finalizes only after all four reports are integrated and a strict final report passes. Audit tracks and the persistent synthesizer submit complete strict reports through the bounded `pipeline_audit_submit` tool; validated final-text output remains a compatibility fallback. A malformed settled turn receives up to three same-session corrections, with a fourth failure cancelling the run; track budgets are independent and the synthesizer budget is cumulative across revisions. `pipeline_check` exposes only bounded counts, reducer busy/idle state, revision, and final-validation state—not prompts, raw reports, Git evidence, tool data, or session paths. Feature and plan final-audit phases instantiate this same internal segment; their Sol roots still own final resolution and completion.
+The executor inspects manifests and complete script definitions before selecting existing checks, prefers cheap checks, and records bounded exact commands with passed/failed/timed-out/skipped status, available exit codes, output summaries, unproven checks, and observed workspace changes. Its trusted-workspace prompt prohibits intentional edits, fixer/snapshot-update modes, dependency changes, mutating Git or external/network state, interactive/watch/long-lived commands, delegation, orchestration, and user prompting. Test/build/cache artifacts may still occur and are observed rather than rolled back. The four static tracks and synthesizer remain shell-denied and read-only.
+
+The incremental reducer validates and accepts every expected role exactly once, batches arrivals while synthesis is busy, never interrupts an active turn, and finalizes only after all five contributor reports are integrated and a strict final report passes. Audit contributors and the persistent synthesizer submit complete strict reports through the bounded `pipeline_audit_submit` tool; validated final-text output remains a compatibility fallback. A malformed settled turn receives up to three same-session corrections, with a fourth failure cancelling the run; track budgets are independent and the synthesizer budget is cumulative across revisions. `pipeline_check` exposes only bounded counts, reducer busy/idle state, revision, and final-validation state—not prompts, raw reports, Git evidence, tool data, or session paths. Feature and plan final-audit phases instantiate this same five-contributor segment; their Sol roots still own final resolution and completion. Feature and standalone audits use normal executor behavior. Plan final audits restrict executor commands to relevant plan/artifact validation or check-only scripts and require unsupported product checks to be recorded as skipped/unproven rather than running implementation tests. The separate small-feature graph intentionally remains four static auditors with no executor or reusable synthesis segment.
 
 `plan-pipeline` runs this fixed graph. Its root and children do not receive shell/edit/write or delegated patch/task tools; Sol writes only through a bounded `docs/plans/*.md` plan tool and receives bounded plan-validation and Git-status tools:
 
@@ -135,7 +138,8 @@ Persistent Sol/high root
   ├─ Sol writes docs/plans/<name>.md (no product implementation)
   ├─ four parallel Luna/medium plan audits
   ├─ Sol remediates the plan once
-  ├─ four read-only Luna/medium final-audit tracks
+  ├─ four read-only Luna/medium static final-audit tracks
+  ├─ one Luna/medium executor-audit contributor limited to plan/artifact checks
   ├─ one persistent Luna/medium incremental synthesizer
   └─ Sol resolves the synthesis once and returns a factual handoff
 ```

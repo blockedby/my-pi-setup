@@ -12,11 +12,13 @@ import type {
 } from "../shared/agent-tree/domain.ts";
 import {
   AUDIT_PIPELINE_ID,
+  AUDIT_SEGMENT_LUNA_ROLES,
   AUDIT_SYNTHESIS_ROLE,
+  EXECUTOR_AUDIT_ROLE,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
-  PIPELINE_4_LUNA_AUDIT_ROLES,
   PIPELINE_STAGES,
+  STATIC_LUNA_AUDIT_ROLES,
   PLAN_PIPELINE_AUDIT_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
@@ -95,7 +97,7 @@ export function pipelineAuditSubmissionAllowed(
   }
   return (
     segmentActive &&
-    PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)
+    AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role)
   );
 }
 
@@ -813,6 +815,12 @@ export class PipelineController {
       checks: options.checks.slice(0, 128),
       input,
       git: this.auditGitIdentity(run),
+      purpose:
+        run.definition === AUDIT_PIPELINE_ID
+          ? "standalone"
+          : run.definition === PLAN_PIPELINE_ID
+            ? "plan-final"
+            : "feature-final",
     };
     const segment = new AuditSegment(context);
     run.auditSegment = segment;
@@ -838,7 +846,7 @@ export class PipelineController {
     }
 
     const tracks = await Promise.all(
-      PIPELINE_4_LUNA_AUDIT_ROLES.map(async (role) => {
+      AUDIT_SEGMENT_LUNA_ROLES.map(async (role) => {
         const attempt =
           this.agentsFor(run.id).filter((agent) => agent.role === role).length +
           1;
@@ -956,6 +964,9 @@ export class PipelineController {
           if (submitted !== undefined)
             segment.acceptSubmitted(role, submitted, child.attempt);
           else segment.accept(role, child.finalText, child.attempt);
+          if (role === EXECUTOR_AUDIT_ROLE) {
+            segment.captureExecutorHostObservation(this.auditGitIdentity(run));
+          }
         } catch (error) {
           await this.auditCorrection(run, id, error);
           if (run.status !== "running" && run.status !== "starting") return;
@@ -1043,19 +1054,24 @@ export class PipelineController {
     run.finishedAt = Date.now();
     run.completion = {
       outcome: report.summary,
-      changedPaths: [],
+      changedPaths: report.workspaceChangesObserved.map((item) => item.path),
       checks: [
         `${progress?.integratedReportCount ?? 0} validated Luna audit reports integrated exactly once.`,
         `${progress?.revision ?? 0} serialized synthesis revision(s) completed.`,
         `Captured review identity: ${report.baseSha}..${report.headSha} (WORKTREE).`,
+        ...report.executedChecks.map(
+          (item) =>
+            `${item.command}: ${item.status}${item.exitCode === null ? "" : ` (exit ${item.exitCode})`} — ${item.evidence}`,
+        ),
       ],
       assumptions: [],
       git: [
         `Review base ${report.baseSha}`,
         `Review head ${report.headSha} with WORKTREE evidence`,
+        report.hostWorkspaceObservation.summary,
       ],
       reports: [
-        `Validated ${report.mode} audit synthesis: ${report.findings.length} finding(s), ${report.unresolvedConflicts.length} unresolved conflict(s), ${report.unprovenChecks.length} unproven check(s).`,
+        `Validated ${report.mode} audit synthesis: ${report.findings.length} finding(s), ${report.unresolvedConflicts.length} unresolved conflict(s), ${report.unprovenChecks.length} unproven check(s), ${report.executedChecks.length} executor check record(s), ${report.workspaceChangesObserved.length} executor-observed workspace change(s).`,
       ],
       unresolvedItems: [
         ...report.unresolvedConflicts.map((item) => item.description),
@@ -1172,7 +1188,7 @@ export class PipelineController {
             }
           : run.stage === "final-audit"
             ? {
-                roles: PIPELINE_4_LUNA_AUDIT_ROLES,
+                roles: STATIC_LUNA_AUDIT_ROLES,
                 nextStage: "final-resolve" as const,
               }
             : run.stage === "final-resolve"
@@ -1209,7 +1225,7 @@ export class PipelineController {
           : PLAN_PIPELINE_DISCOVERY_ROLES
         : run.stage === "audit"
           ? run.definition === FEATURE_PIPELINE_ID
-            ? PIPELINE_4_LUNA_AUDIT_ROLES
+            ? STATIC_LUNA_AUDIT_ROLES
             : run.definition === PLAN_PIPELINE_ID
               ? PLAN_PIPELINE_AUDIT_ROLES
               : []
@@ -1251,7 +1267,7 @@ export class PipelineController {
       if (stage === "final-audit") {
         this.requireValidReports(run, [SMALL_FEATURE_IMPLEMENTER_ROLE], stage);
       } else if (stage === "final-resolve") {
-        this.requireValidReports(run, PIPELINE_4_LUNA_AUDIT_ROLES, stage);
+        this.requireValidReports(run, STATIC_LUNA_AUDIT_ROLES, stage);
       } else if (stage === "complete") {
         if (
           this.childContinuations.get(
@@ -1348,7 +1364,7 @@ export class PipelineController {
       role === AUDIT_SYNTHESIS_ROLE ||
       ((run.definition === FEATURE_PIPELINE_ID ||
         run.definition === PLAN_PIPELINE_ID) &&
-        PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role) &&
+        AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role) &&
         run.stage === "final-audit")
     ) {
       throw new Error(`${role} is controller-owned by the Luna audit segment.`);
@@ -1375,7 +1391,7 @@ export class PipelineController {
     }
     if (
       run.definition === FEATURE_PIPELINE_ID &&
-      PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role) &&
+      AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role) &&
       run.stage !== "audit"
     ) {
       throw new Error(
@@ -1396,7 +1412,7 @@ export class PipelineController {
         );
       }
     } else if (run.definition === PLAN_PIPELINE_ID) {
-      if (PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)) {
+      if (AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role)) {
         throw new Error(
           `${role} is controller-owned by the Luna audit segment.`,
         );
@@ -1540,7 +1556,7 @@ export class PipelineController {
           "small-feature-pipeline Luna remediation can only run during final-resolve.",
         );
       }
-      this.requireValidReports(run, PIPELINE_4_LUNA_AUDIT_ROLES, run.stage);
+      this.requireValidReports(run, STATIC_LUNA_AUDIT_ROLES, run.stage);
       if (agent.status !== "idle") {
         throw new Error(
           "small-feature-pipeline Luna must be idle before remediation.",
@@ -1577,7 +1593,7 @@ export class PipelineController {
       run.definition === SMALL_FEATURE_PIPELINE_ID
         ? [
             "Independent Luna audit reports to resolve:",
-            ...PIPELINE_4_LUNA_AUDIT_ROLES.flatMap((role) => [
+            ...STATIC_LUNA_AUDIT_ROLES.flatMap((role) => [
               `${titleForRole(role)}:`,
               this.agentsFor(runId).find((candidate) => candidate.role === role)
                 ?.finalText ?? "",
@@ -1754,14 +1770,18 @@ export class PipelineController {
         changedPaths: [
           ...new Set([...facts.changedPaths, artifact.relativePath]),
         ],
+        auditReport: run.auditSegment.finalReport,
       };
-    } else if (
-      run.definition === FEATURE_PIPELINE_ID &&
-      !run.auditSegment?.finalReport
-    ) {
-      throw new Error(
-        "feature-pipeline completion requires a validated Luna audit synthesis.",
-      );
+    } else if (run.definition === FEATURE_PIPELINE_ID) {
+      if (!run.auditSegment?.finalReport) {
+        throw new Error(
+          "feature-pipeline completion requires a validated Luna audit synthesis.",
+        );
+      }
+      completion = {
+        ...facts,
+        auditReport: run.auditSegment.finalReport,
+      };
     }
     run.stage = "complete";
     run.status = "completed";
@@ -1814,9 +1834,10 @@ export class PipelineController {
     const roles = rolesForDefinition(run.definition).filter(
       (role) =>
         role !== AUDIT_SYNTHESIS_ROLE &&
+        role !== EXECUTOR_AUDIT_ROLE &&
         !(
           run.definition === PLAN_PIPELINE_ID &&
-          PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)
+          AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role)
         ),
     );
     const tools: ToolDefinition[] = [
@@ -2057,7 +2078,7 @@ export class PipelineController {
           name: "pipeline_audit_start",
           label: "Start Luna Audit Segment",
           description:
-            "Start this hardcoded pipeline's controller-owned four-track Luna final audit and persistent incremental synthesizer.",
+            "Start this hardcoded pipeline's controller-owned five-contributor Luna final audit and persistent incremental synthesizer.",
           parameters: Type.Object(
             {
               acceptance_contract: Type.String({

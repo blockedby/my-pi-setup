@@ -60,19 +60,27 @@ export const FEATURE_CORRECTNESS_AUDIT_ROLE =
   "audit-functional-correctness" as const;
 export const FEATURE_RELIABILITY_AUDIT_ROLE =
   "audit-reliability-regressions" as const;
+export const EXECUTOR_AUDIT_ROLE = "executor-audit" as const;
 
-export const PIPELINE_4_LUNA_AUDIT_ROLES = [
+/** The pre-final feature and small-feature audit wave remains four static tracks. */
+export const STATIC_LUNA_AUDIT_ROLES = [
   FEATURE_OUTCOME_AUDIT_ROLE,
   FEATURE_LOGIC_AUDIT_ROLE,
   FEATURE_CORRECTNESS_AUDIT_ROLE,
   FEATURE_RELIABILITY_AUDIT_ROLE,
 ] as const;
-export type PipelineLunaAuditRole =
-  (typeof PIPELINE_4_LUNA_AUDIT_ROLES)[number];
+export type StaticLunaAuditRole = (typeof STATIC_LUNA_AUDIT_ROLES)[number];
+
+/** Reusable standalone/embedded audit segment contributors. */
+export const AUDIT_SEGMENT_LUNA_ROLES = [
+  ...STATIC_LUNA_AUDIT_ROLES,
+  EXECUTOR_AUDIT_ROLE,
+] as const;
+export type PipelineLunaAuditRole = (typeof AUDIT_SEGMENT_LUNA_ROLES)[number];
 
 export const FEATURE_PIPELINE_CHILD_ROLES = [
   ...FEATURE_PIPELINE_DISCOVERY_ROLES,
-  ...PIPELINE_4_LUNA_AUDIT_ROLES,
+  ...AUDIT_SEGMENT_LUNA_ROLES,
   AUDIT_SYNTHESIS_ROLE,
 ] as const;
 
@@ -81,7 +89,7 @@ export const SMALL_FEATURE_IMPLEMENTER_ROLE =
 
 export const SMALL_FEATURE_PIPELINE_CHILD_ROLES = [
   SMALL_FEATURE_IMPLEMENTER_ROLE,
-  ...PIPELINE_4_LUNA_AUDIT_ROLES,
+  ...STATIC_LUNA_AUDIT_ROLES,
 ] as const;
 
 export const PLAN_PIPELINE_DISCOVERY_ROLES = [
@@ -102,12 +110,12 @@ export const PLAN_PIPELINE_AUDIT_ROLES = [
 export const PLAN_PIPELINE_CHILD_ROLES = [
   ...PLAN_PIPELINE_DISCOVERY_ROLES,
   ...PLAN_PIPELINE_AUDIT_ROLES,
-  ...PIPELINE_4_LUNA_AUDIT_ROLES,
+  ...AUDIT_SEGMENT_LUNA_ROLES,
   AUDIT_SYNTHESIS_ROLE,
 ] as const;
 
 export const AUDIT_PIPELINE_CHILD_ROLES = [
-  ...PIPELINE_4_LUNA_AUDIT_ROLES,
+  ...AUDIT_SEGMENT_LUNA_ROLES,
 ] as const;
 
 // Backward-compatible alias for feature-pipeline callers and tests.
@@ -144,6 +152,7 @@ export const PIPELINE_CHILD_CONTEXT_POLICIES: PipelineChildContextPolicies = {
     [FEATURE_LOGIC_AUDIT_ROLE]: { gitEvidence: true },
     [FEATURE_CORRECTNESS_AUDIT_ROLE]: { gitEvidence: true },
     [FEATURE_RELIABILITY_AUDIT_ROLE]: { gitEvidence: true },
+    [EXECUTOR_AUDIT_ROLE]: { gitEvidence: true },
   },
   [SMALL_FEATURE_PIPELINE_ID]: {
     [FEATURE_OUTCOME_AUDIT_ROLE]: {
@@ -169,6 +178,7 @@ export const PIPELINE_CHILD_CONTEXT_POLICIES: PipelineChildContextPolicies = {
     [FEATURE_LOGIC_AUDIT_ROLE]: { gitEvidence: true },
     [FEATURE_CORRECTNESS_AUDIT_ROLE]: { gitEvidence: true },
     [FEATURE_RELIABILITY_AUDIT_ROLE]: { gitEvidence: true },
+    [EXECUTOR_AUDIT_ROLE]: { gitEvidence: true },
   },
 };
 

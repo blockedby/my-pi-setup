@@ -11,7 +11,8 @@ import {
   type PipelineSelection,
 } from "./dashboard.ts";
 import {
-  PIPELINE_4_LUNA_AUDIT_ROLES,
+  AUDIT_SEGMENT_LUNA_ROLES,
+  STATIC_LUNA_AUDIT_ROLES,
   type PipelineRunSnapshot,
 } from "./domain.ts";
 import { handoffText } from "./index.ts";
@@ -296,7 +297,7 @@ test("dashboard lists all definitions and nests runs under the selected definiti
 
 test("feature final audit separates repeated audit roles and selects a running track", () => {
   const root = agent("root-1", { createdAt: 1 });
-  const firstWave = PIPELINE_4_LUNA_AUDIT_ROLES.map((role, index) =>
+  const firstWave = STATIC_LUNA_AUDIT_ROLES.map((role, index) =>
     agent(`audit-first-${index + 1}`, {
       parentId: root.id,
       role,
@@ -311,7 +312,7 @@ test("feature final audit separates repeated audit roles and selects a running t
     status: "idle",
     createdAt: 20,
   });
-  const secondWave = PIPELINE_4_LUNA_AUDIT_ROLES.map((role, index) =>
+  const secondWave = AUDIT_SEGMENT_LUNA_ROLES.map((role, index) =>
     agent(`audit-final-${index + 1}`, {
       parentId: root.id,
       role,
@@ -362,7 +363,7 @@ test("feature final audit selects running synthesis after final tracks settle", 
   const root = agent("root-1", { createdAt: 1 });
   const firstWave = agent("audit-first", {
     parentId: root.id,
-    role: PIPELINE_4_LUNA_AUDIT_ROLES[0],
+    role: STATIC_LUNA_AUDIT_ROLES[0],
     attempt: 1,
     status: "done",
     createdAt: 10,
@@ -375,7 +376,7 @@ test("feature final audit selects running synthesis after final tracks settle", 
   });
   const finalTrack = agent("audit-final", {
     parentId: root.id,
-    role: PIPELINE_4_LUNA_AUDIT_ROLES[0],
+    role: STATIC_LUNA_AUDIT_ROLES[0],
     attempt: 2,
     status: "done",
     createdAt: 21,
@@ -395,7 +396,7 @@ test("feature final audit selects running synthesis after final tracks settle", 
 
 test("feature final audit keeps partial retries separate from the pre-final wave", () => {
   const root = agent("root-1", { createdAt: 1 });
-  const firstWave = PIPELINE_4_LUNA_AUDIT_ROLES.map((role, index) =>
+  const firstWave = STATIC_LUNA_AUDIT_ROLES.map((role, index) =>
     agent(`audit-first-${index + 1}`, {
       parentId: root.id,
       role,
@@ -412,7 +413,7 @@ test("feature final audit keeps partial retries separate from the pre-final wave
   });
   const retry = agent("audit-final-retry", {
     parentId: root.id,
-    role: PIPELINE_4_LUNA_AUDIT_ROLES[0],
+    role: STATIC_LUNA_AUDIT_ROLES[0],
     attempt: 7,
     status: "running",
     createdAt: 21,
@@ -446,7 +447,7 @@ test("small-feature dashboard shows only its fixed stages and child placement", 
     persistent: true,
     status: "idle",
   });
-  const auditors = PIPELINE_4_LUNA_AUDIT_ROLES.map((role, index) =>
+  const auditors = STATIC_LUNA_AUDIT_ROLES.map((role, index) =>
     agent(`audit-luna-${index + 1}`, {
       parentId: root.id,
       role,
@@ -530,7 +531,7 @@ test("pipeline selection follows a stable nested row and reconciles removal", ()
   assert.deepEqual(selection, { key: undefined, index: 0 });
 });
 
-test("completion follow-up text is bounded", () => {
+test("completion follow-up text preserves complete factual output", () => {
   const text = handoffText({
     runId: "run-large",
     definition: "feature-pipeline",
@@ -546,6 +547,89 @@ test("completion follow-up text is bounded", () => {
       workingDir: "/tmp/work",
     },
   });
-  assert.ok(Buffer.byteLength(text, "utf8") < 34 * 1024);
-  assert.match(text, /handoff truncated/);
+  assert.ok(Buffer.byteLength(text, "utf8") > 100_000);
+  assert.match(text, new RegExp(`x{${100_000}}`));
+  assert.doesNotMatch(text, /handoff truncated/);
+});
+
+test("audit handoff preserves complete executor and host workspace evidence", () => {
+  const gitEvidence = { state: "available" as const, value: "clean" };
+  const text = handoffText({
+    runId: "run-audit-large",
+    definition: "audit-pipeline",
+    status: "completed",
+    facts: {
+      outcome: "Bounded audit completed",
+      changedPaths: [],
+      checks: [],
+      assumptions: [],
+      git: [],
+      reports: [],
+      unresolvedItems: [],
+      workingDir: "/tmp/work",
+      auditReport: {
+        reportType: "audit-synthesis-final",
+        mode: "initial",
+        baseSha: "base",
+        headSha: "head",
+        integratedRoles: AUDIT_SEGMENT_LUNA_ROLES,
+        findings: Array.from({ length: 15 }, (_, index) => ({
+          id: `AUD-${String(index + 1).padStart(3, "0")}`,
+          title: `Finding ${index + 1}`,
+          sourceRoles: ["audit-feature-outcome" as const],
+          scope: "initial" as const,
+          scopeReference: "task",
+          scenario: "x".repeat(1_000),
+          expected: "expected",
+          actual: "actual",
+          affectedPaths: ["src/example.ts"],
+          relationship: "introduced" as const,
+          evidenceType: "static" as const,
+          evidence: "evidence",
+          impact: 3 as const,
+          confidence: 90,
+          minimalNextAction: "fix",
+        })),
+        closureResults: [],
+        unresolvedConflicts: [],
+        unprovenChecks: [],
+        executedChecks: Array.from({ length: 7 }, (_, index) => ({
+          command: index === 0 ? "npm run check" : `npm run check:${index}`,
+          status: "passed" as const,
+          exitCode: 0,
+          evidence: `${index}: ${"execution evidence ".repeat(160)}`,
+        })),
+        workspaceChangesObserved: Array.from({ length: 7 }, (_, index) => ({
+          path: index === 0 ? ".cache/result" : `.cache/result-${index}`,
+          change: "untracked" as const,
+          evidence: `${index}: ${"workspace evidence ".repeat(25)}`,
+        })),
+        hostWorkspaceObservation: {
+          capturedAfterExecutor: true,
+          workspaceChanged: true,
+          statusBefore: gitEvidence,
+          statusAfter: {
+            state: "available",
+            value: `?? .cache/result ${"host status ".repeat(60)}`,
+          },
+          dirtyDiffAfter: {
+            state: "available",
+            value: "host dirty diff ".repeat(60),
+          },
+          combinedDiffAfter: {
+            state: "available",
+            value: "host combined diff ".repeat(60),
+          },
+          summary: `Fresh host observation retained ${"host summary ".repeat(60)}`,
+        },
+        summary: "Large valid audit report",
+      },
+    },
+  });
+
+  assert.match(text, /npm run check:6/);
+  assert.match(text, /\.cache\/result-6/);
+  assert.match(text, /Fresh host observation retained/);
+  assert.match(text, /host combined diff/);
+  assert.doesNotMatch(text, /projection compacted|handoff truncated/);
 });

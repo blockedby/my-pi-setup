@@ -18,8 +18,10 @@ import { inspectPipeline, PIPELINE_CHECK_MAX_BYTES } from "./inspection.ts";
 import { pipelineSessionToolPolicy, pipelineThinkingLevel } from "./session.ts";
 import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
+  AUDIT_SEGMENT_LUNA_ROLES,
+  EXECUTOR_AUDIT_ROLE,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
-  PIPELINE_4_LUNA_AUDIT_ROLES,
+  STATIC_LUNA_AUDIT_ROLES,
   FINAL_AUDIT_ROLE,
   LUNA_MODEL,
   PIPELINE_CHILD_ROLES,
@@ -302,6 +304,22 @@ function reportForRole(role: string) {
       constraints: [],
     });
   }
+  if (role === EXECUTOR_AUDIT_ROLE) {
+    return JSON.stringify({
+      track: role,
+      executedChecks: [
+        {
+          command: "npm run check",
+          status: "passed",
+          exitCode: 0,
+          evidence: "Type check passed.",
+        },
+      ],
+      workspaceChangesObserved: [],
+      findings: [],
+      unprovenChecks: [],
+    });
+  }
   if (role === "final-audit") {
     return JSON.stringify({
       mode: "initial",
@@ -343,6 +361,9 @@ function synthesisReport(
       rootCauseCandidates: [],
       unresolvedConflicts: [],
       unprovenChecks: [],
+      executedChecks: [],
+      workspaceChangesObserved: [],
+      hostWorkspaceObservation: null,
       summary: "Incremental synthesis retained validated evidence",
     });
   }
@@ -356,6 +377,17 @@ function synthesisReport(
     closureResults: [],
     unresolvedConflicts: [],
     unprovenChecks: [],
+    executedChecks: [],
+    workspaceChangesObserved: [],
+    hostWorkspaceObservation: {
+      capturedAfterExecutor: true,
+      workspaceChanged: false,
+      statusBefore: { state: "available", value: "" },
+      statusAfter: { state: "available", value: "" },
+      dirtyDiffAfter: { state: "available", value: "" },
+      combinedDiffAfter: { state: "available", value: "" },
+      summary: "Fresh host observation completed.",
+    },
     summary: "No supported findings",
   });
 }
@@ -370,7 +402,7 @@ async function finishEmbeddedAudit(
     assumptions: [],
     checks: ["focused checks passed"],
   });
-  const firstRole = PIPELINE_4_LUNA_AUDIT_ROLES[0];
+  const firstRole = AUDIT_SEGMENT_LUNA_ROLES[0];
   const first =
     run.sessions.find(
       (session) => session.spec.role === firstRole && session.spec.attempt > 1,
@@ -381,7 +413,7 @@ async function finishEmbeddedAudit(
     outcome: { type: "completed", finalText: reportForRole(firstRole) },
   });
   await settleInitialization();
-  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES.slice(1)) {
+  for (const role of AUDIT_SEGMENT_LUNA_ROLES.slice(1)) {
     const session = [...run.sessions]
       .reverse()
       .find((candidate) => candidate.spec.role === role);
@@ -409,13 +441,13 @@ async function finishEmbeddedAudit(
       type: "completed",
       finalText: synthesisReport(
         "audit-synthesis-final",
-        PIPELINE_4_LUNA_AUDIT_ROLES,
+        AUDIT_SEGMENT_LUNA_ROLES,
       ),
     },
   });
   await settleInitialization();
   assert.equal(run.controller.get(runId)?.stage, "final-resolve");
-  assert.equal(agents.length, 5);
+  assert.equal(agents.length, 6);
 }
 
 async function advancePlanToComplete(
@@ -865,7 +897,7 @@ test("root tools are run-scoped and feature discovery children are read-only", a
 });
 
 test("definition role policies centralize child context requirements", () => {
-  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+  for (const role of STATIC_LUNA_AUDIT_ROLES) {
     assert.deepEqual(childContextPolicyFor("feature-pipeline", role), {
       gitEvidence: true,
     });
@@ -877,7 +909,7 @@ test("definition role policies centralize child context requirements", () => {
     childContextPolicyFor("feature-pipeline", FINAL_AUDIT_ROLE),
     {},
   );
-  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+  for (const role of STATIC_LUNA_AUDIT_ROLES) {
     assert.deepEqual(childContextPolicyFor("small-feature-pipeline", role), {
       gitEvidence: true,
       priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
@@ -949,7 +981,7 @@ test("small-feature Luna root and audit Lunas are read-only while the implemente
     pipelineSessionToolPolicy(
       "small-feature-pipeline",
       false,
-      PIPELINE_4_LUNA_AUDIT_ROLES[0],
+      STATIC_LUNA_AUDIT_ROLES[0],
     ).excludeTools,
   );
   for (const workspaceMutator of ["bash", "edit", "write"]) {
@@ -1126,7 +1158,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
   );
   assert.deepEqual(SMALL_FEATURE_PIPELINE_CHILD_ROLES, [
     SMALL_FEATURE_IMPLEMENTER_ROLE,
-    ...PIPELINE_4_LUNA_AUDIT_ROLES,
+    ...STATIC_LUNA_AUDIT_ROLES,
   ]);
 
   const implementer = await run.controller.spawnChild(
@@ -1145,15 +1177,15 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
   assert.equal(run.controller.get(runId)?.stage, "final-audit");
 
   const auditors = await Promise.all(
-    PIPELINE_4_LUNA_AUDIT_ROLES.map((role) =>
+    STATIC_LUNA_AUDIT_ROLES.map((role) =>
       run.controller.spawnChild(runId, role),
     ),
   );
   await assert.rejects(
-    run.controller.spawnChild(runId, PIPELINE_4_LUNA_AUDIT_ROLES[0]),
+    run.controller.spawnChild(runId, STATIC_LUNA_AUDIT_ROLES[0]),
     /already has its allowed child session/,
   );
-  for (const [index, role] of PIPELINE_4_LUNA_AUDIT_ROLES.entries()) {
+  for (const [index, role] of STATIC_LUNA_AUDIT_ROLES.entries()) {
     const auditor = auditors[index];
     assert.ok(auditor);
     assert.equal(auditor.model, LUNA_MODEL);
@@ -1171,11 +1203,10 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
   }
   const firstAuditor = auditors[0];
   assert.ok(firstAuditor);
-  settleRole(run, PIPELINE_4_LUNA_AUDIT_ROLES[0]);
+  settleRole(run, STATIC_LUNA_AUDIT_ROLES[0]);
   await run.controller.waitForChildren(runId, [firstAuditor.id]);
   assert.equal(run.controller.get(runId)?.stage, "final-audit");
-  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES.slice(1))
-    settleRole(run, role);
+  for (const role of STATIC_LUNA_AUDIT_ROLES.slice(1)) settleRole(run, role);
   await run.controller.waitForChildren(
     runId,
     auditors.slice(1).map((auditor) => auditor.id),
@@ -1203,7 +1234,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     implementerSession.sends[0] ?? "",
     /Independent Luna audit reports to resolve/,
   );
-  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+  for (const role of STATIC_LUNA_AUDIT_ROLES) {
     assert.equal(
       implementerSession.sends[0]?.includes(reportForRole(role)),
       true,
@@ -1275,11 +1306,11 @@ test("feature audits and the embedded Luna segment receive captured fresh Git ev
   fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "after\n");
   run.controller.setStage(runId, "audit");
   await Promise.all(
-    PIPELINE_4_LUNA_AUDIT_ROLES.map((role) =>
+    STATIC_LUNA_AUDIT_ROLES.map((role) =>
       run.controller.spawnChild(runId, role),
     ),
   );
-  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+  for (const role of STATIC_LUNA_AUDIT_ROLES) {
     const lunaAudit = run.sessions.find(
       (session) => session.spec.role === role,
     );
@@ -1297,7 +1328,7 @@ test("feature audits and the embedded Luna segment receive captured fresh Git ev
     assumptions: [],
     checks: ["focused tests passed"],
   });
-  const finalAudits = PIPELINE_4_LUNA_AUDIT_ROLES.map((role) =>
+  const finalAudits = STATIC_LUNA_AUDIT_ROLES.map((role) =>
     [...run.sessions].reverse().find((session) => session.spec.role === role),
   );
   assert.equal(finalAudits.every(Boolean), true);
@@ -1358,12 +1389,12 @@ test("small-feature Luna audits receive the captured base, implementation report
   settleRole(run, "implement-small-feature");
   await run.controller.waitForChildren(runId, [implementer.id]);
   await Promise.all(
-    PIPELINE_4_LUNA_AUDIT_ROLES.map((role) =>
+    STATIC_LUNA_AUDIT_ROLES.map((role) =>
       run.controller.spawnChild(runId, role),
     ),
   );
 
-  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+  for (const role of STATIC_LUNA_AUDIT_ROLES) {
     const auditorSession = run.sessions.find(
       (session) => session.spec.role === role,
     );
@@ -1445,7 +1476,7 @@ test("small-feature-pipeline fails closed on a malformed Luna audit report", asy
   settleRole(run, SMALL_FEATURE_IMPLEMENTER_ROLE);
   await run.controller.waitForChildren(runId, [implementer.id]);
 
-  const auditRole = PIPELINE_4_LUNA_AUDIT_ROLES[0];
+  const auditRole = STATIC_LUNA_AUDIT_ROLES[0];
   const auditor = await run.controller.spawnChild(runId, auditRole);
   const auditorSession = run.sessions.find(
     (session) => session.spec.role === auditRole,
@@ -1512,7 +1543,7 @@ test("successful audit fan-in atomically enters audit-resolve", async () => {
   const runId = run.controller.start(request());
   await settleInitialization();
   run.controller.setStage(runId, "audit");
-  const auditRoles = PIPELINE_4_LUNA_AUDIT_ROLES;
+  const auditRoles = STATIC_LUNA_AUDIT_ROLES;
   const children = await Promise.all(
     auditRoles.map((role) => run.controller.spawnChild(runId, role)),
   );
@@ -1550,7 +1581,7 @@ test("embedded roots cannot cancel a busy controller-owned audit synthesizer", a
     assumptions: [],
     checks: [],
   });
-  const firstRole = PIPELINE_4_LUNA_AUDIT_ROLES[0];
+  const firstRole = STATIC_LUNA_AUDIT_ROLES[0];
   settleRole(run, firstRole);
   await settleInitialization();
   const synthesizer = agents.find((agent) => agent.role === "audit-synthesis");
@@ -1561,7 +1592,7 @@ test("embedded roots cannot cancel a busy controller-owned audit synthesizer", a
   assert.ok(synthesisSession);
   assert.equal(synthesisSession.sends.length, 1);
 
-  settleRole(run, PIPELINE_4_LUNA_AUDIT_ROLES[1]);
+  settleRole(run, STATIC_LUNA_AUDIT_ROLES[1]);
   await settleInitialization();
   assert.equal(run.controller.get(runId)?.auditSegment?.pendingReportCount, 1);
   await assert.rejects(
@@ -1790,13 +1821,23 @@ test("structured completion delivers one factual handoff without readiness statu
   await settleInitialization();
 
   assert.equal(run.handoffs.length, 1);
-  assert.deepEqual(run.handoffs[0], {
+  const handoff = run.handoffs[0];
+  assert.ok(handoff);
+  const { auditReport, ...completedFacts } = handoff.facts;
+  assert.deepEqual(handoff, {
     runId,
     definition: "feature-pipeline",
     status: "completed",
-    facts,
+    facts: { ...completedFacts, auditReport },
   });
-  assert.equal("readiness" in run.handoffs[0]!, false);
+  assert.deepEqual(completedFacts, facts);
+  assert.deepEqual(auditReport?.integratedRoles, AUDIT_SEGMENT_LUNA_ROLES);
+  assert.equal(auditReport?.executedChecks[0]?.status, "passed");
+  assert.equal(
+    auditReport?.hostWorkspaceObservation.capturedAfterExecutor,
+    true,
+  );
+  assert.equal("readiness" in handoff, false);
   assert.equal(run.controller.get(runId)?.status, "completed");
   await assert.rejects(
     Promise.resolve().then(() =>
@@ -1863,6 +1904,14 @@ test("plan completion requires and validates a repository-local plan artifact", 
   assert.deepEqual(run.handoffs[0]?.facts.changedPaths, [
     "docs/plans/example.md",
   ]);
+  assert.deepEqual(
+    run.handoffs[0]?.facts.auditReport?.integratedRoles,
+    AUDIT_SEGMENT_LUNA_ROLES,
+  );
+  assert.equal(
+    run.handoffs[0]?.facts.auditReport?.executedChecks[0]?.command,
+    "npm run check",
+  );
 
   await run.controller.dispose();
   fs.rmSync(workingDir, { recursive: true, force: true });
@@ -1893,7 +1942,9 @@ test("pipeline inspection does not mutate lifecycle state or consume the automat
   assert.equal(inspected.details.pipeline.id, runId);
   assert.deepEqual(run.controller.get(runId), before);
   assert.equal(run.handoffs.length, 1);
-  assert.deepEqual(run.handoffs[0]?.facts, facts);
+  const { auditReport: _auditReport, ...handoffFacts } =
+    run.handoffs[0]?.facts ?? {};
+  assert.deepEqual(handoffFacts, facts);
   await run.controller.dispose();
 });
 

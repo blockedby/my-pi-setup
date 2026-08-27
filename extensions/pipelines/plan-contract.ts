@@ -4,7 +4,7 @@ import * as path from "node:path";
 import {
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
-  PIPELINE_4_LUNA_AUDIT_ROLES,
+  STATIC_LUNA_AUDIT_ROLES,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_PIPELINE_ID,
   type PipelineDefinitionId,
@@ -550,9 +550,8 @@ export function validatePipelineReport(
             "Implementation report must contain exactly a non-empty summary, non-empty changedPaths and checks string arrays, plus assumptions and unresolvedItems string arrays.",
           ];
     }
-    return PIPELINE_4_LUNA_AUDIT_ROLES.some(
-      (auditRole) => auditRole === role,
-    ) && validLunaAuditReport(report)
+    return STATIC_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role) &&
+      validLunaAuditReport(report)
       ? []
       : [
           "Small-feature Luna audit must match the complete track, findings, and unprovenChecks schema.",
