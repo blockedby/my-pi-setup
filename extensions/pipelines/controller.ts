@@ -25,6 +25,7 @@ import {
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SMALL_FEATURE_PIPELINE_ID,
+  assertPipelineGitCommitSupported,
   childContextPolicyFor,
   definitionFor,
   initialStageForDefinition,
@@ -408,14 +409,7 @@ export class PipelineController {
     if (this.shuttingDown)
       throw new Error("Pipeline controller is shutting down.");
     const definition = request.pipeline ?? FEATURE_PIPELINE_ID;
-    if (
-      request.gitCommit === true &&
-      definition !== SMALL_FEATURE_PIPELINE_ID
-    ) {
-      throw new Error(
-        `git_commit is only supported for small-feature-pipeline; received ${definition}.`,
-      );
-    }
+    assertPipelineGitCommitSupported(definition, request.gitCommit === true);
     if (request.audit && definition !== AUDIT_PIPELINE_ID) {
       throw new Error("Audit input is only valid for audit-pipeline.");
     }
@@ -1780,6 +1774,7 @@ export class PipelineController {
       }
       completion = {
         ...facts,
+        git: [...facts.git, ...this.finalGitFacts(run)],
         auditReport: run.auditSegment.finalReport,
       };
     }

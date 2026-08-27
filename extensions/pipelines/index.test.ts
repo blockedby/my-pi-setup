@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
+import { assertPipelineGitCommitSupported } from "./domain.ts";
 import pipelinesExtension, {
   PIPELINE_RUN_PARAMETERS,
   resolvePipelineDefinition,
@@ -29,6 +30,17 @@ test("pipeline_run accepts a task with an optional working directory", () => {
     Check(PIPELINE_RUN_PARAMETERS, { task: "Build a feature" }),
     true,
   );
+  for (const git_commit of [true, false]) {
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, {
+        pipeline: "feature-pipeline",
+        task: "Implement a feature",
+        working_dir: "/repo/current-branch",
+        git_commit,
+      }),
+      true,
+    );
+  }
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
       pipeline: "small-feature-pipeline",
@@ -104,6 +116,39 @@ test("pipeline_run accepts a task with an optional working directory", () => {
     false,
   );
   assert.equal(Check(PIPELINE_RUN_PARAMETERS, {}), false);
+});
+
+test("git_commit public schema describes the definition and role boundary", () => {
+  const description = Reflect.get(
+    PIPELINE_RUN_PARAMETERS.properties.git_commit,
+    "description",
+  );
+  assert.equal(typeof description, "string");
+  assert.match(description, /persistent feature-pipeline Sol root/);
+  assert.match(description, /persistent small-feature implementer/);
+  assert.match(description, /Plan\/audit reject true/);
+  assert.match(description, /no workspace, worktree, cleanliness, or branch/);
+  assert.match(description, /never permits push/);
+});
+
+test("git_commit validation accepts implementation roots and rejects plan/audit", () => {
+  assert.doesNotThrow(() =>
+    assertPipelineGitCommitSupported("feature-pipeline", true),
+  );
+  assert.doesNotThrow(() =>
+    assertPipelineGitCommitSupported("small-feature-pipeline", true),
+  );
+  assert.doesNotThrow(() =>
+    assertPipelineGitCommitSupported("plan-pipeline", false),
+  );
+  for (const pipeline of ["plan-pipeline", "audit-pipeline"] as const) {
+    assert.throws(
+      () => assertPipelineGitCommitSupported(pipeline, true),
+      new RegExp(
+        `git_commit is only supported for feature-pipeline and small-feature-pipeline.*${pipeline}`,
+      ),
+    );
+  }
 });
 
 test("pipeline_run defaults to feature-pipeline and rejects unknown definitions", () => {

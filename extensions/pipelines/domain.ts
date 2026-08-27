@@ -314,9 +314,34 @@ export interface PipelineRunRequest {
   readonly workingDir: string;
   readonly task: string;
   readonly pipeline?: PipelineDefinitionId;
-  /** Commit permission is opt-in and is only valid for small-feature-pipeline. */
+  /** Explicit ordinary-commit opt-in; authority remains definition- and role-scoped. */
   readonly gitCommit?: boolean;
   readonly audit?: AuditPipelineInput;
+}
+
+export type PipelineCommitRole = PipelineChildRole | "pipeline-root";
+
+/** The sole role that may receive ordinary-commit authority in each supported definition. */
+export const PIPELINE_COMMIT_AUTHORITY_ROLES: Readonly<
+  Partial<Record<PipelineDefinitionId, PipelineCommitRole>>
+> = {
+  [FEATURE_PIPELINE_ID]: "pipeline-root",
+  [SMALL_FEATURE_PIPELINE_ID]: SMALL_FEATURE_IMPLEMENTER_ROLE,
+};
+
+export function pipelineCommitAuthorityRole(definition: PipelineDefinitionId) {
+  return PIPELINE_COMMIT_AUTHORITY_ROLES[definition];
+}
+
+export function assertPipelineGitCommitSupported(
+  definition: PipelineDefinitionId,
+  requested: boolean,
+) {
+  if (requested && !pipelineCommitAuthorityRole(definition)) {
+    throw new Error(
+      `git_commit is only supported for feature-pipeline and small-feature-pipeline; received ${definition}.`,
+    );
+  }
 }
 
 export interface PipelineHandoff {
