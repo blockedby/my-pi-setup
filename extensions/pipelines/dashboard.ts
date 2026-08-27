@@ -61,22 +61,45 @@ export type PipelineRow =
       readonly status: AgentNodeSnapshot["status"];
     };
 
+function isPipelineAuditRole(role: string) {
+  return PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role);
+}
+
+function isFeatureFinalAuditTrack(
+  run: PipelineRunSnapshot,
+  child: AgentNodeSnapshot,
+  children: ReadonlyArray<AgentNodeSnapshot>,
+) {
+  if (run.definition !== "feature-pipeline") return false;
+  if (!isPipelineAuditRole(child.role)) return false;
+  const synthesisIndex = children.findIndex(
+    (candidate) => candidate.role === AUDIT_SYNTHESIS_ROLE,
+  );
+  if (synthesisIndex < 0) return false;
+  const synthesis = children[synthesisIndex];
+  return (
+    children.indexOf(child) > synthesisIndex ||
+    (synthesis !== undefined && child.createdAt > synthesis.createdAt)
+  );
+}
+
 function childStage(
-  definition: PipelineRunSnapshot["definition"],
-  role: string,
+  run: PipelineRunSnapshot,
+  child: AgentNodeSnapshot,
+  children: ReadonlyArray<AgentNodeSnapshot>,
 ): PipelineStage {
+  const { definition } = run;
+  const { role } = child;
   if (role === SMALL_FEATURE_IMPLEMENTER_ROLE) return "build";
   if (role === AUDIT_SYNTHESIS_ROLE) return "final-audit";
   if (role.startsWith("discover-")) return "discover";
   if (role.startsWith("audit-")) {
     if (definition === AUDIT_PIPELINE_ID) return "audit";
-    if (
-      definition === SMALL_FEATURE_PIPELINE_ID ||
-      (definition === "plan-pipeline" &&
-        PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role))
-    ) {
+    if (definition === SMALL_FEATURE_PIPELINE_ID) return "final-audit";
+    if (definition === "plan-pipeline" && isPipelineAuditRole(role)) {
       return "final-audit";
     }
+    if (isFeatureFinalAuditTrack(run, child, children)) return "final-audit";
     return "audit";
   }
   return "final-audit";
@@ -94,11 +117,19 @@ function stageAgentId(
   root: AgentNodeSnapshot | undefined,
   children: ReadonlyArray<AgentNodeSnapshot>,
 ) {
-  const matchingChild = latestAgentId(
-    children.filter(
-      (agent) => childStage(run.definition, agent.role) === stage,
-    ),
+  const matching = children.filter(
+    (agent) => childStage(run, agent, children) === stage,
   );
+  const runningFinalAuditTrack =
+    stage === "final-audit" && run.definition === "feature-pipeline"
+      ? matching.filter(
+          (agent) =>
+            agent.status === "running" &&
+            isFeatureFinalAuditTrack(run, agent, children),
+        )
+      : [];
+  const matchingChild =
+    latestAgentId(runningFinalAuditTrack) ?? latestAgentId(matching);
   if (matchingChild) return matchingChild;
   if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
     if (stage !== "final-resolve") return undefined;
@@ -182,7 +213,7 @@ export function buildPipelineRows(
           agentId: stageAgentId(run, stage, root, children),
         });
         for (const child of children.filter(
-          (agent) => childStage(run.definition, agent.role) === stage,
+          (agent) => childStage(run, agent, children) === stage,
         )) {
           rows.push({
             key: `agent:${run.id}:${stage}:${child.id}`,
