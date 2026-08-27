@@ -217,20 +217,59 @@ const request = (workingDir = "/tmp/work") => ({
   workingDir,
 });
 
-test("git_commit rejects every pipeline except small-feature-pipeline", () => {
-  const { controller } = harness();
-  for (const pipeline of [
-    "feature-pipeline",
-    "plan-pipeline",
-    "audit-pipeline",
-  ] as const) {
+test("git_commit accepts feature true and false without workspace gates", async () => {
+  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "feature-commit-"));
+  fs.writeFileSync(path.join(workingDir, "preexisting.txt"), "dirty\n");
+  const run = harness();
+  const enabledId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "feature-pipeline",
+    gitCommit: true,
+  });
+  const disabledId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "feature-pipeline",
+    gitCommit: false,
+  });
+  const omittedId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "feature-pipeline",
+  });
+  await settleInitialization();
+
+  assert.equal(run.controller.get(enabledId)?.status, "running");
+  assert.equal(run.controller.get(disabledId)?.status, "running");
+  assert.equal(run.controller.get(omittedId)?.status, "running");
+  const rootPrompt = (id: string) =>
+    run.sessions.find(
+      (session) => session.spec.scopeId === id && !session.spec.parentId,
+    )?.sends[0] ?? "";
+  assert.match(rootPrompt(enabledId), /Commit permission: ENABLED/);
+  assert.match(rootPrompt(disabledId), /Commit permission: DISABLED/);
+  assert.match(rootPrompt(omittedId), /Commit permission: DISABLED/);
+
+  await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
+});
+
+test("git_commit keeps plan/audit rejection and small-feature acceptance", async () => {
+  const run = harness();
+  for (const pipeline of ["plan-pipeline", "audit-pipeline"] as const) {
     assert.throws(
-      () => controller.start({ ...request(), pipeline, gitCommit: true }),
+      () => run.controller.start({ ...request(), pipeline, gitCommit: true }),
       new RegExp(
-        `git_commit is only supported for small-feature-pipeline.*${pipeline}`,
+        `git_commit is only supported for feature-pipeline and small-feature-pipeline.*${pipeline}`,
       ),
     );
   }
+  const smallFeatureId = run.controller.start({
+    ...request(),
+    pipeline: "small-feature-pipeline",
+    gitCommit: true,
+  });
+  await settleInitialization();
+  assert.equal(run.controller.get(smallFeatureId)?.status, "running");
+  await run.controller.dispose();
 });
 
 async function settleInitialization() {
@@ -353,6 +392,10 @@ function settleRole(run: ReturnType<typeof harness>, role: string) {
 function synthesisReport(
   reportType: "audit-synthesis-intermediate" | "audit-synthesis-final",
   integratedRoles: ReadonlyArray<string>,
+  gitIdentity: { baseSha: string; headSha: string } = {
+    baseSha: "UNAVAILABLE",
+    headSha: "UNAVAILABLE",
+  },
 ) {
   if (reportType === "audit-synthesis-intermediate") {
     return JSON.stringify({
@@ -370,8 +413,8 @@ function synthesisReport(
   return JSON.stringify({
     reportType,
     mode: "initial",
-    baseSha: "UNAVAILABLE",
-    headSha: "UNAVAILABLE",
+    baseSha: gitIdentity.baseSha,
+    headSha: gitIdentity.headSha,
     integratedRoles,
     findings: [],
     closureResults: [],
@@ -435,6 +478,16 @@ async function finishEmbeddedAudit(
     },
   });
   await settleInitialization();
+  let headSha = "UNAVAILABLE";
+  try {
+    headSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: synthesizer.spec.cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    // Non-Git fixtures intentionally use unavailable identity.
+  }
   synthesizer.emit({
     type: "settled",
     outcome: {
@@ -442,6 +495,7 @@ async function finishEmbeddedAudit(
       finalText: synthesisReport(
         "audit-synthesis-final",
         AUDIT_SEGMENT_LUNA_ROLES,
+        { baseSha: headSha, headSha },
       ),
     },
   });
@@ -925,7 +979,15 @@ test("definition role policies centralize child context requirements", () => {
   );
 });
 
-test("feature discovery policy is read-only without weakening ordinary feature children", () => {
+test("feature root retains commit-capable tools while every child stays constrained", () => {
+  const rootDenied = new Set<string>(
+    pipelineSessionToolPolicy("feature-pipeline", true, "pipeline-root")
+      .excludeTools,
+  );
+  for (const rootTool of ["bash", "edit", "write"]) {
+    assert.equal(rootDenied.has(rootTool), false);
+  }
+
   const discoveryDenied = new Set<string>(
     pipelineSessionToolPolicy("feature-pipeline", false, "discover-problem")
       .excludeTools,
@@ -963,6 +1025,16 @@ test("feature discovery policy is read-only without weakening ordinary feature c
     assert.equal(discoveryDenied.has(denied), true);
   }
   assert.equal(ordinaryAuditDenied.has("bash"), true);
+  for (const role of PIPELINE_CHILD_ROLES) {
+    const denied = new Set<string>(
+      pipelineSessionToolPolicy("feature-pipeline", false, role).excludeTools,
+    );
+    assert.equal(denied.has("edit"), true, role);
+    assert.equal(denied.has("write"), true, role);
+    if (role !== EXECUTOR_AUDIT_ROLE) {
+      assert.equal(denied.has("bash"), true, role);
+    }
+  }
 });
 
 test("small-feature Luna root and audit Lunas are read-only while the implementer keeps coding tools", () => {
@@ -1798,25 +1870,45 @@ test("dashboard cancellation of an idle root cancels the run and active children
   await run.controller.dispose();
 });
 
-test("structured completion delivers one factual handoff without readiness status", async () => {
+test("feature completion appends committed and dirty Git facts without readiness status", async () => {
+  const workingDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "feature-completion-git-"),
+  );
+  execFileSync("git", ["init", "-q"], { cwd: workingDir });
+  execFileSync("git", ["config", "user.email", "test@example.com"], {
+    cwd: workingDir,
+  });
+  execFileSync("git", ["config", "user.name", "Test"], {
+    cwd: workingDir,
+  });
+  fs.writeFileSync(path.join(workingDir, "feature.txt"), "base\n");
+  execFileSync("git", ["add", "."], { cwd: workingDir });
+  execFileSync("git", ["commit", "-qm", "baseline"], { cwd: workingDir });
+
   const run = harness();
-  const runId = run.controller.start(request());
+  const runId = run.controller.start(request(workingDir));
   await settleInitialization();
   const facts = {
     outcome: "Feature behavior implemented",
-    changedPaths: ["src/feature.ts"],
+    changedPaths: ["feature.txt"],
     checks: ["npm test passed"],
     assumptions: ["Existing authenticated users are the target audience"],
-    git: ["working tree has one modified file"],
+    git: ["Sol reported implementation Git state"],
     reports: ["discover-problem: user need verified"],
     unresolvedItems: ["manual browser check pending"],
-    workingDir: "/tmp/work",
+    workingDir,
   };
   assert.throws(
     () => run.controller.complete(runId, { ...facts, workingDir: "/other" }),
     /working_dir must be/,
   );
   await finishEmbeddedAudit(run, runId);
+  fs.writeFileSync(path.join(workingDir, "feature.txt"), "committed\n");
+  execFileSync("git", ["add", "feature.txt"], { cwd: workingDir });
+  execFileSync("git", ["commit", "-qm", "feature implementation"], {
+    cwd: workingDir,
+  });
+  fs.writeFileSync(path.join(workingDir, "feature.txt"), "dirty follow-up\n");
   run.controller.complete(runId, facts);
   await settleInitialization();
 
@@ -1824,13 +1916,28 @@ test("structured completion delivers one factual handoff without readiness statu
   const handoff = run.handoffs[0];
   assert.ok(handoff);
   const { auditReport, ...completedFacts } = handoff.facts;
-  assert.deepEqual(handoff, {
-    runId,
-    definition: "feature-pipeline",
-    status: "completed",
-    facts: { ...completedFacts, auditReport },
-  });
-  assert.deepEqual(completedFacts, facts);
+  assert.equal(completedFacts.git[0], facts.git[0]);
+  assert.ok(
+    completedFacts.git.some(
+      (item) =>
+        item.startsWith("Final base..HEAD commits") &&
+        item.includes("feature implementation"),
+    ),
+  );
+  assert.ok(
+    completedFacts.git.some(
+      (item) =>
+        item.startsWith("Final committed diff") && item.includes("+committed"),
+    ),
+  );
+  assert.ok(
+    completedFacts.git.some(
+      (item) =>
+        item.startsWith("Final dirty HEAD..WORKTREE diff") &&
+        item.includes("+dirty follow-up"),
+    ),
+  );
+  assert.deepEqual({ ...completedFacts, git: facts.git }, facts);
   assert.deepEqual(auditReport?.integratedRoles, AUDIT_SEGMENT_LUNA_ROLES);
   assert.equal(auditReport?.executedChecks[0]?.status, "passed");
   assert.equal(
@@ -1847,6 +1954,7 @@ test("structured completion delivers one factual handoff without readiness statu
   );
 
   await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
 test("plan completion requires and validates a repository-local plan artifact", async () => {
@@ -1944,7 +2052,13 @@ test("pipeline inspection does not mutate lifecycle state or consume the automat
   assert.equal(run.handoffs.length, 1);
   const { auditReport: _auditReport, ...handoffFacts } =
     run.handoffs[0]?.facts ?? {};
-  assert.deepEqual(handoffFacts, facts);
+  assert.deepEqual(
+    { ...handoffFacts, git: handoffFacts.git?.slice(0, facts.git.length) },
+    facts,
+  );
+  assert.ok(
+    handoffFacts.git?.some((item) => item.startsWith("Final Git HEAD:")),
+  );
   await run.controller.dispose();
 });
 

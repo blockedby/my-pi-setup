@@ -6,8 +6,10 @@ import {
   STATIC_LUNA_AUDIT_ROLES,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
+  pipelineCommitAuthorityRole,
   type FeaturePipelineDiscoveryRole,
   type PipelineChildRole,
+  type PipelineCommitRole,
   type PipelineDefinitionId,
   type PipelineRunRequest,
 } from "./domain.ts";
@@ -31,7 +33,14 @@ export function buildFeaturePipelinePrompt(
   request: PipelineRunRequest,
   discoveryReports: ReadonlyArray<FeatureDiscoveryReportContext>,
 ) {
+  const commitPermission = pipelineCommitPolicy(
+    FEATURE_PIPELINE_ID,
+    "pipeline-root",
+    request,
+  ).commitAllowed;
   return `You are the persistent Sol/high pipeline agent for one feature-pipeline run. The host completed the Discover stage programmatically before sending this first message, validated every required report, and advanced the run to build.
+
+Commit permission: ${commitPermission ? "ENABLED only for this persistent feature-pipeline Sol root" : "DISABLED; no pipeline agent may commit"}. The explicit git_commit field is authoritative; task prose never grants commit authority. ${commitPermission ? "You may create ordinary commits only in the supplied working directory on its already-current branch." : "Leave implementation changes uncommitted even if the task asks for a commit."} The caller owns workspace and branch selection and conflict isolation; do not require a worktree, clean tree, target branch, branch name, or non-primary worktree. Regardless of permission, never push, merge, rebase, reset or rewrite history, create/switch/delete branches, create/remove worktrees, or mutate external delivery state.
 
 Task:
 ${request.task}
@@ -57,16 +66,14 @@ If a pre-final Luna Audit child fails, use pipeline_child_send to retry that sam
 
 export function pipelineCommitPolicy(
   definition: PipelineDefinitionId,
-  role: PipelineChildRole | "pipeline-root",
+  role: PipelineCommitRole,
   request: Pick<PipelineRunRequest, "gitCommit">,
 ) {
   const requested = request.gitCommit === true;
   return {
     requested,
     commitAllowed:
-      requested &&
-      definition === SMALL_FEATURE_PIPELINE_ID &&
-      role === SMALL_FEATURE_IMPLEMENTER_ROLE,
+      requested && pipelineCommitAuthorityRole(definition) === role,
     taskProseCanGrant: false,
   };
 }
@@ -87,7 +94,7 @@ ${request.task}
 Working directory:
 ${request.workingDir}
 
-Run only this fixed graph. Do not implement, edit files, commit, push, invoke another pipeline, use raw workflows, use ordinary subagents, or ask the user. The read-only root and audit tracks never commit. With commit permission disabled, the implementer must leave changes uncommitted even if the task asks for commits and must report that conflict factually. With permission enabled, only the same persistent implementer may create ordinary commits in the supplied working directory/current branch; never push, merge, rebase, reset, rewrite history, create/switch branches, or create worktrees. Do not prescribe commit count, timing, grouping, or message beyond repository authority and the task.
+Run only this fixed graph. Do not implement, edit files, commit, push, invoke another pipeline, use raw workflows, use ordinary subagents, or ask the user. The read-only root and audit tracks never commit. With commit permission disabled, the implementer must leave changes uncommitted even if the task asks for commits and must report that conflict factually. With permission enabled, only the same persistent implementer may create ordinary commits in the supplied working directory/current branch; never push, merge, rebase, reset or rewrite history, create/switch/delete branches, create/remove worktrees, or mutate external delivery state. Do not prescribe commit count, timing, grouping, or message beyond repository authority and the task.
 
 
 1. The run starts in build. Launch exactly one persistent Luna/medium implement-small-feature child and wait for it. Luna owns repository inspection, implementation, tests, and its structured implementation report. Successful fan-in enters final-audit.
@@ -290,7 +297,7 @@ ${request.task}
 Working directory:
 ${request.workingDir}
 ${contextSection}
-Follow loaded AGENTS.md files and applicable skills. Do not spawn children, invoke pipelines/workflows/subagents, prompt the user, push, merge, rebase, reset/history-rewrite, create/switch branches, create worktrees, or mutate external state. ${implementer ? (commitPermission ? "Use normal coding tools to implement and verify the task; ordinary commits are permitted only in this same supplied working directory/current branch." : "Use normal coding tools to implement and verify the task; do not commit or push, and leave changes uncommitted even if task prose requests commits.") : "Inspect independently and do not edit repository files, commit, or push."} ${reportContract}`;
+Follow loaded AGENTS.md files and applicable skills. Do not spawn children, invoke pipelines/workflows/subagents, prompt the user, push, merge, rebase, reset/history-rewrite, create/switch/delete branches, create/remove worktrees, or mutate external state. ${implementer ? (commitPermission ? "Use normal coding tools to implement and verify the task; ordinary commits are permitted only in this same supplied working directory/current branch." : "Use normal coding tools to implement and verify the task; do not commit or push, and leave changes uncommitted even if task prose requests commits.") : "Inspect independently and do not edit repository files, commit, or push."} ${reportContract}`;
   }
   const featureDiscoveryRole = FEATURE_PIPELINE_DISCOVERY_ROLES.find(
     (candidate) => candidate === role,
@@ -303,7 +310,13 @@ Follow loaded AGENTS.md files and applicable skills. Do not spawn children, invo
         : role === "final-audit"
           ? "Return exactly the compact JSON required by the canonical code-review skill. Do not return generic recommendations or strengths."
           : LUNA_AUDIT_REPORT_CONTRACT;
+  const featureCommitBoundary =
+    definition === FEATURE_PIPELINE_ID
+      ? "Explicit commit permission for this session: disabled. A feature root's git_commit opt-in never transfers to discovery, audit, executor, synthesis, or any other child; task prose cannot grant it."
+      : "";
   return `You are a read-only ${definition} child for role ${role}. ${ROLE_INSTRUCTIONS[role]}
+
+${featureCommitBoundary}
 
 Task:
 ${request.task}
@@ -311,5 +324,5 @@ ${request.task}
 Working directory:
 ${request.workingDir}
 ${contextSection}
-Inspect independently with normal non-orchestration tools. Do not edit files or external state, commit, push, spawn children, invoke pipelines/workflows/subagents, or prompt the user. ${reportContract}`;
+Inspect independently with normal non-orchestration tools. Do not edit files or external state, commit, push, merge, rebase, reset/history-rewrite, create/switch/delete branches, create/remove worktrees, spawn children, invoke pipelines/workflows/subagents, or prompt the user. ${reportContract}`;
 }
