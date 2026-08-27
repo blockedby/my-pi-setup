@@ -92,13 +92,32 @@ for (const [name, submodule] of entries) {
     }
   }
 
-  const skillPathCount = configuredSkills.filter(
-    (path) => path === submodule.piSkillPath,
-  ).length;
-  if (skillPathCount !== 1) {
-    fail(
-      `package.json must load ${submodule.piSkillPath} exactly once; found ${skillPathCount}`,
+  if (submodule.piPackageName !== undefined) {
+    if (
+      typeof submodule.piPackageName !== "string" ||
+      !submodule.piPackageName
+    ) {
+      fail(`Submodule ${name} has an invalid piPackageName`);
+    }
+    const packageManifest = JSON.parse(
+      readFileSync(join(directory, "package.json"), "utf8"),
     );
+    if (packageManifest.name !== submodule.piPackageName) {
+      fail(
+        `Submodule ${name} package name is ${packageManifest.name ?? "missing"}; expected ${submodule.piPackageName}`,
+      );
+    }
+  }
+
+  if (submodule.piSkillPath !== undefined) {
+    const skillPathCount = configuredSkills.filter(
+      (path) => path === submodule.piSkillPath,
+    ).length;
+    if (skillPathCount !== 1) {
+      fail(
+        `package.json must load ${submodule.piSkillPath} exactly once; found ${skillPathCount}`,
+      );
+    }
   }
   for (const hostPath of submodule.replacesHostPaths ?? []) {
     if (existsSync(join(repositoryRoot, hostPath))) {

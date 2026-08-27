@@ -33,6 +33,19 @@
       ],
       "piSkillPath": "./vendor/plan-gh-backlog",
       "replacesHostPaths": ["skills/plan-gh-backlog"]
+    },
+    "pi-codex": {
+      "path": "vendor/pi-codex",
+      "gitmodulesName": "vendor/pi-codex",
+      "url": "https://github.com/blockedby/pi-codex.git",
+      "branch": "main",
+      "requiredFiles": [
+        "package.json",
+        "package-lock.json",
+        "extensions/codex-tools.ts",
+        "skills/codex-tools/SKILL.md"
+      ],
+      "piPackageName": "pi-codex-tools"
     }
   }
 }

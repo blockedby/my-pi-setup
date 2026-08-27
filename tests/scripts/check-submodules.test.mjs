@@ -37,6 +37,7 @@ const createFixture = async () => {
     sourceSkill,
     "---\nname: code-review\ndescription: Test reviewer.\n---\n",
   );
+  writeJson(join(source, "package.json"), { name: "reviewer-tools" });
   initializeRepository(source);
   git(source, ["add", "."]);
   git(source, ["commit", "-qm", "reviewer source"]);
@@ -69,7 +70,8 @@ const createFixture = async () => {
         gitmodulesName: "reviewer",
         url: source,
         branch: "main",
-        requiredFiles: ["skills/code-review/SKILL.md"],
+        requiredFiles: ["package.json", "skills/code-review/SKILL.md"],
+        piPackageName: "reviewer-tools",
         piSkillPath: "./vendor/reviewer/skills",
         replacesHostPaths: ["skills/code-review"],
       },
@@ -153,6 +155,21 @@ test("submodule checker rejects .gitmodules metadata mismatch", async (t) => {
   const result = runChecker(root);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /URL does not match \.gitmodules/);
+});
+
+test("submodule checker rejects a package name mismatch", async (t) => {
+  const { root } = await withFixture(t);
+  const configPath = join(root, "config", "submodules.json");
+  const config = JSON.parse(readFileSync(configPath, "utf8"));
+  config.submodules.reviewer.piPackageName = "wrong-package";
+  writeJson(configPath, config);
+
+  const result = runChecker(root);
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /package name is reviewer-tools; expected wrong-package/,
+  );
 });
 
 test("submodule checker rejects a missing manifest skill path", async (t) => {

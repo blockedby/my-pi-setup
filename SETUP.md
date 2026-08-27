@@ -6,8 +6,8 @@ Pipi is a side-by-side launcher with its own pinned Pi runtime. It does not repl
 
 - Node.js and npm
 - `codex` in `PATH` for Codex subagents and Codex-backed tools
-- optional sibling checkout `../pi-codex` (`pi-codex-tools`)
-- npm access for the initial isolated Pi runtime and `pi-mcp-adapter` install
+- initialized Git submodules (`git submodule update --init --recursive`)
+- npm access for the initial isolated Pi runtime, `pi-mcp-adapter`, and vendored Codex-tool dependencies
 - Google Chrome or Chromium plus `npx` for `chrome-devtools-mcp`
 
 The file-search extension uses system `fd`/`fdfind` and `rg` when available. If either is missing, it can download its supported fallback binary into `~/.pipi/agent/bin` at first Pipi startup.
@@ -28,7 +28,7 @@ The installer reproducibly installs root and extension dependencies from their l
 - `~/.pipi/agent/extensions/herdr-agent-state.ts` — official Pi lifecycle integration when `herdr` is available
 - `~/.pipi/sessions` — Pipi-only session storage
 
-It installs the Pi version pinned by this checkout and `pi-mcp-adapter` under `~/.pipi/agent/npm`, loads this checkout as a local Pi package, and adds sibling `../pi-codex` when that directory contains the `pi-codex-tools` package. The isolated npm manifest records reviewed, version-pinned install-script approvals for `@google/genai@1.52.0` and `protobufjs@7.6.5`; the installer does not approve arbitrary pending scripts. The local package loads the canonical `code-review` and `plan-gh-backlog` skills directly from initialized, commit-pinned submodules. The installer copies the vendored `pi-agent-setup` browser skill into Pipi-owned paths and removes the previously added `pi-subagents` extension, named browser agent, and agent-only skill dependency. When a `herdr` executable is on `PATH`, the installer runs Herdr's official `integration install pi` command with `PI_CODING_AGENT_DIR` fixed to Pipi's isolated agent directory. Inside Herdr only, the managed launcher also exports Herdr's documented `HERDR_AGENT=pi` process hint so the branded `pipi` foreground process can accept the official Pi lifecycle authority and remain visible in the Agents list. A detected Herdr installation that cannot install its integration fails clearly, while systems without Herdr continue normally. It also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings, package entries, and MCP servers are preserved.
+It installs the Pi version pinned by this checkout and `pi-mcp-adapter` under `~/.pipi/agent/npm`, loads this checkout as a local Pi package, and loads `pi-codex-tools` from the initialized, commit-pinned `vendor/pi-codex` submodule. The isolated npm manifest records reviewed, version-pinned install-script approvals for `@google/genai@1.52.0` and `protobufjs@7.6.5`; the installer does not approve arbitrary pending scripts. The local package loads the canonical `code-review` and `plan-gh-backlog` skills directly from their initialized, commit-pinned submodules. The installer copies the vendored `pi-agent-setup` browser skill into Pipi-owned paths and removes the previously added `pi-subagents` extension, named browser agent, and agent-only skill dependency. When a `herdr` executable is on `PATH`, the installer runs Herdr's official `integration install pi` command with `PI_CODING_AGENT_DIR` fixed to Pipi's isolated agent directory. Inside Herdr only, the managed launcher also exports Herdr's documented `HERDR_AGENT=pi` process hint so the branded `pipi` foreground process can accept the official Pi lifecycle authority and remain visible in the Agents list. A detected Herdr installation that cannot install its integration fails clearly, while systems without Herdr continue normally. It also seeds missing `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` values from regular Pi settings while leaving the regular settings file unchanged. Existing unrelated Pipi settings, package entries, and MCP servers are preserved.
 
 Add `~/.local/bin` to `PATH` if necessary, then verify the launcher:
 
@@ -42,22 +42,23 @@ Re-running the installer is safe and idempotent. For an already prepared develop
 npm run install:pipi -- --skip-dependencies
 ```
 
-Custom executable and package locations are supported:
+Custom executable and Codex-tool development overrides are supported; normal installs use the pinned submodule:
 
 ```sh
 npm run install:pipi -- --pi /path/to/pi --codex-tools /path/to/pi-codex
 ```
 
-## Submodule skills
+## Submodules
 
-Pipi loads canonical skills from two pinned sources:
+Pipi loads two canonical skills and the Codex tools package from pinned sources:
 
 ```text
 vendor/gpt5.6-reviewer/skills/code-review
 vendor/plan-gh-backlog
+vendor/pi-codex
 ```
 
-The reviewer source also contains its independent role, verifier prompt, JSON contracts, examples, and optional Python CLI. The backlog source includes its standard-library Python CLI, schema, safety guidance, and complete example. Pipi does not duplicate either skill under the host `skills/` directory and does not fetch, advance, or globally install submodule CLIs during setup; `plan-gh-backlog` runs through its bundled `scripts/plan-gh-backlog` launcher.
+The reviewer source also contains its independent role, verifier prompt, JSON contracts, examples, and optional Python CLI. The backlog source includes its standard-library Python CLI, schema, safety guidance, and complete example. The Codex source supplies the `pi-codex-tools` Pi package, including its extension and skill. Pipi does not duplicate either skill under the host `skills/` directory and does not fetch, advance, or globally install submodule CLIs during setup; `plan-gh-backlog` runs through its bundled `scripts/plan-gh-backlog` launcher.
 
 For a fresh checkout, clone recursively:
 
@@ -71,7 +72,7 @@ For an existing checkout, initialize all pinned sources before installation:
 git submodule update --init --recursive
 ```
 
-Run `npm run check:submodules` to verify `.gitmodules`, every parent gitlink, initialized/clean child state, required files, package skill paths, and duplicate absence.
+Run `npm run check:submodules` to verify `.gitmodules`, every parent gitlink, initialized/clean child state, required files, Pi package names, package skill paths, and duplicate absence.
 
 ## MCP adapter
 

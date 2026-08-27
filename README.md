@@ -71,7 +71,7 @@ Example:
 
 Pipi installs beside regular Pi and uses its own runtime, settings, sessions, MCP configuration, and authentication directory under `~/.pipi`. It does not copy regular Pi secrets. Authentication sharing is opt-in.
 
-The installer pins and validates the bundled review and backlog sources. Pipeline roles receive only the tools needed for their job, while commit authority is explicit and limited to the persistent implementation role.
+The installer pins and validates the bundled review, backlog, and Codex-tool submodules. Pipeline roles receive only the tools needed for their job, while commit authority is explicit and limited to the persistent implementation role.
 
 When the [official Herdr](https://github.com/herdrdev/herdr) CLI is available, Pipi installs its official Pi integration so Pipi panes appear correctly in Herdr's Agents view.
 

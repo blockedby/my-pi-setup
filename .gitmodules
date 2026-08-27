@@ -6,3 +6,7 @@
 	path = vendor/plan-gh-backlog
 	url = https://github.com/blockedby/plan-gh-backlog.git
 	branch = main
+[submodule "vendor/pi-codex"]
+	path = vendor/pi-codex
+	url = https://github.com/blockedby/pi-codex.git
+	branch = main

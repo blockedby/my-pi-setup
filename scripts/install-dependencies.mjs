@@ -103,6 +103,18 @@ export const ensureIsolatedNpmPackage = ({
 
 export const installDependencies = () => {
   const extensionRoot = join(repositoryRoot, "extensions");
+  const submoduleConfig = readManifest(
+    join(repositoryRoot, "config", "submodules.json"),
+  );
+  const submoduleDirectories = Object.values(submoduleConfig?.submodules ?? {})
+    .map((submodule) =>
+      typeof submodule?.path === "string"
+        ? join(repositoryRoot, submodule.path)
+        : undefined,
+    )
+    .filter((directory) => directory !== undefined)
+    .filter((directory) => existsSync(join(directory, "package.json")))
+    .filter(hasRuntimeDependencies);
   const directories = [
     repositoryRoot,
     ...readdirSync(extensionRoot, { withFileTypes: true })
@@ -110,6 +122,7 @@ export const installDependencies = () => {
       .map((entry) => join(extensionRoot, entry.name))
       .filter((directory) => existsSync(join(directory, "package.json")))
       .filter(hasRuntimeDependencies),
+    ...submoduleDirectories,
   ];
 
   for (const directory of directories) {

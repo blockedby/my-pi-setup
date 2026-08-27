@@ -50,6 +50,8 @@ const mcpAdapterPackage = `npm:pi-mcp-adapter@${mcpAdapterVersion}`;
 const mcpAdapterPackagePrefix = "npm:pi-mcp-adapter";
 const removedPiSubagentsPackagePrefix = "npm:pi-subagents";
 const browserAssetsRoot = join(repositoryRoot, "vendor", "pi-agent-setup");
+const codexToolsSubmoduleRoot = join(repositoryRoot, "vendor", "pi-codex");
+const legacyCodexToolsSiblingRoot = resolve(repositoryRoot, "..", "pi-codex");
 const submoduleConfigPath = join(repositoryRoot, "config", "submodules.json");
 const modelDefaults = [
   "defaultProvider",
@@ -64,7 +66,7 @@ const usage = `Usage: node scripts/install.mjs [options]
 
 Options:
   --pi PATH             Pi executable override (default: isolated version from package.json)
-  --codex-tools PATH    Local pi-codex-tools package (default: ../pi-codex)
+  --codex-tools PATH    Local pi-codex-tools override (default: pinned vendor/pi-codex submodule)
   --bin-dir PATH        Launcher directory (default: ~/.local/bin)
   --share-auth                    Symlink regular Pi auth into Pipi (opt-in)
   --skip-dependencies             Skip repository and isolated runtime dependency installation
@@ -75,7 +77,7 @@ Options:
 const parseArgs = (args) => {
   const options = {
     pi: undefined,
-    codexTools: resolve(repositoryRoot, "..", "pi-codex"),
+    codexTools: codexToolsSubmoduleRoot,
     binDir: undefined,
     shareAuth: false,
     skipDependencies: false,
@@ -159,6 +161,64 @@ const packageSource = (entry) =>
 const addPackage = (packages, path) => {
   if (!packages.some((entry) => packageSource(entry) === path))
     packages.push(path);
+};
+
+const resolveSettingsPackagePath = (source, settingsBaseDir, home) => {
+  if (source === "~") return home;
+  if (source.startsWith("~/")) return resolve(home, source.slice(2));
+  return resolve(settingsBaseDir, source);
+};
+
+export const normalizeCodexToolsPackage = ({
+  packages,
+  desiredPath,
+  settingsBaseDir,
+  home,
+  legacyPath = legacyCodexToolsSiblingRoot,
+}) => {
+  const normalizedDesiredPath = resolve(desiredPath);
+  const normalizedLegacyPath = resolve(legacyPath);
+  const normalizedPackages = [];
+  let selectedPackageAdded = false;
+
+  for (const entry of packages) {
+    const source = packageSource(entry);
+    if (typeof source !== "string" || source.startsWith("npm:")) {
+      normalizedPackages.push(entry);
+      continue;
+    }
+
+    const resolvedSource = resolveSettingsPackagePath(
+      source,
+      settingsBaseDir,
+      home,
+    );
+    if (resolvedSource === normalizedDesiredPath) {
+      if (!selectedPackageAdded) {
+        normalizedPackages.push(
+          typeof entry === "string"
+            ? normalizedDesiredPath
+            : { ...entry, source: normalizedDesiredPath },
+        );
+        selectedPackageAdded = true;
+      }
+      continue;
+    }
+    if (resolvedSource === normalizedLegacyPath) continue;
+
+    try {
+      const manifest = JSON.parse(
+        readFileSync(join(resolvedSource, "package.json"), "utf8"),
+      );
+      if (manifest.name === "pi-codex-tools") continue;
+    } catch {
+      // Preserve unavailable entries unless they match the known legacy path.
+    }
+    normalizedPackages.push(entry);
+  }
+
+  if (!selectedPackageAdded) normalizedPackages.push(normalizedDesiredPath);
+  return normalizedPackages;
 };
 
 const pinNpmPackage = (packages, packagePrefix, pinnedSource) => {
@@ -269,6 +329,15 @@ const validateSubmoduleAssets = () => {
       if (!existsSync(path))
         throw new Error(
           `Missing submodule ${name} asset: ${path}; run git submodule update --init --recursive`,
+        );
+    }
+    if (submodule.piPackageName !== undefined) {
+      const packageManifest = JSON.parse(
+        readFileSync(join(assetsRoot, "package.json"), "utf8"),
+      );
+      if (packageManifest.name !== submodule.piPackageName)
+        throw new Error(
+          `Submodule ${name} package name is ${packageManifest.name ?? "missing"}; expected ${submodule.piPackageName}`,
         );
     }
 
@@ -424,53 +493,26 @@ const install = () => {
     );
   }
 
-  const pipiSettings = readSettings(pipiSettingsPath, true);
-  const regularSettings = readSettings(regularSettingsPath, false);
-  const packages = Array.isArray(pipiSettings.packages)
-    ? [...pipiSettings.packages]
-    : [];
-  addPackage(packages, repositoryRoot);
-  pinNpmPackage(packages, mcpAdapterPackagePrefix, mcpAdapterPackage);
-  for (let index = packages.length - 1; index >= 0; index -= 1) {
-    const source = packageSource(packages[index]);
-    if (
-      source === removedPiSubagentsPackagePrefix ||
-      source?.startsWith(`${removedPiSubagentsPackagePrefix}@`)
-    ) {
-      packages.splice(index, 1);
-    }
-  }
-
   const codexManifestPath = join(options.codexTools, "package.json");
-  if (existsSync(codexManifestPath)) {
-    const codexManifest = JSON.parse(readFileSync(codexManifestPath, "utf8"));
-    if (codexManifest.name !== "pi-codex-tools") {
-      throw new Error(`Expected pi-codex-tools at ${options.codexTools}`);
-    }
-    addPackage(packages, options.codexTools);
-  } else {
-    console.warn(
-      `Local pi-codex-tools package not found; continuing without it: ${options.codexTools}`,
-    );
-  }
-
-  const nextSettings = {
-    ...pipiSettings,
-    theme: "github-dark-default",
-    packages,
-  };
-  for (const key of modelDefaults) {
-    if (nextSettings[key] === undefined && regularSettings[key] !== undefined) {
-      nextSettings[key] = regularSettings[key];
-    }
+  if (!existsSync(codexManifestPath))
+    throw new Error(`Missing pi-codex-tools package: ${options.codexTools}`);
+  const codexManifest = JSON.parse(readFileSync(codexManifestPath, "utf8"));
+  if (codexManifest.name !== "pi-codex-tools") {
+    throw new Error(`Expected pi-codex-tools at ${options.codexTools}`);
   }
 
   if (options.shareAuth) validateAuthShare(regularAuthPath, pipiAuthPath);
   const submoduleAssets = validateSubmoduleAssets();
   const reviewerAssetsRoot = submoduleAssets["gpt5.6-reviewer"];
   const backlogSkillDir = submoduleAssets["plan-gh-backlog"];
-  if (!reviewerAssetsRoot || !backlogSkillDir)
-    throw new Error("Required submodule skill configuration is missing");
+  const codexToolsRoot = submoduleAssets["pi-codex"];
+  if (!reviewerAssetsRoot || !backlogSkillDir || !codexToolsRoot)
+    throw new Error("Required submodule configuration is missing");
+  if (
+    options.codexTools === codexToolsSubmoduleRoot &&
+    codexToolsRoot !== options.codexTools
+  )
+    throw new Error("Configured pi-codex submodule path is inconsistent");
   const reviewerSkillDir = join(reviewerAssetsRoot, "skills", "code-review");
   if (!options.skipDependencies && !options.skipRepositoryDependencies) {
     installDependencies();
@@ -520,6 +562,41 @@ const install = () => {
   }
   const browserSkillDir = installBrowserChromeAssets(agentDir);
   installBrowserChromeMcp(pipiMcpPath, browserSkillDir);
+
+  // Read settings only after long-running installs so concurrent unrelated
+  // updates made during dependency setup are merged into the final snapshot.
+  const pipiSettings = readSettings(pipiSettingsPath, true);
+  const regularSettings = readSettings(regularSettingsPath, false);
+  let packages = Array.isArray(pipiSettings.packages)
+    ? [...pipiSettings.packages]
+    : [];
+  addPackage(packages, repositoryRoot);
+  pinNpmPackage(packages, mcpAdapterPackagePrefix, mcpAdapterPackage);
+  for (let index = packages.length - 1; index >= 0; index -= 1) {
+    const source = packageSource(packages[index]);
+    if (
+      source === removedPiSubagentsPackagePrefix ||
+      source?.startsWith(`${removedPiSubagentsPackagePrefix}@`)
+    ) {
+      packages.splice(index, 1);
+    }
+  }
+  packages = normalizeCodexToolsPackage({
+    packages,
+    desiredPath: options.codexTools,
+    settingsBaseDir: agentDir,
+    home,
+  });
+  const nextSettings = {
+    ...pipiSettings,
+    theme: "github-dark-default",
+    packages,
+  };
+  for (const key of modelDefaults) {
+    if (nextSettings[key] === undefined && regularSettings[key] !== undefined) {
+      nextSettings[key] = regularSettings[key];
+    }
+  }
   writeJson(pipiSettingsPath, nextSettings);
   const herdrIntegrationPath = installHerdrPiIntegration(
     herdrExecutable,
@@ -556,9 +633,14 @@ const install = () => {
     );
 };
 
-try {
-  install();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+if (
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  try {
+    install();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }

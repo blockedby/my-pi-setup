@@ -11,9 +11,10 @@ import {
 } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { normalizeCodexToolsPackage } from "../../scripts/install.mjs";
 
 const repositoryRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -40,6 +41,7 @@ const reviewerSkillSource = join(
 );
 const backlogSubmodule = join(repositoryRoot, "vendor", "plan-gh-backlog");
 const backlogSkillSource = join(backlogSubmodule, "SKILL.md");
+const codexSubmodule = join(repositoryRoot, "vendor", "pi-codex");
 const runtimePiPackage = "@earendil-works/pi-coding-agent";
 const rootManifest = JSON.parse(
   readFileSync(join(repositoryRoot, "package.json"), "utf8"),
@@ -86,6 +88,18 @@ process.stdout.write(JSON.stringify({
 const { chmodSync, mkdirSync, rmSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 const args = process.argv.slice(2);
+if (args[0] === "ci" && process.env.PIPI_TEST_CONCURRENT_SETTINGS) {
+  const agentDir = join(process.env.HOME, ".pipi", "agent");
+  const marker = join(agentDir, "concurrent-settings-written");
+  if (!require("node:fs").existsSync(marker)) {
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+      concurrentValue: "preserved",
+      packages: ["concurrent-package"],
+    }));
+    writeFileSync(marker, "written");
+  }
+}
 if (args[0] === "install") {
   const prefix = args[args.indexOf("--prefix") + 1];
   const spec = args.at(-1);
@@ -492,13 +506,14 @@ test("Pi package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
   );
 });
 
-test("package loads each canonical submodule skill once", () => {
+test("package loads canonical submodule resources", () => {
   const manifest = readJson(join(repositoryRoot, "package.json"));
   const submodules = readJson(
     join(repositoryRoot, "config", "submodules.json"),
   );
   const reviewer = submodules.submodules["gpt5.6-reviewer"];
   const backlog = submodules.submodules["plan-gh-backlog"];
+  const codex = submodules.submodules["pi-codex"];
 
   assert.equal(existsSync(reviewerSkillSource), true);
   assert.match(
@@ -541,6 +556,90 @@ test("package loads each canonical submodule skill once", () => {
   assert.equal(backlog.url, "https://github.com/blockedby/plan-gh-backlog.git");
   assert.equal(backlog.branch, "main");
   assert.equal(backlog.piSkillPath, "./vendor/plan-gh-backlog");
+
+  const codexManifest = readJson(join(codexSubmodule, "package.json"));
+  assert.equal(codex.path, "vendor/pi-codex");
+  assert.equal(codex.url, "https://github.com/blockedby/pi-codex.git");
+  assert.equal(codex.branch, "main");
+  assert.equal(codex.piPackageName, "pi-codex-tools");
+  assert.equal(codexManifest.name, codex.piPackageName);
+});
+
+test("Codex package normalization removes legacy forms and selected duplicates", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pipi-codex-packages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const home = join(root, "home");
+  const settingsBaseDir = join(home, ".pipi", "agent");
+  const desiredPath = join(root, "vendor", "pi-codex");
+  const missingLegacyPath = join(root, "deleted-sibling", "pi-codex");
+  const readableLegacyPath = join(root, "old-codex-checkout");
+  const unavailableUnrelatedPath = join(root, "missing-unrelated-package");
+  mkdirSync(readableLegacyPath, { recursive: true });
+  writeFileSync(
+    join(readableLegacyPath, "package.json"),
+    JSON.stringify({ name: "pi-codex-tools" }),
+  );
+
+  const result = normalizeCodexToolsPackage({
+    packages: [
+      missingLegacyPath,
+      { source: relative(settingsBaseDir, missingLegacyPath) },
+      {
+        source: relative(settingsBaseDir, desiredPath),
+        extensions: ["extensions/codex-tools.ts"],
+      },
+      desiredPath,
+      { source: desiredPath, skills: ["skills"] },
+      readableLegacyPath,
+      unavailableUnrelatedPath,
+      "npm:unrelated@1.0.0",
+    ],
+    desiredPath,
+    settingsBaseDir,
+    home,
+    legacyPath: missingLegacyPath,
+  });
+
+  assert.deepEqual(result, [
+    {
+      source: desiredPath,
+      extensions: ["extensions/codex-tools.ts"],
+    },
+    unavailableUnrelatedPath,
+    "npm:unrelated@1.0.0",
+  ]);
+});
+
+test("default install replaces sibling Codex tools with the pinned submodule", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const legacyCodexTools = join(fixture.home, "pi-codex");
+  mkdirSync(legacyCodexTools, { recursive: true });
+  writeFileSync(
+    join(legacyCodexTools, "package.json"),
+    JSON.stringify({ name: "pi-codex-tools" }),
+  );
+  const pipiAgentDir = join(fixture.home, ".pipi", "agent");
+  mkdirSync(pipiAgentDir, { recursive: true });
+  writeFileSync(
+    join(pipiAgentDir, "settings.json"),
+    JSON.stringify({ packages: [legacyCodexTools] }),
+  );
+
+  const result = spawnSync(
+    process.execPath,
+    [installScript, "--skip-dependencies", "--pi", fixture.piPath],
+    { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(readJson(join(pipiAgentDir, "settings.json")).packages, [
+    repositoryRoot,
+    mcpAdapterPackage,
+    codexSubmodule,
+  ]);
 });
 
 test("default install uses Pipi-owned Pi runtime pinned by package.json", async (t) => {
@@ -554,6 +653,10 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
   );
 
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    result.stdout.includes(`Installing dependencies in ${codexSubmodule}`),
+    true,
+  );
   const pipiNpm = join(fixture.home, ".pipi", "agent", "npm");
   const runtimeManifestPath = join(
     pipiNpm,
@@ -619,6 +722,32 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
     configDir: ".pi",
     name: "pipi",
   });
+});
+
+test("installer merges settings changed during dependency installation", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const result = spawnSync(
+    process.execPath,
+    [installScript, "--codex-tools", fixture.codexTools],
+    {
+      cwd: repositoryRoot,
+      env: { ...fixture.env, PIPI_TEST_CONCURRENT_SETTINGS: "1" },
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const settings = readJson(
+    join(fixture.home, ".pipi", "agent", "settings.json"),
+  );
+  assert.equal(settings.concurrentValue, "preserved");
+  assert.equal(settings.packages.includes("concurrent-package"), true);
+  assert.equal(
+    settings.packages.filter((entry) => entry === fixture.codexTools).length,
+    1,
+  );
 });
 
 test("repository dependency skip still installs isolated runtime dependencies", async (t) => {
@@ -854,6 +983,7 @@ test("install rejects every configured missing submodule asset before writing Pi
   for (const [name, source] of [
     ["vendor/gpt5.6-reviewer", reviewerSubmodule],
     ["vendor/plan-gh-backlog", backlogSubmodule],
+    ["vendor/pi-codex", codexSubmodule],
   ]) {
     execFileSync("git", [
       "-C",
@@ -932,6 +1062,7 @@ test("install rejects backlog submodule pin, origin, and cleanliness drift befor
   for (const [name, source] of [
     ["vendor/gpt5.6-reviewer", reviewerSubmodule],
     ["vendor/plan-gh-backlog", backlogSubmodule],
+    ["vendor/pi-codex", codexSubmodule],
   ]) {
     execFileSync("git", [
       "-C",
