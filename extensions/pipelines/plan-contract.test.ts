@@ -5,7 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import {
   FEATURE_PIPELINE_DISCOVERY_ROLES,
-  PIPELINE_4_LUNA_AUDIT_ROLES,
+  STATIC_LUNA_AUDIT_ROLES,
   type FeaturePipelineDiscoveryRole,
 } from "./domain.ts";
 import { FEATURE_DISCOVERY_COVERAGE } from "./discovery-report.ts";
@@ -190,7 +190,7 @@ test("small-feature reports require exact implementation and four-track Luna aud
       /Implementation report must contain exactly/,
     );
   }
-  for (const role of PIPELINE_4_LUNA_AUDIT_ROLES) {
+  for (const role of STATIC_LUNA_AUDIT_ROLES) {
     assert.deepEqual(
       validatePipelineReport(
         "small-feature-pipeline",
@@ -205,7 +205,7 @@ test("small-feature reports require exact implementation and four-track Luna aud
     );
   }
   for (const [role, report] of [
-    [PIPELINE_4_LUNA_AUDIT_ROLES[0], { findings: [] }],
+    [STATIC_LUNA_AUDIT_ROLES[0], { findings: [] }],
     [
       "audit-small-feature",
       {
@@ -292,9 +292,9 @@ test("feature child report contracts reject malformed programmatic discovery", (
   assert.deepEqual(
     validatePipelineReport(
       "feature-pipeline",
-      PIPELINE_4_LUNA_AUDIT_ROLES[0],
+      STATIC_LUNA_AUDIT_ROLES[0],
       JSON.stringify({
-        track: PIPELINE_4_LUNA_AUDIT_ROLES[0],
+        track: STATIC_LUNA_AUDIT_ROLES[0],
         findings: [],
         unprovenChecks: [],
       }),

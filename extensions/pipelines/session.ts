@@ -17,6 +17,7 @@ import {
   bindChildSessionExtensions,
   childToolPolicy,
   createChildResources,
+  executorAuditToolPolicy,
   pipelineRootToolPolicy,
   planPipelineChildToolPolicy,
   planPipelineRootToolPolicy,
@@ -29,11 +30,12 @@ import {
 import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
 import {
   AUDIT_PIPELINE_ID,
+  AUDIT_SEGMENT_LUNA_ROLES,
   AUDIT_SYNTHESIS_ROLE,
+  EXECUTOR_AUDIT_ROLE,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
   LUNA_MODEL,
-  PIPELINE_4_LUNA_AUDIT_ROLES,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
@@ -157,7 +159,7 @@ export function pipelineThinkingLevel(model: string) {
 
 function auditSubmissionRole(role: string) {
   if (role === AUDIT_SYNTHESIS_ROLE) return role;
-  return PIPELINE_4_LUNA_AUDIT_ROLES.find((candidate) => candidate === role);
+  return AUDIT_SEGMENT_LUNA_ROLES.find((candidate) => candidate === role);
 }
 
 export function createPipelineDiscoverySubmitTool(
@@ -229,9 +231,10 @@ export function pipelineSessionToolPolicy(
     }
     return pipelineRootToolPolicy();
   }
+  if (role === EXECUTOR_AUDIT_ROLE) return executorAuditToolPolicy();
   if (
     role === AUDIT_SYNTHESIS_ROLE ||
-    PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)
+    AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role)
   ) {
     return readOnlyPipelineChildToolPolicy();
   }

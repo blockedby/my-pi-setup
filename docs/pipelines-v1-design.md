@@ -6,10 +6,10 @@ _Status: implemented design record. The public surface is intentionally four bou
 
 `pipeline_run` accepts a self-contained `task`, caller-selected `working_dir`, and one of four hardcoded definitions:
 
-- `feature-pipeline`: persistent Sol/high implementation root, controller-owned five-track discovery, root implementation, four Luna audits, root remediation, reusable final Luna audit segment, root final resolution and factual completion;
+- `feature-pipeline`: persistent Sol/high implementation root, controller-owned five-track discovery, root implementation, four Luna audits, root remediation, reusable five-contributor final Luna audit segment, root final resolution and factual completion;
 - `small-feature-pipeline`: read-only Luna/medium coordinator, one persistent Luna implementer, four parallel Luna auditors, and one same-session implementer remediation pass;
-- `plan-pipeline`: persistent Sol/high planning root, five Luna discovery tracks, one validated `docs/plans/*.md` artifact, four plan-audit tracks, root remediation, reusable final Luna audit segment, root final resolution and factual completion;
-- `audit-pipeline`: four isolated read-only Luna/medium audit tracks and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, repository mutation, readiness decision, or Git decision.
+- `plan-pipeline`: persistent Sol/high planning root, five Luna discovery tracks, one validated `docs/plans/*.md` artifact, four plan-audit tracks, root remediation, reusable five-contributor final Luna audit segment, root final resolution and factual completion;
+- `audit-pipeline`: four isolated read-only Luna/medium static audit tracks, one trusted-workspace Luna/medium executor-audit contributor, and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, readiness decision, or Git decision.
 
 Omission still selects `feature-pipeline`. Unknown names fail closed. No definition accepts arbitrary roles, edges, models, shell commands, or Git refs. Terra constants, model profile, direct-subagent quotas, and `terra-audit` remain available for explicit future/manual escalation, but no automatic pipeline route uses Terra.
 
@@ -19,19 +19,21 @@ Pipeline graphs predeclare their roots and children and therefore do not consume
 
 `extensions/pipelines/audit-segment.ts` is the reusable hardcoded audit component. It encapsulates:
 
-1. exactly four independent Luna/medium tracks using the established concerns:
-   - feature outcome, acceptance, and user scenarios;
-   - logic, state transitions, rules, permissions, and invariants;
-   - functional correctness, contracts, integrations, tests, edge cases, and data handling;
-   - reliability, retries, partial success, stale state, concurrency, and regressions;
+1. exactly five independent Luna/medium contributors:
+   - four static read-only tracks covering feature outcome, logic/invariants, functional correctness, and reliability/regressions;
+   - one `executor-audit` contributor that inspects manifests/scripts and runs bounded existing noninteractive verification with cheap checks first;
 2. one persistent Luna/medium synthesis session;
 3. strict bounded track, intermediate synthesis, and final synthesis contracts, exposed to audit sessions through the typed `pipeline_audit_submit` tool;
 4. provenance records containing role, attempt, report digest, and validated report data;
 5. a privacy-safe progress projection.
 
-Tracks are direct children of the owning root, isolated from one another, read-only by tool policy and prompt contract, and unable to orchestrate children or invoke pipeline tools. Each receives the same bounded task/acceptance contract, assumptions, checks, captured base/head/worktree identity, branch, status, and bounded base-relative diff. Only its concern instruction differs.
+Contributors are direct children of the owning root, isolated from one another, and unable to orchestrate children or invoke pipeline tools. The four static tracks remain shell-denied and read-only by tool policy and prompt contract. The executor alone keeps ordinary `bash` plus read/search tools under the accepted trusted-workspace model; edit/write/patch/delegation/MCP/background/pipeline/workflow/subagent/user-prompt tools remain denied. Each contributor receives the same bounded task/acceptance contract, assumptions, checks, captured base/head/worktree identity, branch, status, and bounded base-relative diff.
 
-The synthesizer treats reports as untrusted evidence. It deduplicates common root causes, preserves a strongly evidenced serious finding even without majority agreement, records unresolved material conflicts, and must not invent unsupported findings. Intermediate state has no finding IDs, and model-produced final candidates also omit IDs. After strict final validation, the host canonicalizes complete finding content, deduplicates exact candidates, and assigns sequential `AUD-001`, `AUD-002`, … IDs; the resulting final report contains no readiness verdict.
+The executor prompt requires manifest/script inspection before execution, cheap checks first, and repository-declared noninteractive verification rather than language/framework adapters. It prohibits intentional source/config edits, formatter/fixer or snapshot-update modes, dependency installation/update, mutating Git, network/external-state mutation, interactive/watch/server/long-lived commands, delegation/orchestration, and user prompting. Ambiguous or unsafe scripts are skipped with evidence. Its strict bounded report preserves exact commands, `passed | failed | timed_out | skipped` status, available exit code, output/evidence summary, observed workspace changes, findings, and unproven checks. Command failure is not automatically a behavior finding.
+
+Feature and standalone contexts permit normal relevant project verification. Plan final-audit context permits only plan/artifact validation or check-only commands demonstrably relevant to the planning deliverable; implementation tests/builds/linters/typechecks are skipped as unsupported rather than run blindly. Closure mode remains limited to prior blockers, remediation, and touched invariants. `small-feature-pipeline` deliberately keeps its separate four-static-auditor graph.
+
+The synthesizer treats reports as untrusted evidence. It deduplicates common root causes, preserves a strongly evidenced serious finding even without majority agreement, records unresolved material conflicts, and must not invent unsupported findings. It preserves executor execution records and host workspace observations even when checks pass or findings are empty. Intermediate state has no finding IDs, and model-produced final candidates also omit IDs. After strict final validation, the host canonicalizes complete finding content, deduplicates exact candidates, and assigns sequential `AUD-001`, `AUD-002`, … IDs; the resulting final report contains no readiness verdict.
 
 `audit-pipeline` uses the synthesizer as its deferred Luna root. `feature-pipeline` and `plan-pipeline` keep their persistent Sol roots and create the synthesizer as a controller-owned persistent Luna child during `final-audit`. Their earlier discovery/build/audit/remediation graphs remain unchanged, and their Sol roots retain final resolution and completion ownership. `small-feature-pipeline` deliberately does not use this segment because its existing one-implementer/four-auditor/same-session-remediation behavior is distinct and remains unchanged.
 
@@ -52,7 +54,7 @@ The reducer owns:
 
 When the first valid report settles, the controller immediately starts the deferred synthesis session. Reports arriving during an active turn enter the pending queue. The controller never steers or interrupts a busy synthesis session; embedded roots cannot cancel segment tracks or synthesis individually, while whole-run/session lifecycle cancellation remains authoritative. When that session becomes safely idle, all pending reports are sent as one next revision. Each role appears in one batch exactly once. A synthesis output is validated as final only when its turn integrates the complete expected set; intermediate output can update inspection state but can never deliver the automatic completion handoff.
 
-Audit sessions call `pipeline_audit_submit` during their turn; the host consumes each recorded submission only after that same turn settles, while validated final text remains a compatibility fallback. A malformed or missing settled submission gets three correction turns in that same concrete session; the fourth fails the run and cancels remaining sessions. Track counters are independent, while the single persistent synthesizer counter is cumulative across reducer revisions and batches. Provider failure or cancellation still fails immediately. Dynamic host checks remain authoritative for the exact integrated-role set (any model order is canonicalized to declaration order), Git identity, and closure references. Initial final schemas require an empty `closureResults` array; closure schemas retain complete blocker records. Rejections identify bounded fields (roles, mode/Git identity, findings/conflicts/unproven checks, or closure IDs/order/conditions) so the same synthesizer session can correct them within its existing three-turn budget. Standalone completion requires all four validated reports, all four integrations, and one valid final report. Embedded final-audit advancement to `final-resolve` has the same gate.
+Audit sessions call `pipeline_audit_submit` during their turn; the host consumes each recorded submission only after that same turn settles, while validated final text remains a compatibility fallback. A malformed or missing settled submission gets three correction turns in that same concrete session; the fourth fails the run and cancels remaining sessions. Track counters are independent, while the single persistent synthesizer counter is cumulative across reducer revisions and batches. Provider failure or cancellation still fails immediately. Dynamic host checks remain authoritative for the exact integrated-role set (any model order is canonicalized to declaration order), Git identity, and closure references. Initial final schemas require an empty `closureResults` array; closure schemas retain complete blocker records. Rejections identify bounded fields (roles, mode/Git identity, findings/conflicts/unproven checks, or closure IDs/order/conditions) so the same synthesizer session can correct them within its existing three-turn budget. Standalone completion requires all five validated contributor reports, all five integrations, and one valid final report. Embedded final-audit advancement to `final-resolve` has the same gate.
 
 ## Initial and closure audit contracts
 
@@ -75,7 +77,7 @@ Closure tracks and synthesis may evaluate only supplied blocker IDs and closure 
 
 ## Host-collected Git evidence
 
-The controller captures `HEAD` when a run starts. At audit-segment activation it resolves current `HEAD`, branch, short status, and base-relative diff using `execFileSync("git", argumentArray, ...)` without shell interpolation. Output is bounded before entering model context. A non-Git workspace degrades to explicit `UNAVAILABLE` identity/evidence rather than guessed state. The caller still supplies `working_dir`; models cannot select commands or unsafe refs.
+The controller captures `HEAD` when a run starts. At audit-segment activation it resolves current `HEAD`, branch, short status, and base-relative diff using `execFileSync("git", argumentArray, ...)` without shell interpolation. After executor settlement it captures fresh bounded status plus dirty/combined diff evidence, compares it observationally with activation evidence, and carries the result into synthesis/final facts without rollback. Output is bounded before entering model context. A non-Git workspace degrades to explicit `UNAVAILABLE` identity/evidence rather than guessed state. The caller still supplies `working_dir`; the public API exposes no arbitrary commands or refs.
 
 ## Definition flows
 
@@ -88,7 +90,7 @@ Deferred Sol/high root
   → Sol plans and implements
   → four agent-driven Luna audit tracks
   → Sol resolves findings
-  → controller-owned reusable Luna final audit segment
+  → controller-owned reusable five-contributor Luna final audit segment
   → Sol resolves synthesized findings once
   → factual completion
 ```
@@ -127,7 +129,7 @@ Sol/high planning root
   → validated docs/plans/*.md artifact
   → four Luna plan-quality tracks
   → Sol remediates and revalidates
-  → controller-owned reusable Luna final audit segment
+  → controller-owned reusable five-contributor Luna final audit segment
   → Sol resolves synthesis and revalidates once
   → factual plan completion
 ```
@@ -138,13 +140,14 @@ The root remains unable to use shell/edit/write or delegated mutation tools. It 
 
 ```text
 Deferred persistent Luna/medium synthesis root
-  ├─ four controller-owned read-only Luna/medium tracks in parallel
+  ├─ four controller-owned read-only Luna/medium static tracks in parallel
+  ├─ one controller-owned Luna/medium executor-audit contributor with bash
   ├─ first valid report activates root synthesis
   ├─ later reports are serialized/batched into that same session
   └─ strict factual structured audit handoff
 ```
 
-No pipeline agent or child may mutate the repository, remediate findings, make readiness claims, or decide Git actions.
+No pipeline agent intentionally mutates source/config, remediates findings, makes readiness claims, or decides Git actions. Executor verification may create test/build/cache artifacts; those effects are observed and reported rather than rolled back.
 
 ## Commit permission and audit evidence
 
@@ -154,7 +157,7 @@ Audit tracks receive reusable host-collected evidence captured with argument-arr
 
 ## Tooling, inspection, and completion
 
-Feature and plan roots receive `pipeline_audit_start`, a definition-specific tool that accepts only the bounded acceptance contract, assumptions, and check evidence. It starts the fixed shared segment and returns the five controller-owned agent IDs for normal run-scoped waiting/inspection. It is not a generic fan-in or workflow API. Pipeline children cannot call it.
+Feature and plan roots receive `pipeline_audit_start`, a definition-specific tool that accepts only the bounded acceptance contract, assumptions, and check evidence. It starts the fixed shared segment and returns the six controller-owned agent IDs (five contributors plus synthesis) for normal run-scoped waiting/inspection. It is not a generic fan-in or workflow API. Pipeline children cannot call it.
 
 `pipeline_check` and `pipeline_list` remain synchronous, nonblocking, and main-agent-only. Audit progress exposes only mode, phase, expected/accepted/pending/integrated counts, reducer idle/busy/finalized state, revision, and final-validation boolean. It never exposes prompts, thinking, tool arguments/results, raw reports, Git evidence, report provenance, session files, or session paths. Text and previews remain bounded.
 

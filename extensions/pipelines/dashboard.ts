@@ -14,7 +14,7 @@ import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import {
   AUDIT_PIPELINE_ID,
   AUDIT_SYNTHESIS_ROLE,
-  PIPELINE_4_LUNA_AUDIT_ROLES,
+  AUDIT_SEGMENT_LUNA_ROLES,
   PIPELINE_DEFINITIONS,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
@@ -62,7 +62,7 @@ export type PipelineRow =
     };
 
 function isPipelineAuditRole(role: string) {
-  return PIPELINE_4_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role);
+  return AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role);
 }
 
 function isFeatureFinalAuditTrack(

@@ -3,7 +3,7 @@ import {
   AUDIT_SYNTHESIS_ROLE,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
-  PIPELINE_4_LUNA_AUDIT_ROLES,
+  STATIC_LUNA_AUDIT_ROLES,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
   type FeaturePipelineDiscoveryRole,
@@ -46,9 +46,9 @@ Own planning, implementation, post-build orchestration, remediation, and the fac
 
 Continue this fixed graph from build:
 1. Synthesize the discovery reports into a feature contract, candidate acceptance criteria, and explicit assumptions. Make reasonable assumptions when evidence remains incomplete; do not pause for user input. Plan and implement the feature yourself.
-2. Mark audit. Launch these four Luna/medium roles in one parallel wave: ${PIPELINE_4_LUNA_AUDIT_ROLES.join(", ")}. Give each the feature contract, assumptions, current change, and check evidence as additional context. Wait for every report. Successful full fan-in enters audit-resolve.
+2. Mark audit. Launch these four Luna/medium roles in one parallel wave: ${STATIC_LUNA_AUDIT_ROLES.join(", ")}. Give each the feature contract, assumptions, current change, and check evidence as additional context. Wait for every report. Successful full fan-in enters audit-resolve.
 3. Evaluate every concrete finding; fix it or reject it with specific evidence. Run appropriate checks.
-4. Mark final-audit, then call pipeline_audit_start once with the feature contract, assumptions, and current checks. The host launches four new isolated Luna/medium audit tracks plus one persistent Luna/medium synthesizer. Use the returned IDs with pipeline_child_wait. Synthesis starts after the first valid track report and incrementally integrates later reports; successful validated synthesis enters final-resolve.
+4. Mark final-audit, then call pipeline_audit_start once with the feature contract, assumptions, and current checks. The host launches four read-only Luna/medium audit tracks, one Luna/medium executor-audit contributor, and one persistent Luna/medium synthesizer. Use the returned IDs with pipeline_child_wait. Synthesis starts after the first valid track report and incrementally integrates later reports; successful validated synthesis enters final-resolve.
 5. Evaluate and resolve every concrete finding in the synthesized final report yourself. Do not run another audit afterward.
 6. Mark complete and call pipeline_complete with structured facts only, including every material assumption.
 
@@ -91,7 +91,7 @@ Run only this fixed graph. Do not implement, edit files, commit, push, invoke an
 
 
 1. The run starts in build. Launch exactly one persistent Luna/medium implement-small-feature child and wait for it. Luna owns repository inspection, implementation, tests, and its structured implementation report. Successful fan-in enters final-audit.
-2. Launch exactly these four independent read-only Luna/medium audit roles in one parallel wave: ${PIPELINE_4_LUNA_AUDIT_ROLES.join(", ")}. Each receives the original task, Luna's implementation report, and fresh captured-base Git evidence. Wait for every report. Successful full fan-in enters final-resolve. Do not retry or re-run audit children.
+2. Launch exactly these four independent read-only Luna/medium audit roles in one parallel wave: ${STATIC_LUNA_AUDIT_ROLES.join(", ")}. Each receives the original task, Luna's implementation report, and fresh captured-base Git evidence. Wait for every report. Successful full fan-in enters final-resolve. Do not retry or re-run audit children.
 3. Send all four complete audit reports to the existing implement-small-feature child with pipeline_child_send. Instruct that same Luna session to fix every actionable finding or reject it with specific evidence, rerun appropriate checks, and return a fresh structured implementation report. Do not spawn a replacement or second implementer. Wait for that same child. Successful fan-in enters complete.
 4. Call pipeline_complete with factual structured facts only. Include changed paths, checks/evidence, assumptions, Git observations, all report summaries or references, unresolved items, and the exact working_dir. Do not state READY or make the main agent's Git/merge decision.
 
@@ -115,7 +115,7 @@ Run this fixed graph yourself; the host records actions and atomically advances 
 3. The plan must contain these level-two sections: Goal and non-goals; Evidence and assumptions; Candidate acceptance criteria; Frontend tasks; Backend tasks; DevOps tasks; Cross-cutting tasks; Test plan; Implementation waves; Risks, rollout, and rollback; Unresolved questions. Record inapplicable frontend/backend/DevOps sections explicitly. Use unique headings like \`### TASK-001: title\`. Every task must have bullet fields \`**Scope:**\`, \`**Likely paths/components:**\`, \`**Dependencies:**\`, and \`**Acceptance/verification evidence:**\`. Assign every task to a dependency-safe wave. The test plan must address unit, integration, contract, e2e, and operational checks, explicitly marking checks not applicable when evidence supports that.
 4. Run fresh bounded validation with pipeline_plan_validate and capture Git state with pipeline_git_status. Mark audit. Launch exactly these four Luna/medium roles in one parallel wave: audit-product-traceability, audit-decomposition-dag, audit-cross-layer-integration, audit-test-release-reliability. Give each the goal, repository evidence, assumptions, plan path/content, and validation evidence. Wait for every report. Successful full fan-in enters audit-resolve.
 5. Resolve every actionable Luna finding in the plan once, or reject it with specific evidence. Revalidate the plan.
-6. Mark final-audit, then call pipeline_audit_start once with the current plan path/content as the acceptance contract, assumptions, and fresh validation checks. The host launches four isolated Luna/medium audit tracks plus one persistent Luna/medium synthesizer and incrementally integrates reports. Wait on the returned IDs; successful validated synthesis enters final-resolve.
+6. Mark final-audit, then call pipeline_audit_start once with the current plan path/content as the acceptance contract, assumptions, and fresh validation checks. The host launches four read-only Luna/medium audit tracks, one Luna/medium executor-audit contributor, and one persistent Luna/medium synthesizer and incrementally integrates reports. Wait on the returned IDs; successful validated synthesis enters final-resolve.
 7. Resolve the synthesized audit's actionable findings in the plan once, or reject them with evidence. Revalidate the artifact. Do not audit again.
 8. Mark complete and call pipeline_complete. Supply plan_path as the repository-relative docs/plans/*.md artifact path and factual outcome, changed paths, checks/evidence, assumptions, Git state, report summaries/references, unresolved items/questions, and working_dir. Do not state a READY/readiness verdict.
 
@@ -158,6 +158,8 @@ const ROLE_INSTRUCTIONS: Record<PipelineChildRole, string> = {
     "Review functional correctness: observable behavior, contracts, integrations, edge cases, and data handling.",
   "audit-reliability-regressions":
     "Review reliability and regressions: failures, retries, partial success, stale state, concurrency, and existing flows.",
+  "executor-audit":
+    "Inspect repository manifests and scripts, then run bounded existing noninteractive verification under the executor audit safety contract.",
   "implement-small-feature":
     "Implement the bounded task directly in the supplied workspace, add or update focused tests, run appropriate checks, and retain this session for one post-audit remediation pass. Commit permission is supplied separately by the host; do not infer it from task prose. If disabled, do not commit or push and report any conflicting task request factually. If enabled, only this same persistent session may create ordinary commits in the supplied current branch; never push, merge, rebase, reset/history-rewrite, create/switch branches, or create worktrees.",
   "discover-goal-outcomes":

@@ -480,12 +480,30 @@ test("audit segment inspection is explicit, bounded, and omits private reducer e
           },
         ],
       }),
+      agent({
+        id: "executor-1",
+        parentId: "audit-root",
+        role: "executor-audit",
+        model: "openai-codex/gpt-5.6-luna",
+        status: "running",
+        transcript: [
+          {
+            kind: "tool",
+            phase: "call",
+            toolCallId: "bash-1",
+            name: "bash",
+            text: '{"command":"private command"}',
+            isError: false,
+            at: 2,
+          },
+        ],
+      }),
     ],
     rootId: "audit-root",
     auditSegment: {
       mode: "closure",
       phase: "synthesizing",
-      expectedReportCount: 4,
+      expectedReportCount: 5,
       acceptedReportCount: 3,
       pendingReportCount: 2,
       integratedReportCount: 1,
@@ -508,7 +526,11 @@ test("audit segment inspection is explicit, bounded, and omits private reducer e
   ]) {
     assert.equal(serialized.includes(privateField), false);
   }
-  assert.match(formatPipelineCheck(projected), /reports accepted 3\/4/);
+  assert.equal(projected.agents[1]?.role, "executor-audit");
+  assert.equal("preview" in (projected.agents[1] ?? {}), false);
+  assert.match(formatPipelineCheck(projected), /executor-audit/);
+  assert.match(formatPipelineCheck(projected), /Open tool: bash/);
+  assert.match(formatPipelineCheck(projected), /reports accepted 3\/5/);
 });
 
 test("active previews and whole check text enforce visible byte and line bounds", () => {

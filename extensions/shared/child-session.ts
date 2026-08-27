@@ -63,6 +63,17 @@ export const PLAN_PIPELINE_MUTATING_TOOL_NAMES = [
   "mcp",
 ] as const;
 
+/** Executor audit keeps ordinary bash but no explicit mutation or delegation tools. */
+export const EXECUTOR_AUDIT_EXCLUDED_TOOL_NAMES = [
+  "edit",
+  "write",
+  "apply_patch_codex",
+  "codex_task",
+  "bg_start",
+  "bg_kill",
+  "mcp",
+] as const;
+
 /** Fresh SDK options avoid turning the denylist into an accidental allowlist. */
 export function childToolPolicy() {
   return { excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES] };
@@ -96,6 +107,15 @@ export function readOnlyPipelineChildToolPolicy() {
     excludeTools: [
       ...CHILD_EXCLUDED_TOOL_NAMES,
       ...PLAN_PIPELINE_MUTATING_TOOL_NAMES,
+    ],
+  };
+}
+
+export function executorAuditToolPolicy() {
+  return {
+    excludeTools: [
+      ...CHILD_EXCLUDED_TOOL_NAMES,
+      ...EXECUTOR_AUDIT_EXCLUDED_TOOL_NAMES,
     ],
   };
 }
