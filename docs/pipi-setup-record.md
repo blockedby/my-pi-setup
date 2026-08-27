@@ -1129,3 +1129,27 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Git `main`, managed Pipi state under `~/.pipi/agent`, launcher `~/.local/bin/pipi`, and this operation record. Model overrides, credentials, external services, and submodule pins were unchanged.
 - **Verification:** Before PR #58, the hotfix passed 35/35 installer/submodule, 240/240 extension, and 22/22 file-search tests plus TypeScript, formatting, exact submodules, and `git diff --check`; canonical closure review returned `READY` with `REV-001` fixed. After rebasing Discovery Report V2 onto PR #58, the combined source passed 35/35 installer/submodule, 251/251 extension, and 22/22 file-search tests plus TypeScript, formatting, exact submodules, and `git diff --check`. Post-merge `npm run check:pipi-install` verified installed Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration; `npm run check:submodules` verified both exact pins. Primary `main` is clean and aligned with `origin/main`. No additional live model/backend smoke was run.
 - **Pending:** Reload or restart sessions created before this rollout so their in-memory extension registry loads the reducer contract hotfix and `pipeline_discovery_submit` Discovery Report V2 behavior.
+
+## Operation entry: fix feature pipeline dashboard final-audit placement
+
+- **Request:** Fix nested `/pipelines` dashboard placement for the feature-pipeline controller-owned final audit wave, add a regression test, leave changes uncommitted, and preserve pipeline/runtime semantics.
+- **Action:** Classified repeated canonical audit roles by their position after the controller-created `audit-synthesis` child for feature-pipeline display only, while retaining existing non-feature placement. The dashboard now prioritizes a running final-audit track over the idle synthesizer when selecting the active stage agent. Added a regression covering completed attempt-1 audit roles, idle synthesis, and running attempt-2 final tracks.
+- **Affected paths or values:** `extensions/pipelines/dashboard.ts`, `extensions/pipelines/dashboard.test.ts`, and this record. Pipeline graphs, lifecycle/status semantics, session behavior, attempt numbering, inspection privacy, non-feature definitions, model overrides, credentials, installed Pipi, and external state were not changed.
+- **Verification:** `node --test --experimental-strip-types extensions/pipelines/dashboard.test.ts` passed 11/11; `npm run format:check`, `npm run check:submodules`, and `git diff --check` passed. `npm run check` was attempted but remains blocked by the workspace's missing extension dependencies (`effect`, `@effect/platform-node`, and related existing type errors); dependency installation timed out before completion. No commit or push was performed.
+- **Pending:** None.
+
+## Operation entry: remediate dashboard audit verification
+
+- **Request:** Resolve independent audit unproven checks for dashboard final-audit placement without changing runtime semantics, and leave changes uncommitted.
+- **Action:** Installed the declared repository and extension dependencies locally, reran the full TypeScript check, and added an executable partial-start regression with a retry attempt number of 7. The test asserts pre-final roles remain under `audit` while the single controller-owned retry moves under `final-audit`; this addresses the functional-correctness coverage item. All four audit reports' TypeScript concerns are resolved by the passing repository check.
+- **Affected paths or values:** `extensions/pipelines/dashboard.test.ts` and this record; local dependency installations only. No pipeline graphs, lifecycle/session behavior, external Pipi state, credentials, model overrides, commit, or push changed.
+- **Verification:** Dashboard tests passed 12/12; `npm run check` passed; `npm run format:check`, `npm run check:submodules`, and `git diff --check` passed.
+- **Pending:** None.
+
+## Operation entry: accept and prepare dashboard audit placement delivery
+
+- **Request:** After the small-feature pipeline completed, accept the dashboard fix, merge it, and reinstall Pipi.
+- **Action:** Main-agent review preserved the pipeline's display-only audit-wave classification and corrected one stage-selection edge case: once final tracks are settled and `audit-synthesis` is running, the active `final-audit` row now opens synthesis instead of a completed track. Added a direct regression while retaining the supplied running-track, repeated-role, partial-start, and non-literal-attempt-2 coverage. No pipeline graph, lifecycle, session, attempt, or inspection contract changed.
+- **Affected paths or values:** `extensions/pipelines/dashboard.ts`, `extensions/pipelines/dashboard.test.ts`, and this record. Installed Pipi, credentials, model overrides, external state, and submodule pins are unchanged until the authorized post-merge rollout.
+- **Verification:** Fresh focused dashboard tests pass 13/13. After the stage-selection edge-case correction, the full deterministic extension suite passes 254/254; repository TypeScript, formatting, exact-submodule verification, and `git diff --check` pass.
+- **Pending:** Commit, push, squash-merge through a PR, synchronize `main`, reinstall Pipi, verify installed state, and reload sessions created before rollout.

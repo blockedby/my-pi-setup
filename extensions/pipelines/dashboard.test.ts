@@ -294,6 +294,149 @@ test("dashboard lists all definitions and nests runs under the selected definiti
   assert.ok(planRun > planDefinition);
 });
 
+test("feature final audit separates repeated audit roles and selects a running track", () => {
+  const root = agent("root-1", { createdAt: 1 });
+  const firstWave = PIPELINE_4_LUNA_AUDIT_ROLES.map((role, index) =>
+    agent(`audit-first-${index + 1}`, {
+      parentId: root.id,
+      role,
+      attempt: 1,
+      status: "done",
+      createdAt: 10 + index,
+    }),
+  );
+  const synthesis = agent("audit-synthesis-1", {
+    parentId: root.id,
+    role: "audit-synthesis",
+    status: "idle",
+    createdAt: 20,
+  });
+  const secondWave = PIPELINE_4_LUNA_AUDIT_ROLES.map((role, index) =>
+    agent(`audit-final-${index + 1}`, {
+      parentId: root.id,
+      role,
+      attempt: 2,
+      status: "running",
+      createdAt: 21 + index,
+    }),
+  );
+  const run = {
+    ...pipelineRun("run-1", [root, ...firstWave, synthesis, ...secondWave]),
+    stage: "final-audit" as const,
+  };
+  const rows = buildPipelineRows([run], new Set([run.id]));
+  const stage = (name: "audit" | "final-audit") => {
+    const row = rows.find(
+      (candidate): candidate is Extract<PipelineRow, { kind: "stage" }> =>
+        candidate.kind === "stage" && candidate.stage === name,
+    );
+    assert.ok(row);
+    return row;
+  };
+
+  assert.equal(stage("audit").status, "done");
+  assert.equal(stage("final-audit").status, "running");
+  assert.equal(stage("final-audit").agentId, secondWave.at(-1)?.id);
+  for (const auditor of firstWave) {
+    assert.match(
+      rows.find((row) => row.kind === "agent" && row.agentId === auditor.id)
+        ?.key ?? "",
+      /:audit:/,
+    );
+  }
+  for (const auditor of secondWave) {
+    assert.match(
+      rows.find((row) => row.kind === "agent" && row.agentId === auditor.id)
+        ?.key ?? "",
+      /:final-audit:/,
+    );
+  }
+  assert.match(
+    rows.find((row) => row.kind === "agent" && row.agentId === synthesis.id)
+      ?.key ?? "",
+    /:final-audit:/,
+  );
+});
+
+test("feature final audit selects running synthesis after final tracks settle", () => {
+  const root = agent("root-1", { createdAt: 1 });
+  const firstWave = agent("audit-first", {
+    parentId: root.id,
+    role: PIPELINE_4_LUNA_AUDIT_ROLES[0],
+    attempt: 1,
+    status: "done",
+    createdAt: 10,
+  });
+  const synthesis = agent("audit-synthesis-1", {
+    parentId: root.id,
+    role: "audit-synthesis",
+    status: "running",
+    createdAt: 20,
+  });
+  const finalTrack = agent("audit-final", {
+    parentId: root.id,
+    role: PIPELINE_4_LUNA_AUDIT_ROLES[0],
+    attempt: 2,
+    status: "done",
+    createdAt: 21,
+  });
+  const run = {
+    ...pipelineRun("run-1", [root, firstWave, synthesis, finalTrack]),
+    stage: "final-audit" as const,
+  };
+  const finalAudit = buildPipelineRows([run], new Set([run.id])).find(
+    (row): row is Extract<PipelineRow, { kind: "stage" }> =>
+      row.kind === "stage" && row.stage === "final-audit",
+  );
+
+  assert.ok(finalAudit);
+  assert.equal(finalAudit.agentId, synthesis.id);
+});
+
+test("feature final audit keeps partial retries separate from the pre-final wave", () => {
+  const root = agent("root-1", { createdAt: 1 });
+  const firstWave = PIPELINE_4_LUNA_AUDIT_ROLES.map((role, index) =>
+    agent(`audit-first-${index + 1}`, {
+      parentId: root.id,
+      role,
+      attempt: 1,
+      status: "done",
+      createdAt: 10 + index,
+    }),
+  );
+  const synthesis = agent("audit-synthesis-1", {
+    parentId: root.id,
+    role: "audit-synthesis",
+    status: "idle",
+    createdAt: 20,
+  });
+  const retry = agent("audit-final-retry", {
+    parentId: root.id,
+    role: PIPELINE_4_LUNA_AUDIT_ROLES[0],
+    attempt: 7,
+    status: "running",
+    createdAt: 21,
+  });
+  const run = {
+    ...pipelineRun("run-1", [root, ...firstWave, synthesis, retry]),
+    stage: "final-audit" as const,
+  };
+  const rows = buildPipelineRows([run], new Set([run.id]));
+
+  for (const auditor of firstWave) {
+    assert.match(
+      rows.find((row) => row.kind === "agent" && row.agentId === auditor.id)
+        ?.key ?? "",
+      /:audit:/,
+    );
+  }
+  assert.match(
+    rows.find((row) => row.kind === "agent" && row.agentId === retry.id)?.key ??
+      "",
+    /:final-audit:/,
+  );
+});
+
 test("small-feature dashboard shows only its fixed stages and child placement", () => {
   const root = agent("root-1");
   const implementer = agent("luna-1", {
