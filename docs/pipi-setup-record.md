@@ -1209,3 +1209,19 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/dashboard.ts`, `extensions/pipelines/dashboard.test.ts`, and this record. Installed Pipi state is unchanged.
 - **Verification:** All 269 deterministic extension tests passed, including the new dashboard label assertion. TypeScript, repository formatting, and `git diff --check` passed.
 - **Pending:** Reload or restart Pipi to see the new label.
+
+## Operation entry: roll out completion-stage label locally
+
+- **Request:** Update the local Pipi setup after the dashboard label change was pushed.
+- **Action:** Re-ran the managed Pipi installer from primary `main` with repository dependency installation skipped, refreshing launcher/settings/runtime wiring without changing versions, credentials, model overrides, or submodule pins.
+- **Affected paths or values:** Managed launcher `/home/kcnc/.local/bin/pipi`, Pipi state under `~/.pipi/agent`, and this record. The package continues to resolve `/home/kcnc/code/tools/pipi-alias` at commit `50f24b7`.
+- **Verification:** `npm run check:pipi-install` passed for Pipi 0.84.3, MCP 2.15.0, launcher/resume branding, install-script policy, model overrides, and Herdr integration. `pipi list` loads cleanly and points at the primary checkout.
+- **Pending:** Restart or reload the current Pipi session to display `completion stage`; no source commit was requested for this operation-record entry.
+
+## Operation entry: rewrite README around product value
+
+- **Request:** Replace the implementation-heavy README wall of text with a concise product overview focused on features, benefits, and ease of use.
+- **Action:** Rewrote `README.md` around user value, included agents, pipeline selection, everyday tools, safety/isolation, one short example, setup guidance, and links to detailed design docs. Removed low-level schemas, retry mechanics, controller internals, evidence limits, and graph implementation detail from the README.
+- **Affected paths or values:** `README.md` and this record. Runtime behavior, installed Pipi state, dependencies, credentials, model overrides, and submodule pins are unchanged.
+- **Verification:** Final README is 94 lines instead of 190, all referenced local files exist, repository formatting passes, and `git diff --check` passes.
+- **Pending:** None.
