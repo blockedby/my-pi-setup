@@ -1578,4 +1578,4 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Action:** Changed the feature worktree lifecycle to create each run root under the caller repository's ignored `.worktrees/` directory and added deterministic path coverage.
 - **Affected paths or values:** `extensions/pipelines/feature-worktrees.ts`, `extensions/pipelines/feature-worktrees.test.ts`, and this record. Installed runtime state and active pipeline runs are unchanged.
 - **Verification:** Focused feature-worktree tests passed 7/7; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
-- **Pending:** Publish the verified branch and open the requested PR to `main`; runtime rollout is not requested.
+- **Pending:** PR [#82](https://github.com/blockedby/my-pi-setup/pull/82) is open against `main` for the user to merge after the preceding fix; runtime rollout is not requested.
