@@ -14,22 +14,22 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 
 ### Agents
 
-| Agent/profile | Best for |
-| --- | --- |
-| Pi subagent | General delegated work |
-| `luna-explore` | Read-only repository exploration |
-| `luna-worker` | Scoped implementation and testing |
-| `terra-audit` | Manual deep review and escalation |
+| Agent/profile            | Best for                                |
+| ------------------------ | --------------------------------------- |
+| Pi subagent              | General delegated work                  |
+| `luna-explore`           | Read-only repository exploration        |
+| `luna-worker`            | Scoped implementation and testing       |
+| `terra-audit`            | Manual deep review and escalation       |
 | Claude or Codex subagent | Tasks that benefit from another backend |
 
 ### Pipelines
 
-| Pipeline | Use it when you need |
-| --- | --- |
-| `small-feature-pipeline` | One focused implementation, parallel review, and a fix pass |
-| `feature-pipeline` | A broader feature with discovery, implementation, and multi-concern audit |
-| `plan-pipeline` | A repository-grounded implementation plan instead of code |
-| `audit-pipeline` | A read-only initial or closure audit with no remediation |
+| Pipeline                 | Use it when you need                                                                                             |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `small-feature-pipeline` | One focused implementation, parallel review, and a fix pass                                                      |
+| `feature-pipeline`       | A broader feature with discovery, implementation, and multi-concern audit                                        |
+| `plan-pipeline`          | A repository-grounded implementation plan instead of code, returned directly or saved to a chosen workspace path |
+| `audit-pipeline`         | A read-only initial or closure audit with no remediation                                                         |
 
 Run `/pipelines` to inspect progress or ask Pipi to cancel one or more active runs. Press `Enter` to expand a run or open the agent responsible for a stage. Status colors make running, completed, and failed work easy to scan.
 
@@ -48,14 +48,14 @@ Implementation agents work in dedicated Git worktrees, keeping feature changes i
 
 ### Built-in skills
 
-| Skill | Purpose |
-| --- | --- |
-| `code-review` | Evidence-driven initial and closure review |
-| `plan-gh-backlog` | Validate and publish structured GitHub backlogs |
-| `browser-chrome` | Choose and control the appropriate Chrome mode |
-| `codex-tools` | Search, fetch, patch, and delegate Codex tasks |
-| `background-terminals` | Run and monitor long-lived commands |
-| `subagents` | Delegate focused work to child models |
+| Skill                  | Purpose                                         |
+| ---------------------- | ----------------------------------------------- |
+| `code-review`          | Evidence-driven initial and closure review      |
+| `plan-gh-backlog`      | Validate and publish structured GitHub backlogs |
+| `browser-chrome`       | Choose and control the appropriate Chrome mode  |
+| `codex-tools`          | Search, fetch, patch, and delegate Codex tasks  |
+| `background-terminals` | Run and monitor long-lived commands             |
+| `subagents`            | Delegate focused work to child models           |
 
 ## Isolation and safety
 

@@ -19,11 +19,11 @@ import {
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
   LUNA_MODEL,
-  PIPELINE_STAGES,
   STATIC_LUNA_AUDIT_ROLES,
-  PLAN_PIPELINE_AUDIT_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
+  PLAN_PIPELINE_SYNTHESIS_ROLE,
+  type PlanPipelineDiscoveryRole,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SMALL_FEATURE_PIPELINE_ID,
@@ -47,9 +47,9 @@ import {
   type PipelineStage,
 } from "./domain.ts";
 import {
-  resolvePlanArtifact,
+  resolvePlanOutputPath,
   validatePipelineReport,
-  writePlanArtifact,
+  writePlanOutput,
 } from "./plan-contract.ts";
 import {
   parseFeatureDiscoveryReport,
@@ -57,6 +57,12 @@ import {
   validateFeatureDiscoveryFanIn,
   type FeatureDiscoveryReportV2,
 } from "./discovery-report.ts";
+import {
+  parsePlanDiscoveryReport,
+  parsePlanDiscoveryReportText,
+  type PlanDiscoveryReport,
+  type PlanDiscoveryReportContext,
+} from "./plan-discovery-report.ts";
 import {
   buildPipelineChildPrompt,
   buildPipelinePrompt,
@@ -104,6 +110,15 @@ export function pipelineDiscoveryToolAllowed(
   stage: PipelineStage,
   bootstrapped: boolean,
 ) {
+  if (definition === PLAN_PIPELINE_ID) {
+    return (
+      (stage === "discover" &&
+        PLAN_PIPELINE_DISCOVERY_ROLES.some(
+          (discoveryRole) => discoveryRole === role,
+        )) ||
+      (stage === "synthesize" && role === PLAN_PIPELINE_SYNTHESIS_ROLE)
+    );
+  }
   if (definition !== FEATURE_PIPELINE_ID || stage !== "discover") return false;
   if (role === FEATURE_DISCOVERY_SYNTHESIS_ROLE) return true;
   return (
@@ -120,6 +135,9 @@ export function pipelineDiscoverySubmissionAllowed(
   stage: PipelineStage,
   bootstrapped: boolean,
 ) {
+  if (definition === PLAN_PIPELINE_ID) {
+    return pipelineDiscoveryToolAllowed(definition, role, stage, bootstrapped);
+  }
   if (!pipelineDiscoveryToolAllowed(definition, role, stage, bootstrapped)) {
     return false;
   }
@@ -134,9 +152,7 @@ export function pipelineAuditSubmissionAllowed(
   segmentActive: boolean,
 ) {
   const definitionUsesSegment =
-    definition === AUDIT_PIPELINE_ID ||
-    definition === FEATURE_PIPELINE_ID ||
-    definition === PLAN_PIPELINE_ID;
+    definition === AUDIT_PIPELINE_ID || definition === FEATURE_PIPELINE_ID;
   if (!definitionUsesSegment) return false;
   if (role === AUDIT_SYNTHESIS_ROLE) {
     return definition === AUDIT_PIPELINE_ID || segmentActive;
@@ -205,6 +221,12 @@ interface MutableRun {
     FeaturePipelineDiscoveryRole,
     FeatureDiscoveryReportContext
   >;
+  planDiscoveryReports: Map<
+    PlanPipelineDiscoveryRole,
+    PlanDiscoveryReportContext
+  >;
+  planText?: string;
+  planWrittenPath?: string;
   featureCaller?: FeatureCallerWorktree;
   featureLifecycle?: FeatureWorktreeLifecycle;
   featureDiscoverySynthesis?: FeatureDiscoverySynthesis;
@@ -219,10 +241,6 @@ interface MutableRun {
   auditSegmentStarting?: Promise<ReadonlyArray<AgentNodeSnapshot>>;
   finalAuditReportDelivered: boolean;
   completion?: PipelineCompletionFacts;
-  planArtifactsWritten: Map<
-    string,
-    { digest: string; device: number; inode: number }
-  >;
 }
 
 function finalAuditResolutionHandoff(run: MutableRun) {
@@ -404,6 +422,14 @@ export class PipelineController {
           if (run.status !== "starting" && run.status !== "running") {
             return false;
           }
+          if (
+            run.definition === PLAN_PIPELINE_ID &&
+            role === PLAN_PIPELINE_SYNTHESIS_ROLE
+          ) {
+            // The deferred synthesis session is created before discovery so it
+            // can own the six children; its typed tool settles only in synthesize.
+            return true;
+          }
           return pipelineDiscoveryToolAllowed(
             run.definition,
             role,
@@ -436,17 +462,18 @@ export class PipelineController {
     token: string,
   ) {
     const run = this.requireRun(runId);
-    if (
-      (run.status !== "starting" && run.status !== "running") ||
-      !pipelineDiscoveryToolAllowed(
-        run.definition,
-        role,
-        run.stage,
-        run.featureDiscoveryBootstrapped,
-      )
-    ) {
-      return;
-    }
+    if (run.status !== "starting" && run.status !== "running") return;
+    const allowed =
+      run.definition === PLAN_PIPELINE_ID &&
+      role === PLAN_PIPELINE_SYNTHESIS_ROLE
+        ? true
+        : pipelineDiscoveryToolAllowed(
+            run.definition,
+            role,
+            run.stage,
+            run.featureDiscoveryBootstrapped,
+          );
+    if (!allowed) return;
     const node = this.agentsFor(runId)
       .filter((agent) => agent.role === role && agent.status === "starting")
       .at(-1);
@@ -465,8 +492,11 @@ export class PipelineController {
     const sessionIds = new Set(this.agentsFor(runId).map((agent) => agent.id));
     for (const sessionId of sessionIds) {
       this.discoverySubmissions.delete(sessionId);
+      this.discoveryCorrections.delete(sessionId);
+      this.featureSynthesisCorrections.delete(sessionId);
       this.clearDiscoverySessionTokens(sessionId);
     }
+    this.requireRun(runId).planDiscoveryReports.clear();
   }
 
   private submitDiscoveryReport(
@@ -484,7 +514,7 @@ export class PipelineController {
         run.featureDiscoveryBootstrapped,
       )
     ) {
-      throw new Error("Feature discovery submission is not active.");
+      throw new Error("Pipeline discovery submission is not active.");
     }
     const sessionId = this.discoverySessionTokens.get(token);
     const node = sessionId ? this.tree.view.get(sessionId) : undefined;
@@ -584,6 +614,23 @@ export class PipelineController {
     if (this.shuttingDown)
       throw new Error("Pipeline controller is shutting down.");
     const definition = request.pipeline ?? FEATURE_PIPELINE_ID;
+    if (definition === PLAN_PIPELINE_ID) {
+      if (
+        !Object.prototype.hasOwnProperty.call(request, "planPath") ||
+        (request.planPath !== null && typeof request.planPath !== "string")
+      ) {
+        throw new Error(
+          "plan-pipeline requires an explicit planPath string or null.",
+        );
+      }
+      if (request.planPath !== null) {
+        resolvePlanOutputPath(request.workingDir, request.planPath);
+      }
+    } else if (request.planPath !== undefined && request.planPath !== null) {
+      throw new Error(
+        `planPath is only valid for plan-pipeline; received ${definition}.`,
+      );
+    }
     assertPipelineGitCommitSupported(definition, request.gitCommit === true);
     const featureCaller =
       definition === FEATURE_PIPELINE_ID
@@ -638,11 +685,11 @@ export class PipelineController {
       resolveRootReady: rootReady.resolve,
       featureDiscoveryBootstrapped: false,
       featureDiscoveryReports: new Map(),
+      planDiscoveryReports: new Map(),
       ...(featureCaller ? { featureCaller } : {}),
       ...(featureLifecycle ? { featureLifecycle } : {}),
       featureSynthesisChecks: [],
       finalAuditReportDelivered: false,
-      planArtifactsWritten: new Map(),
     };
     this.runs.set(id, run);
     this.notify();
@@ -661,14 +708,20 @@ export class PipelineController {
         role:
           run.definition === AUDIT_PIPELINE_ID
             ? AUDIT_SYNTHESIS_ROLE
-            : "pipeline-root",
+            : run.definition === PLAN_PIPELINE_ID
+              ? PLAN_PIPELINE_SYNTHESIS_ROLE
+              : "pipeline-root",
         attempt: 1,
         title: definitionFor(run.definition).rootTitle,
         model: definitionFor(run.definition).rootModel,
+        thinkingLevel:
+          run.definition === PLAN_PIPELINE_ID ? "xhigh" : undefined,
         cwd: run.request.workingDir,
         prompt: buildPipelinePrompt(run.definition, run.request),
         persistent: true,
-        deferPrompt: run.definition === AUDIT_PIPELINE_ID,
+        deferPrompt:
+          run.definition === AUDIT_PIPELINE_ID ||
+          run.definition === PLAN_PIPELINE_ID,
         shouldStart: () => run.status === "starting",
       });
       run.rootId = root.id;
@@ -698,6 +751,8 @@ export class PipelineController {
             standalone: true,
           });
           await run.auditSegmentStarting;
+        } else if (run.definition === PLAN_PIPELINE_ID) {
+          await this.initializePlanPipeline(run);
         }
       }
     } catch (error) {
@@ -708,6 +763,202 @@ export class PipelineController {
         Boolean(run.rootId),
       );
     }
+  }
+
+  private planDiscoveryReports(run: MutableRun) {
+    return PLAN_PIPELINE_DISCOVERY_ROLES.map((role) => {
+      const context = run.planDiscoveryReports.get(role);
+      if (!context) {
+        throw new Error(
+          `plan-pipeline has no validated ${role} discovery report.`,
+        );
+      }
+      return context;
+    });
+  }
+
+  private async settlePlanDiscoveryRole(
+    run: MutableRun,
+    role: PlanPipelineDiscoveryRole,
+    sessionId: string,
+  ) {
+    while (run.status === "running") {
+      const [settled] = await this.tree.wait([sessionId]);
+      if (!settled) {
+        throw new Error(`Plan discovery session ${sessionId} disappeared.`);
+      }
+      if (settled.status === "error" || settled.status === "cancelled") {
+        throw new Error(
+          `Plan discovery ${role} session ${settled.status}: ${settled.error ?? "provider failure or cancellation"}.`,
+        );
+      }
+      const hasSubmission = this.discoverySubmissions.has(sessionId);
+      const submitted = this.discoverySubmissions.get(sessionId);
+      this.discoverySubmissions.delete(sessionId);
+      try {
+        const report = hasSubmission
+          ? parsePlanDiscoveryReport(role, submitted)
+          : parsePlanDiscoveryReportText(role, settled.finalText);
+        run.planDiscoveryReports.set(role, {
+          role,
+          provenance: {
+            sessionId,
+            attempt: settled.attempt,
+            submission: hasSubmission ? "tool" : "final-text-json",
+          },
+          report,
+        });
+        this.clearDiscoverySessionTokens(sessionId);
+        this.tree.disableViewMutations(sessionId);
+        return;
+      } catch (error) {
+        const count = (this.discoveryCorrections.get(sessionId) ?? 0) + 1;
+        this.discoveryCorrections.set(sessionId, count);
+        const detail = error instanceof Error ? error.message : String(error);
+        if (count >= 4) {
+          throw new Error(
+            `Plan discovery ${role} rejected settled turn ${count}: ${detail}`,
+          );
+        }
+        await this.tree.send(
+          sessionId,
+          `Plan discovery ${role} was rejected (correction ${count}/3): ${detail} Submit the complete strict role-bound evidence report through the typed submission tool, then stop. Do not choose an implementation or disturb other discovery tracks.`,
+        );
+      }
+    }
+    throw new Error(`Plan discovery ${role} ended because the run stopped.`);
+  }
+
+  private async bootstrapPlanDiscovery(run: MutableRun) {
+    const children = await Promise.all(
+      PLAN_PIPELINE_DISCOVERY_ROLES.map((role) =>
+        this.spawnChildForRun(run, role, "", false),
+      ),
+    );
+    await Promise.all(
+      PLAN_PIPELINE_DISCOVERY_ROLES.map((role, index) => {
+        const child = children[index];
+        if (!child) {
+          throw new Error(`Plan discovery ${role} session was not created.`);
+        }
+        return this.settlePlanDiscoveryRole(run, role, child.id);
+      }),
+    );
+    if (run.status !== "running") return;
+    this.planDiscoveryReports(run);
+    run.stage = "synthesize";
+    this.notify();
+  }
+
+  private parsePlanSubmission(value: unknown) {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).length !== 1 ||
+      typeof Reflect.get(value, "plan") !== "string"
+    ) {
+      throw new Error(
+        "Plan submission must contain exactly one non-empty plan string.",
+      );
+    }
+    const plan = Reflect.get(value, "plan") as string;
+    if (!plan.trim()) throw new Error("Plan submission must not be empty.");
+    if (Buffer.byteLength(plan, "utf8") > 1024 * 1024) {
+      throw new Error("Plan submission exceeds 1 MiB.");
+    }
+    return plan;
+  }
+
+  private async settlePlanSynthesis(run: MutableRun) {
+    const sessionId = run.rootId;
+    if (!sessionId) throw new Error("Plan synthesis session is unavailable.");
+    while (run.status === "running") {
+      const [settled] = await this.tree.wait([sessionId]);
+      if (!settled) throw new Error("Plan synthesis session disappeared.");
+      if (settled.status === "error" || settled.status === "cancelled") {
+        throw new Error(
+          `Plan synthesis session ${settled.status}: ${settled.error ?? "provider failure or cancellation"}.`,
+        );
+      }
+      const hasSubmission = this.discoverySubmissions.has(sessionId);
+      const submitted = this.discoverySubmissions.get(sessionId);
+      this.discoverySubmissions.delete(sessionId);
+      try {
+        const plan = hasSubmission
+          ? this.parsePlanSubmission(submitted)
+          : (() => {
+              if (!settled.finalText.trim())
+                throw new Error("Plan synthesis returned no plan text.");
+              if (Buffer.byteLength(settled.finalText, "utf8") > 1024 * 1024)
+                throw new Error("Plan synthesis exceeds 1 MiB.");
+              return settled.finalText;
+            })();
+        this.clearDiscoverySessionTokens(sessionId);
+        return plan;
+      } catch (error) {
+        const count = (this.discoveryCorrections.get(sessionId) ?? 0) + 1;
+        this.discoveryCorrections.set(sessionId, count);
+        const detail = error instanceof Error ? error.message : String(error);
+        if (count >= 4) {
+          throw new Error(`Plan synthesis rejected turn ${count}: ${detail}`);
+        }
+        await this.tree.send(
+          sessionId,
+          `Plan synthesis was rejected (correction ${count}/3): ${detail} Submit the complete free-form Markdown plan through pipeline_plan_submit. Keep the plan text opaque; do not call generic orchestration or write tools.`,
+        );
+      }
+    }
+    throw new Error("Plan synthesis ended because the run stopped.");
+  }
+
+  private finishPlan(run: MutableRun, plan: string) {
+    let writtenPath: string | undefined;
+    if (run.request.planPath !== null && run.request.planPath !== undefined) {
+      writtenPath = writePlanOutput(
+        run.request.workingDir,
+        run.request.planPath,
+        plan,
+      ).relativePath;
+    }
+    run.planText = plan;
+    run.planWrittenPath = writtenPath;
+    run.stage = "complete";
+    run.status = "completed";
+    run.finishedAt = Date.now();
+    run.completion = {
+      outcome: "Plan synthesis completed from six validated discovery reports.",
+      plan,
+      ...(writtenPath ? { planPath: writtenPath } : {}),
+      changedPaths: writtenPath ? [writtenPath] : [],
+      checks: [
+        "Six role-bound planning discovery reports passed host validation.",
+        "One Luna/xhigh synthesis session accepted the plan.",
+      ],
+      assumptions: [],
+      git: [],
+      reports: PLAN_PIPELINE_DISCOVERY_ROLES.map(
+        (role) => `${role} report accepted by the controller.`,
+      ),
+      unresolvedItems: [],
+      workingDir: run.request.workingDir,
+    };
+    this.clearDiscoveryRunState(run.id);
+    this.notify();
+    this.deliver(run);
+  }
+
+  private async initializePlanPipeline(run: MutableRun) {
+    await this.bootstrapPlanDiscovery(run);
+    if (run.status !== "running") return;
+    const reports = this.planDiscoveryReports(run);
+    if (!run.rootId) throw new Error("Plan synthesis session is unavailable.");
+    await this.tree.startDeferred(
+      run.rootId,
+      buildPipelinePrompt(run.definition, run.request, reports),
+    );
+    const plan = await this.settlePlanSynthesis(run);
+    if (run.status === "running") this.finishPlan(run, plan);
   }
 
   private async initializeFeaturePipeline(run: MutableRun) {
@@ -1295,11 +1546,7 @@ export class PipelineController {
       input,
       git: this.auditGitIdentity(run),
       purpose:
-        run.definition === AUDIT_PIPELINE_ID
-          ? "standalone"
-          : run.definition === PLAN_PIPELINE_ID
-            ? "plan-final"
-            : "feature-final",
+        run.definition === AUDIT_PIPELINE_ID ? "standalone" : "feature-final",
     };
     const segment = new AuditSegment(context);
     run.auditSegment = segment;
@@ -1358,12 +1605,9 @@ export class PipelineController {
     },
   ) {
     const run = this.requireActiveRun(runId);
-    if (
-      run.definition !== FEATURE_PIPELINE_ID &&
-      run.definition !== PLAN_PIPELINE_ID
-    ) {
+    if (run.definition !== FEATURE_PIPELINE_ID) {
       throw new Error(
-        "Embedded audit segments are available only to feature-pipeline and plan-pipeline.",
+        "Embedded audit segments are available only to feature-pipeline.",
       );
     }
     if (run.stage !== "final-audit") {
@@ -1663,6 +1907,12 @@ export class PipelineController {
     ) {
       return run.featureDiscoveryReports.has(role);
     }
+    if (
+      run.definition === PLAN_PIPELINE_ID &&
+      PLAN_PIPELINE_DISCOVERY_ROLES.some((candidate) => candidate === role)
+    ) {
+      return run.planDiscoveryReports.has(role as PlanPipelineDiscoveryRole);
+    }
     return this.agentsFor(run.id).some(
       (agent) =>
         agent.role === role &&
@@ -1728,17 +1978,28 @@ export class PipelineController {
       }
       return;
     }
+    if (run.definition === PLAN_PIPELINE_ID) {
+      if (
+        run.stage === "discover" &&
+        PLAN_PIPELINE_DISCOVERY_ROLES.every((role) =>
+          this.roleHasValidReport(run, role),
+        ) &&
+        PLAN_PIPELINE_DISCOVERY_ROLES.every((role) =>
+          waitedChildren.some((child) => child.role === role),
+        )
+      ) {
+        run.stage = "synthesize";
+        this.notify();
+      }
+      return;
+    }
     const roles =
       run.stage === "discover"
-        ? run.definition === FEATURE_PIPELINE_ID
-          ? FEATURE_PIPELINE_DISCOVERY_ROLES
-          : PLAN_PIPELINE_DISCOVERY_ROLES
+        ? FEATURE_PIPELINE_DISCOVERY_ROLES
         : run.stage === "audit"
           ? run.definition === FEATURE_PIPELINE_ID
             ? STATIC_LUNA_AUDIT_ROLES
-            : run.definition === PLAN_PIPELINE_ID
-              ? PLAN_PIPELINE_AUDIT_ROLES
-              : []
+            : []
           : [];
     const nextStage =
       run.stage === "discover"
@@ -1815,29 +2076,23 @@ export class PipelineController {
         "feature-pipeline final-resolve requires a validated Luna audit synthesis.",
       );
     } else if (run.definition === PLAN_PIPELINE_ID) {
-      const currentIndex = PIPELINE_STAGES.indexOf(run.stage);
-      const nextIndex = PIPELINE_STAGES.indexOf(stage);
-      if (nextIndex < currentIndex || nextIndex > currentIndex + 1) {
+      const stages = stagesForDefinition(run.definition);
+      const currentIndex = stages.indexOf(run.stage);
+      const nextIndex = stages.indexOf(stage);
+      if (
+        nextIndex < 0 ||
+        nextIndex < currentIndex ||
+        nextIndex > currentIndex + 1
+      ) {
         throw new Error(
           `Invalid plan-pipeline stage transition: ${run.stage} to ${stage}.`,
         );
       }
-      if (stage === "build") {
+      if (stage === "synthesize") {
         this.requireValidReports(run, PLAN_PIPELINE_DISCOVERY_ROLES, stage);
-      } else if (stage === "audit" && run.planArtifactsWritten.size === 0) {
-        throw new Error("Cannot enter audit before writing a plan artifact.");
-      } else if (stage === "audit-resolve") {
-        this.requireValidReports(run, PLAN_PIPELINE_AUDIT_ROLES, stage);
-      } else if (
-        stage === "final-audit" &&
-        run.planArtifactsWritten.size === 0
-      ) {
+      } else if (stage === "complete" && !run.planText) {
         throw new Error(
-          "Cannot enter final-audit before writing a plan artifact.",
-        );
-      } else if (stage === "final-resolve" && !run.auditSegment?.finalReport) {
-        throw new Error(
-          "plan-pipeline final-resolve requires a validated Luna audit synthesis.",
+          "plan-pipeline completion requires an accepted plan submission.",
         );
       }
     }
@@ -1936,15 +2191,14 @@ export class PipelineController {
         );
       }
     } else if (run.definition === PLAN_PIPELINE_ID) {
-      if (AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role)) {
-        throw new Error(
-          `${role} is controller-owned by the Luna audit segment.`,
-        );
+      if (
+        !PLAN_PIPELINE_DISCOVERY_ROLES.some((candidate) => candidate === role)
+      ) {
+        throw new Error(`Unsupported plan-pipeline child role "${role}".`);
       }
-      const requiredStage = role.startsWith("discover-") ? "discover" : "audit";
-      if (run.stage !== requiredStage) {
+      if (run.stage !== "discover") {
         throw new Error(
-          `${role} can only start during plan-pipeline stage ${requiredStage}.`,
+          `${role} can only start during plan-pipeline stage discover.`,
         );
       }
       const latest = priorAttempts.at(-1);
@@ -1985,6 +2239,8 @@ export class PipelineController {
       attempt,
       title: titleForRole(role),
       model: modelForRole(role),
+      thinkingLevel:
+        run.definition === PLAN_PIPELINE_ID ? ("medium" as const) : undefined,
       cwd: run.request.workingDir,
       prompt: buildPipelineChildPrompt(
         run.definition,
@@ -2049,6 +2305,39 @@ export class PipelineController {
         return children;
       }
     }
+    if (
+      run.definition === PLAN_PIPELINE_ID &&
+      run.stage === "discover" &&
+      (run.status === "starting" || run.status === "running")
+    ) {
+      for (const child of children) {
+        const role = PLAN_PIPELINE_DISCOVERY_ROLES.find(
+          (candidate) => candidate === child.role,
+        );
+        if (!role || child.status === "error" || child.status === "cancelled")
+          continue;
+        const submitted = this.discoverySubmissions.get(child.id);
+        try {
+          const report =
+            submitted === undefined
+              ? parsePlanDiscoveryReportText(role, child.finalText)
+              : parsePlanDiscoveryReport(role, submitted);
+          run.planDiscoveryReports.set(role, {
+            role,
+            provenance: {
+              sessionId: child.id,
+              attempt: child.attempt,
+              submission: submitted === undefined ? "final-text-json" : "tool",
+            },
+            report,
+          });
+          this.discoverySubmissions.delete(child.id);
+          this.clearDiscoverySessionTokens(child.id);
+        } catch {
+          // The caller may use the existing same-session correction path.
+        }
+      }
+    }
     if (run.status === "starting" || run.status === "running") {
       this.advanceStageAfterFanIn(run, children);
     }
@@ -2099,17 +2388,36 @@ export class PipelineController {
         );
       }
     } else if (run.definition === PLAN_PIPELINE_ID) {
-      if (agent.role === "final-audit") {
-        throw new Error("plan-pipeline final-audit cannot be retried.");
+      const role = PLAN_PIPELINE_DISCOVERY_ROLES.find(
+        (candidate) => candidate === agent.role,
+      );
+      if (!role) {
+        throw new Error(`plan-pipeline child "${id}" cannot be retried.`);
+      }
+      if (run.stage !== "discover") {
+        throw new Error(
+          "plan-pipeline discovery sessions cannot continue after discovery.",
+        );
+      }
+      if (
+        run.planDiscoveryReports.has(role) ||
+        this.discoverySubmissions.has(id)
+      ) {
+        throw new Error(
+          `plan-pipeline discovery ${role} already submitted an accepted report.`,
+        );
       }
       if ((this.childContinuations.get(id) ?? 0) >= 1) {
         throw new Error(`plan-pipeline child "${id}" already used its retry.`);
       }
-      const issues = validatePipelineReport(
-        run.definition,
-        agent.role,
-        agent.finalText,
-      );
+      const issues = (() => {
+        try {
+          parsePlanDiscoveryReportText(role, agent.finalText);
+          return [];
+        } catch (error) {
+          return [error];
+        }
+      })();
       const retryable =
         agent.status === "error" ||
         ((agent.status === "done" || agent.status === "idle") &&
@@ -2160,32 +2468,6 @@ export class PipelineController {
       );
     }
     return this.tree.cancel(id);
-  }
-
-  writePlan(runId: string, planPath: string, content: string) {
-    const run = this.requireActiveRun(runId);
-    if (run.definition !== PLAN_PIPELINE_ID) {
-      throw new Error("Plan artifacts can only be written by plan-pipeline.");
-    }
-    const artifact = writePlanArtifact(
-      run.request.workingDir,
-      planPath,
-      content,
-    );
-    run.planArtifactsWritten.set(artifact.relativePath, {
-      digest: artifact.digest,
-      device: artifact.device,
-      inode: artifact.inode,
-    });
-    return artifact;
-  }
-
-  validatePlan(runId: string, planPath: string) {
-    const run = this.requireActiveRun(runId);
-    if (run.definition !== PLAN_PIPELINE_ID) {
-      throw new Error("Plan artifacts can only be validated by plan-pipeline.");
-    }
-    return resolvePlanArtifact(run.request.workingDir, planPath);
   }
 
   private commitFeatureWorktree(
@@ -2278,54 +2560,18 @@ export class PipelineController {
         git: [...facts.git, ...this.finalGitFacts(run)],
       };
     } else if (run.definition === PLAN_PIPELINE_ID) {
-      if (run.stage !== "complete") {
-        throw new Error("plan-pipeline must enter complete before completion.");
-      }
-      this.requireValidReports(
-        run,
-        [...PLAN_PIPELINE_DISCOVERY_ROLES, ...PLAN_PIPELINE_AUDIT_ROLES],
-        "complete",
-      );
-      if (!run.auditSegment?.finalReport) {
+      if (run.stage !== "complete" || !run.planText) {
         throw new Error(
-          "plan-pipeline completion requires a validated Luna audit synthesis.",
+          "plan-pipeline completion requires an accepted plan submission.",
         );
       }
-      if (!run.finalAuditReportDelivered) {
-        throw new Error(
-          "plan-pipeline completion requires delivering the validated final audit report to final-resolve.",
-        );
-      }
-      requireFinalFindingResolutionEvidence(run, facts);
-      if (!facts.planPath) {
-        throw new Error("plan-pipeline completion requires plan_path.");
-      }
-      const artifact = resolvePlanArtifact(
-        run.request.workingDir,
-        facts.planPath,
-      );
-      const written = run.planArtifactsWritten.get(artifact.relativePath);
-      if (!written) {
-        throw new Error(
-          "plan_path must identify an artifact written by this plan-pipeline run.",
-        );
-      }
-      if (
-        written.digest !== artifact.digest ||
-        written.device !== artifact.device ||
-        written.inode !== artifact.inode
-      ) {
-        throw new Error(
-          "plan_path changed after this plan-pipeline run wrote it.",
-        );
+      if (facts.plan !== undefined && facts.plan !== run.planText) {
+        throw new Error("pipeline_complete plan must match the accepted plan.");
       }
       completion = {
         ...facts,
-        planPath: artifact.relativePath,
-        changedPaths: [
-          ...new Set([...facts.changedPaths, artifact.relativePath]),
-        ],
-        auditReport: run.auditSegment.finalReport,
+        plan: run.planText,
+        ...(run.planWrittenPath ? { planPath: run.planWrittenPath } : {}),
       };
     } else if (run.definition === FEATURE_PIPELINE_ID) {
       if (!run.auditSegment?.finalReport) {
@@ -2410,6 +2656,7 @@ export class PipelineController {
   createRootTools(runId: string): ToolDefinition[] {
     const controller = this;
     const run = this.requireRun(runId);
+    if (run.definition === PLAN_PIPELINE_ID) return [];
     const roles = rolesForDefinition(run.definition).filter(
       (role) =>
         role !== AUDIT_SYNTHESIS_ROLE &&
@@ -2687,10 +2934,7 @@ export class PipelineController {
         },
       }),
     ];
-    if (
-      run.definition === FEATURE_PIPELINE_ID ||
-      run.definition === PLAN_PIPELINE_ID
-    ) {
+    if (run.definition === FEATURE_PIPELINE_ID) {
       tools.splice(
         tools.length - 1,
         0,
@@ -2739,79 +2983,6 @@ export class PipelineController {
                   model: agent.model,
                 })),
               },
-            };
-          },
-        }),
-      );
-    }
-    if (run.definition === PLAN_PIPELINE_ID) {
-      tools.splice(
-        1,
-        0,
-        defineTool({
-          name: "pipeline_plan_write",
-          label: "Write Pipeline Plan",
-          description:
-            "Write or replace this run's validated repository-local docs/plans Markdown artifact.",
-          parameters: Type.Object({
-            path: Type.String({ minLength: 1, maxLength: 16_384 }),
-            content: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
-          }),
-          async execute(_toolId, params) {
-            const artifact = controller.writePlan(
-              runId,
-              params.path,
-              params.content,
-            );
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Validated plan written: ${artifact.relativePath}`,
-                },
-              ],
-              details: {
-                runId,
-                path: artifact.relativePath,
-                bytes: Buffer.byteLength(artifact.content, "utf8"),
-              },
-            };
-          },
-        }),
-        defineTool({
-          name: "pipeline_plan_validate",
-          label: "Validate Pipeline Plan",
-          description:
-            "Freshly validate one repository-local docs/plans Markdown artifact without modifying it.",
-          parameters: Type.Object({
-            path: Type.String({ minLength: 1, maxLength: 16_384 }),
-          }),
-          async execute(_toolId, params) {
-            const artifact = controller.validatePlan(runId, params.path);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Plan contract passed: ${artifact.relativePath} (${Buffer.byteLength(artifact.content, "utf8")} bytes).`,
-                },
-              ],
-              details: { runId, path: artifact.relativePath },
-            };
-          },
-        }),
-        defineTool({
-          name: "pipeline_git_status",
-          label: "Pipeline Git Status",
-          description:
-            "Read the planning workspace Git branch and changed-path state without modifying it.",
-          parameters: Type.Object({}),
-          async execute() {
-            const status = controller.gitStatus(runId);
-            return {
-              content: [
-                { type: "text", text: status || "Working tree clean." },
-              ],
-              details: { runId },
             };
           },
         }),

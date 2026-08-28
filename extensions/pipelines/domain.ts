@@ -29,7 +29,14 @@ export const PIPELINE_STAGES = [
   "final-resolve",
   "complete",
 ] as const;
-export type PipelineStage = (typeof PIPELINE_STAGES)[number];
+export type PipelineStage = (typeof PIPELINE_STAGES)[number] | "synthesize";
+
+export const PLAN_PIPELINE_STAGES = [
+  "discover",
+  "synthesize",
+  "complete",
+] as const satisfies ReadonlyArray<PipelineStage>;
+export type PlanPipelineStage = (typeof PLAN_PIPELINE_STAGES)[number];
 
 export const SMALL_FEATURE_PIPELINE_STAGES = [
   "build",
@@ -97,26 +104,18 @@ export const SMALL_FEATURE_PIPELINE_CHILD_ROLES = [
 ] as const;
 
 export const PLAN_PIPELINE_DISCOVERY_ROLES = [
-  "discover-goal-outcomes",
-  "discover-frontend-scope",
-  "discover-backend-scope",
-  "discover-devops-scope",
-  "discover-testing-strategy",
+  "discover-requirements-boundaries",
+  "discover-architecture-responsibilities",
+  "discover-contracts-invariants",
+  "discover-reuse-simplicity",
+  "discover-quality-operations",
+  "discover-external-evidence",
 ] as const;
+export type PlanPipelineDiscoveryRole =
+  (typeof PLAN_PIPELINE_DISCOVERY_ROLES)[number];
+export const PLAN_PIPELINE_SYNTHESIS_ROLE = "plan-synthesis" as const;
 
-export const PLAN_PIPELINE_AUDIT_ROLES = [
-  "audit-product-traceability",
-  "audit-decomposition-dag",
-  "audit-cross-layer-integration",
-  "audit-test-release-reliability",
-] as const;
-
-export const PLAN_PIPELINE_CHILD_ROLES = [
-  ...PLAN_PIPELINE_DISCOVERY_ROLES,
-  ...PLAN_PIPELINE_AUDIT_ROLES,
-  ...AUDIT_SEGMENT_LUNA_ROLES,
-  AUDIT_SYNTHESIS_ROLE,
-] as const;
+export const PLAN_PIPELINE_CHILD_ROLES = PLAN_PIPELINE_DISCOVERY_ROLES;
 
 export const AUDIT_PIPELINE_CHILD_ROLES = [
   ...AUDIT_SEGMENT_LUNA_ROLES,
@@ -136,6 +135,7 @@ export type PipelineChildRole =
   | SmallFeaturePipelineChildRole
   | PlanPipelineChildRole
   | AuditPipelineChildRole
+  | typeof PLAN_PIPELINE_SYNTHESIS_ROLE
   | typeof FINAL_AUDIT_ROLE;
 
 export interface PipelineChildContextPolicy {
@@ -221,8 +221,8 @@ export const PIPELINE_DEFINITIONS: ReadonlyArray<PipelineDefinition> = [
   {
     id: PLAN_PIPELINE_ID,
     title: "Plan pipeline",
-    rootTitle: "Plan pipeline Sol",
-    rootModel: SOL_MODEL,
+    rootTitle: "Plan pipeline Luna synthesis",
+    rootModel: LUNA_MODEL,
     childRoles: PLAN_PIPELINE_CHILD_ROLES,
   },
   {
@@ -252,6 +252,7 @@ export function stagesForDefinition(
 ): ReadonlyArray<PipelineStage> {
   if (id === SMALL_FEATURE_PIPELINE_ID) return SMALL_FEATURE_PIPELINE_STAGES;
   if (id === AUDIT_PIPELINE_ID) return AUDIT_PIPELINE_STAGES;
+  if (id === PLAN_PIPELINE_ID) return PLAN_PIPELINE_STAGES;
   return PIPELINE_STAGES;
 }
 
@@ -294,6 +295,7 @@ export interface PipelineFinalFindingResolution {
 
 export interface PipelineCompletionFacts {
   readonly outcome: string;
+  readonly plan?: string;
   readonly planPath?: string;
   readonly changedPaths: ReadonlyArray<string>;
   readonly checks: ReadonlyArray<string>;
@@ -331,6 +333,8 @@ export interface PipelineRunRequest {
   /** Feature requires true; other definitions retain their scoped policy. */
   readonly gitCommit?: boolean;
   readonly audit?: AuditPipelineInput;
+  /** Required explicitly for plan-pipeline; null means terminal-only delivery. */
+  readonly planPath?: string | null;
 }
 
 export type PipelineCommitRole = PipelineChildRole | "pipeline-root";

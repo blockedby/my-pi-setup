@@ -74,43 +74,73 @@ const AUDIT_CLOSURE_PARAMETERS = Type.Object(
   { additionalProperties: false },
 );
 
-export const PIPELINE_RUN_PARAMETERS = Type.Object(
+const PIPELINE_RUN_COMMON_PROPERTIES = {
+  task: Type.String({
+    description:
+      "Self-contained feature task, planning goal, or audit scope; include known constraints or acceptance criteria when available. Closure-specific scope belongs in audit.",
+    minLength: 1,
+    maxLength: 64 * 1024,
+  }),
+  working_dir: Type.Optional(
+    Type.String({
+      description:
+        "Existing working directory in which the pipeline operates. feature-pipeline and small-feature-pipeline require the exact root of a caller-prepared dedicated linked Git worktree; feature additionally requires Linux bubblewrap, a clean stable HEAD, and rejects the primary checkout. Plan and audit default to the current directory.",
+      minLength: 1,
+      maxLength: 16 * 1024,
+    }),
+  ),
+  git_commit: Type.Optional(
+    Type.Boolean({
+      description:
+        "feature-pipeline hard-requires explicit true, Linux bubblewrap, and a dedicated clean attached linked worktree; controller-owned candidates/synthesis and the post-promotion remediation root may make scoped ordinary commits. small-feature also requires a caller-prepared linked worktree but keeps commit permission optional for its persistent implementer. Plan/audit reject true. Never permits push, delivery merge, history rewrite, deployment, or arbitrary branch/worktree operations.",
+    }),
+  ),
+  audit: Type.Optional(
+    Type.Union([AUDIT_INITIAL_PARAMETERS, AUDIT_CLOSURE_PARAMETERS], {
+      description:
+        "Typed initial or closure audit scope for audit-pipeline. No commands or refs are accepted.",
+    }),
+  ),
+};
+
+const PLAN_PATH_PARAMETER = Type.Union(
+  [Type.String({ minLength: 1, maxLength: 16 * 1024 }), Type.Null()],
+  {
+    description:
+      "Explicit plan-pipeline destination. Use null for terminal-only delivery; relative paths resolve under working_dir and absolute paths must remain inside it.",
+  },
+);
+
+const NON_PLAN_PIPELINE_PARAMETERS = Type.Object(
   {
     pipeline: Type.Optional(
-      StringEnum(PIPELINE_DEFINITION_IDS, {
-        description:
-          "Known hardcoded pipeline definition; defaults to feature-pipeline when omitted.",
-      }),
+      StringEnum(
+        [FEATURE_PIPELINE_ID, "small-feature-pipeline", AUDIT_PIPELINE_ID],
+        {
+          description:
+            "Known non-plan pipeline definition; defaults to feature-pipeline when omitted.",
+        },
+      ),
     ),
-    task: Type.String({
-      description:
-        "Self-contained feature task, planning goal, or audit scope; include known constraints or acceptance criteria when available. Closure-specific scope belongs in audit.",
-      minLength: 1,
-      maxLength: 64 * 1024,
-    }),
-    working_dir: Type.Optional(
-      Type.String({
-        description:
-          "Existing working directory in which the pipeline operates. feature-pipeline and small-feature-pipeline require the exact root of a caller-prepared dedicated linked Git worktree; feature additionally requires Linux bubblewrap, a clean stable HEAD, and rejects the primary checkout. Plan and audit default to the current directory.",
-        minLength: 1,
-        maxLength: 16 * 1024,
-      }),
-    ),
-    git_commit: Type.Optional(
-      Type.Boolean({
-        description:
-          "feature-pipeline hard-requires explicit true, Linux bubblewrap, and a dedicated clean attached linked worktree; controller-owned candidates/synthesis and the post-promotion remediation root may make scoped ordinary commits. small-feature also requires a caller-prepared linked worktree but keeps commit permission optional for its persistent implementer. Plan/audit reject true. Never permits push, delivery merge, history rewrite, deployment, or arbitrary branch/worktree operations.",
-      }),
-    ),
-    audit: Type.Optional(
-      Type.Union([AUDIT_INITIAL_PARAMETERS, AUDIT_CLOSURE_PARAMETERS], {
-        description:
-          "Typed initial or closure audit scope for audit-pipeline. No commands or refs are accepted.",
-      }),
-    ),
+    ...PIPELINE_RUN_COMMON_PROPERTIES,
+    plan_path: Type.Optional(Type.Null()),
   },
   { additionalProperties: false },
 );
+
+const PLAN_PIPELINE_PARAMETERS = Type.Object(
+  {
+    pipeline: Type.Literal("plan-pipeline"),
+    ...PIPELINE_RUN_COMMON_PROPERTIES,
+    plan_path: PLAN_PATH_PARAMETER,
+  },
+  { additionalProperties: false },
+);
+
+export const PIPELINE_RUN_PARAMETERS = Type.Union([
+  NON_PLAN_PIPELINE_PARAMETERS,
+  PLAN_PIPELINE_PARAMETERS,
+]);
 
 export function resolvePipelineDefinition(requested?: string) {
   if (!requested) return FEATURE_PIPELINE_ID;
@@ -134,6 +164,7 @@ export function handoffText(handoff: PipelineHandoff) {
     `Selected pipeline: ${handoff.definition}`,
     `Working directory: ${facts.workingDir}`,
     ...(facts.planPath ? [`Plan path: ${facts.planPath}`] : []),
+    ...(facts.plan !== undefined ? [`Plan:\n${facts.plan}`] : []),
     `Outcome:\n${facts.outcome}`,
     ...(facts.auditReport
       ? [
@@ -256,7 +287,7 @@ export default function pipelines(pi: ExtensionAPI) {
     name: "pipeline_run",
     label: "Run Pipeline",
     description:
-      "Start one of four known hardcoded pipelines in a caller-provided working directory and return its run id immediately: feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/xHIGH implementation candidates; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
+      "Start one of four known hardcoded pipelines in a caller-provided working directory and return its run id immediately: feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/xHIGH implementation candidates; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. plan-pipeline produces a complete repository-grounded plan through six parallel Luna discoveries and one Luna/xHIGH synthesis; pass plan_path explicitly as a destination or null. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
     promptSnippet:
       "Start a background implementation, planning, or Luna audit pipeline",
     promptGuidelines: [
@@ -274,6 +305,20 @@ export default function pipelines(pi: ExtensionAPI) {
         throw new Error(`working_dir is not a directory: ${workingDir}`);
       }
       const definition = resolvePipelineDefinition(params.pipeline);
+      if (definition === "plan-pipeline" && params.plan_path === undefined) {
+        throw new Error(
+          "plan-pipeline requires plan_path explicitly as a path or null.",
+        );
+      }
+      if (
+        definition !== "plan-pipeline" &&
+        params.plan_path !== undefined &&
+        params.plan_path !== null
+      ) {
+        throw new Error(
+          `plan_path is only valid for plan-pipeline; received ${definition}.`,
+        );
+      }
       assertPipelineGitCommitSupported(definition, params.git_commit === true);
       if (params.audit && definition !== AUDIT_PIPELINE_ID) {
         throw new Error(
@@ -304,6 +349,9 @@ export default function pipelines(pi: ExtensionAPI) {
           ? { gitCommit: params.git_commit }
           : {}),
         ...(audit ? { audit } : {}),
+        ...(definition === "plan-pipeline"
+          ? { planPath: params.plan_path ?? null }
+          : {}),
       });
       return {
         content: [

@@ -1394,6 +1394,7 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, and this record. Pipi remains at 0.84.3; credentials, authentication isolation, model overrides, MCP version, submodule pins, and external services are unchanged.
 - **Verification:** `npm run install:pipi -- --skip-repository-dependencies` completed successfully, then `npm run check:pipi-install` verified Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration. The delivered source previously passed 58/58 focused pipeline tests, 39/39 installer tests, 295/295 extension tests, 22/22 file-search tests, TypeScript, formatting, exact-submodule validation, `git diff --check`, and a five-track closure audit with no findings or unresolved conflicts.
 - **Pending:** Reload or restart sessions created before this rollout so they load the updated pipeline extension. Framework-native malformed-tool diagnostics and a live provider-backed synthesis/lifecycle smoke remain unproven because no live check was requested.
+
 ## Operation entry: add public pipeline cancellation tool
 
 - **Request:** Add a public pipeline cancellation tool analogous to subagent cancellation, implement it manually after the feature pipeline proved unreliable, and run an independent audit afterward.
@@ -1579,3 +1580,26 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/feature-worktrees.ts`, `extensions/pipelines/feature-worktrees.test.ts`, and this record. Installed runtime state and active pipeline runs are unchanged.
 - **Verification:** Focused feature-worktree tests passed 7/7; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
 - **Pending:** PR [#82](https://github.com/blockedby/my-pi-setup/pull/82) is open against `main` for the user to merge after the preceding fix; runtime rollout is not requested.
+## Operation entry: simplify plan-pipeline into a Luna planning graph
+
+- **Request:** Replace the heavyweight plan-pipeline with the agreed planning-specific Luna-only discover, synthesize, complete graph and support explicit optional plan output.
+- **Action:** Reworked plan-pipeline to launch six controller-bound Luna/medium evidence roles, fan in strict role-bound reports, and run one Luna/xHIGH free-form synthesis session. The controller now returns the exact accepted plan, writes only an explicitly supplied safe in-workspace destination (or performs no write for null), and removes plan-specific audit/artifact orchestration while preserving neighboring pipelines. Updated public routing, stage projections, policy boundaries, design documentation, and typed contracts.
+- **Affected paths or values:** `extensions/pipelines/{domain,controller,index,session,prompt,plan-contract,plan-discovery-report,dashboard}.ts`, `extensions/{pipelines,shared}/*test.ts`, `README.md`, `docs/pipelines-v1-design.md`, and this record. No installed runtime state, credentials, model overrides, submodule pins, retained stale pipeline refs, GitHub state, or external delivery state was changed.
+- **Verification:** TypeScript and formatting checks passed. Focused pipeline and shared-policy tests passed, and the full deterministic extension suite passed 310/310. Installer checks were blocked by this uninitialized-submodule, Git-metadata-inaccessible worktree; submodule and `git diff --check` checks remain unavailable here.
+- **Pending:** Run the repository-declared checks and deterministic plan-pipeline regression matrix, then review the committed candidate; do not install or run a provider-backed plan pipeline until accepted.
+
+## Operation entry: remediate plan inspection reasoning metadata
+
+- **Request:** Resolve the independent audit finding that `pipeline_check` omitted configured agent thinking levels for the new plan-pipeline stages.
+- **Action:** Added the effective thinking level to structured inspection agent projections and bounded text lines, using the shared model-default fallback when a snapshot has no explicit level. Settled-agent compaction now keeps agents with different reasoning levels distinct, and deterministic coverage verifies Luna/medium and Sol/high projections.
+- **Affected paths or values:** `extensions/pipelines/inspection.ts`, `extensions/pipelines/inspection.test.ts`, and this record. No pipeline graph, neighboring definition, installed runtime state, credentials, model overrides, submodule pin, retained stale ref, or external delivery state changed.
+- **Verification:** Focused inspection tests passed 10/10; `bun run check` and targeted Prettier checks passed. The full deterministic suite, exact submodule check, formatting, and `git diff --check` had already passed in this worktree before this narrow remediation; no provider-backed run or runtime rollout was performed.
+- **Pending:** Run the final audit segment and final repository verification before delivery; reload/install remains intentionally unrequested.
+
+## Operation entry: freeze accepted plan discovery sessions
+
+- **Request:** After the standalone initial audit, remediate only AUD-003 by preventing accepted plan discovery sessions from being continued; do not run another review, and then deliver and update Pipi. The user explicitly accepted the local plan-output symlink race, early visibility of the idle synthesis agent, and the existing prompt-enforced read-only `gh` bash trust boundary. Historical setup entries remain immutable and are superseded by the current Luna-plan entry above.
+- **Action:** Plan discovery now freezes agent-tree view mutations immediately after its role-bound report is accepted. Controller child continuation rejects accepted or pending typed submissions and rejects every discovery continuation after the discover stage, while malformed-report correction remains controller-owned and whole-run cancellation remains available. Added a regression using an accepted typed submission with empty final text to prove direct send, view send, and view cancel cannot restart the session.
+- **Affected paths or values:** `extensions/pipelines/controller.ts`, `extensions/pipelines/controller.test.ts`, and this record. Optional plan-output race handling, synthesis visibility, GitHub bash policy, pipeline graphs, installed runtime, credentials, model overrides, submodule pins, and external state are unchanged.
+- **Verification:** Focused controller tests pass 47/47. Fresh `env -u BROWSER_CHROME_NODE bun run test` passed 64 installer/script tests, 311 extension tests, and 22 file-search tests; `bun run check`, `bun run format:check`, `bun run check:submodules`, and `git diff --check` passed. No additional audit was requested.
+- **Pending:** Commit, publish, merge, synchronize `main`, and reinstall Pipi.

@@ -86,6 +86,7 @@ test("pipeline_run accepts a task with an optional working directory", () => {
       pipeline: "plan-pipeline",
       task: "Plan a feature",
       working_dir: ".worktrees/feature",
+      plan_path: null,
     }),
     true,
   );
@@ -149,17 +150,30 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   assert.equal(Check(PIPELINE_RUN_PARAMETERS, {}), false);
 });
 
-test("git_commit public schema describes the definition and role boundary", () => {
-  const description = Reflect.get(
-    PIPELINE_RUN_PARAMETERS.properties.git_commit,
-    "description",
+test("pipeline_run schema makes plan_path required only for plan definitions", () => {
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline: "plan-pipeline",
+      task: "Plan a feature",
+      plan_path: null,
+    }),
+    true,
   );
-  assert.equal(typeof description, "string");
-  assert.match(description, /feature-pipeline hard-requires explicit true/);
-  assert.match(description, /dedicated clean attached linked worktree/);
-  assert.match(description, /persistent implementer/);
-  assert.match(description, /Plan\/audit reject true/);
-  assert.match(description, /Never permits push/);
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline: "plan-pipeline",
+      task: "Plan a feature",
+    }),
+    false,
+  );
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline: "audit-pipeline",
+      task: "Audit a feature",
+      plan_path: "unsafe.plan",
+    }),
+    false,
+  );
 });
 
 test("git_commit validation requires feature true and rejects plan/audit true", () => {

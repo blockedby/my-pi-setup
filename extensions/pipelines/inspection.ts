@@ -11,6 +11,7 @@ import {
   stagesForDefinition,
   type PipelineRunSnapshot,
 } from "./domain.ts";
+import { pipelineThinkingLevel } from "./session.ts";
 
 export const PIPELINE_CHECK_MAX_BYTES = 16 * 1024;
 export const PIPELINE_PREVIEW_MAX_BYTES = 2 * 1024;
@@ -229,6 +230,7 @@ export function projectPipelineCheck(
       role: agent.role,
       attempt: agent.attempt,
       model: agent.model,
+      thinkingLevel: agent.thinkingLevel ?? pipelineThinkingLevel(agent.model),
       status: agent.status,
       ...(active && preview ? { preview } : {}),
       ...(active && openTool ? { openTool } : {}),
@@ -285,14 +287,19 @@ function activeAgent(agent: ProjectedAgent) {
 }
 
 function agentLine(agent: ProjectedAgent) {
-  return `- ${agent.id} · ${agent.role} · attempt ${agent.attempt} · ${agent.model} · ${agent.status}`;
+  return `- ${agent.id} · ${agent.role} · attempt ${agent.attempt} · ${agent.model} · ${agent.thinkingLevel} · ${agent.status}`;
 }
 
 function compactAgentLines(agents: ReadonlyArray<ProjectedAgent>) {
   const settledGroups = new Map<string, ProjectedAgent[]>();
   for (const agent of agents.slice(1)) {
     if (activeAgent(agent)) continue;
-    const key = JSON.stringify([agent.role, agent.model, agent.status]);
+    const key = JSON.stringify([
+      agent.role,
+      agent.model,
+      agent.thinkingLevel,
+      agent.status,
+    ]);
     const group = settledGroups.get(key) ?? [];
     group.push(agent);
     settledGroups.set(key, group);
@@ -301,7 +308,12 @@ function compactAgentLines(agents: ReadonlyArray<ProjectedAgent>) {
   const emittedGroups = new Set<string>();
   return agents.flatMap((agent, index) => {
     if (index === 0 || activeAgent(agent)) return [agentLine(agent)];
-    const key = JSON.stringify([agent.role, agent.model, agent.status]);
+    const key = JSON.stringify([
+      agent.role,
+      agent.model,
+      agent.thinkingLevel,
+      agent.status,
+    ]);
     const group = settledGroups.get(key) ?? [agent];
     if (group.length === 1) return [agentLine(agent)];
     if (emittedGroups.has(key)) return [];
@@ -343,7 +355,7 @@ export function formatPipelineCheck(details: ProjectedPipelineCheck) {
     if (active.length > 0) lines.push("Active agent previews:");
     for (const agent of active) {
       lines.push(
-        `${agent.id} · ${agent.role} · attempt ${agent.attempt} · ${agent.model} · ${agent.status}`,
+        `${agent.id} · ${agent.role} · attempt ${agent.attempt} · ${agent.model} · ${agent.thinkingLevel} · ${agent.status}`,
       );
       if ("openTool" in agent && agent.openTool) {
         lines.push(`  Open tool: ${agent.openTool}`);

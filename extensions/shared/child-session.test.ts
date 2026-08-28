@@ -20,6 +20,7 @@ import {
   createChildResources,
   pipelineRootToolPolicy,
   planPipelineChildToolPolicy,
+  planPipelineExternalEvidenceToolPolicy,
   planPipelineRootToolPolicy,
   readOnlyPipelineChildToolPolicy,
   readOnlyPipelineRootToolPolicy,
@@ -322,7 +323,7 @@ test("small-feature policies isolate read-only roles and keep Luna workspace too
   }
 });
 
-test("plan pipeline policies deny mutators and keep bounded root plan tools", () => {
+test("plan pipeline policies keep discovery and synthesis boundaries narrow", () => {
   const rootDenied = new Set<string>(planPipelineRootToolPolicy().excludeTools);
   const childDenied = new Set<string>(
     planPipelineChildToolPolicy().excludeTools,
@@ -341,8 +342,14 @@ test("plan pipeline policies deny mutators and keep bounded root plan tools", ()
     assert.equal(childDenied.has(mutator), true);
   }
   assert.equal(rootDenied.has("read"), false);
-  assert.equal(rootDenied.has("pipeline_plan_write"), false);
+  assert.equal(rootDenied.has("pipeline_plan_write"), true);
   assert.equal(childDenied.has("pipeline_plan_write"), true);
+  assert.equal(childDenied.has("web_search_codex"), true);
+  const externalDenied = new Set<string>(
+    planPipelineExternalEvidenceToolPolicy().excludeTools,
+  );
+  assert.equal(externalDenied.has("web_search_codex"), false);
+  assert.equal(externalDenied.has("bash"), true);
   assert.equal(childDenied.has("pipeline_child_spawn"), true);
   for (const mainOnlyTool of [
     "pipeline_cancel",
