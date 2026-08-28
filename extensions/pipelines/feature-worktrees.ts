@@ -437,6 +437,39 @@ function readIgnoredStagedPaths(
   });
 }
 
+export function rollbackOwnedFeatureBranches(
+  cwd: string,
+  ownedBranchRefs: ReadonlyMap<string, string>,
+) {
+  const failures: string[] = [];
+  for (const [branchRef, expectedCommit] of [
+    ...ownedBranchRefs.entries(),
+  ].reverse()) {
+    try {
+      requireGit(
+        cwd,
+        ["update-ref", "-d", `refs/heads/${branchRef}`, expectedCommit],
+        `Unable to roll back controller-owned branch ${branchRef}`,
+      );
+    } catch (error) {
+      failures.push(boundedDiagnostic(error));
+    }
+  }
+  return failures;
+}
+
+export function candidateReservationFailure(
+  error: unknown,
+  rollbackFailures: ReadonlyArray<string>,
+) {
+  if (rollbackFailures.length === 0) {
+    return error instanceof Error ? error : new Error(boundedDiagnostic(error));
+  }
+  return new Error(
+    `${boundedDiagnostic(error)} Candidate reservation rollback also failed: ${rollbackFailures.join(" ")}`,
+  );
+}
+
 function equalUniquePathSets(
   reported: ReadonlyArray<string>,
   actual: ReadonlyArray<string>,
@@ -612,6 +645,7 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
   readonly runId: string;
   readonly temporaryRoot: string;
   private readonly ownedWorktreePaths = new Set<string>();
+  private readonly ownedBranchRefs = new Map<string, string>();
   private readonly candidateHeads = new Map<FeatureCandidateRole, string>();
   private selectionDirectory?: string;
   private synthesis?: FeatureSynthesisWorktree;
@@ -641,6 +675,17 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       `Unable to create controller-owned worktree ${branchRef}`,
     );
     this.ownedWorktreePaths.add(worktreePath);
+    this.ownedBranchRefs.set(branchRef, commit);
+  }
+
+  private rollbackCandidateReservation() {
+    return [
+      ...this.cleanup(),
+      ...rollbackOwnedFeatureBranches(
+        this.caller.workingDir,
+        this.ownedBranchRefs,
+      ),
+    ];
   }
 
   createCandidateWorktrees() {
@@ -665,8 +710,10 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       this.candidateWorktrees = worktrees;
       return worktrees;
     } catch (error) {
-      this.cleanup();
-      throw error;
+      throw candidateReservationFailure(
+        error,
+        this.rollbackCandidateReservation(),
+      );
     }
   }
 

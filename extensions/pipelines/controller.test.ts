@@ -211,12 +211,19 @@ class FakeFeatureLifecycle implements FeatureWorktreeLifecycle {
   selectionReadOnlyChecks = 0;
   synthesisCreated = 0;
 
-  constructor(runId: string, caller: FeatureCallerWorktree) {
+  constructor(
+    runId: string,
+    caller: FeatureCallerWorktree,
+    private readonly failCandidateReservation = false,
+  ) {
     this.temporaryRoot = `/tmp/${runId}-best-of-three`;
     this.caller = caller;
   }
 
   createCandidateWorktrees() {
+    if (this.failCandidateReservation) {
+      throw new Error("Injected candidate reservation race");
+    }
     return FEATURE_CANDIDATE_ROLES.map((role) => ({
       role,
       path: `${this.temporaryRoot}/candidate-${role.toLowerCase()}`,
@@ -323,6 +330,7 @@ function candidateRoleFromSpec(role: string) {
 function featureGitHarness(
   lifecycles: FakeFeatureLifecycle[],
   namespaceAvailable: (runId: string) => boolean = () => true,
+  failCandidateReservation = false,
 ): FeatureGitOperations {
   return {
     preflight(workingDir) {
@@ -349,7 +357,11 @@ function featureGitHarness(
       return namespaceAvailable(runId);
     },
     createLifecycle(caller, runId) {
-      const lifecycle = new FakeFeatureLifecycle(runId, caller);
+      const lifecycle = new FakeFeatureLifecycle(
+        runId,
+        caller,
+        failCandidateReservation,
+      );
       lifecycles.push(lifecycle);
       return lifecycle;
     },
@@ -370,6 +382,7 @@ function harness(
     namespaceAvailable?: (runId: string) => boolean;
     makeRunToken?: () => string;
     useDefaultRunId?: boolean;
+    failCandidateReservation?: boolean;
   } = {},
 ) {
   const sessions: FakePipelineSession[] = [];
@@ -514,7 +527,11 @@ function harness(
     onHandoff: (handoff) => {
       handoffs.push(handoff);
     },
-    featureGit: featureGitHarness(lifecycles, options.namespaceAvailable),
+    featureGit: featureGitHarness(
+      lifecycles,
+      options.namespaceAvailable,
+      options.failCandidateReservation,
+    ),
   });
   return {
     controller,
@@ -1117,6 +1134,23 @@ test("canonical ID admission retries live and namespace collisions before discov
   });
   assert.equal(tokenId, "token-injected-plan-deadbeef");
   await tokenInjected.controller.dispose();
+});
+
+test("candidate reservation failure creates no controller run or session state", async () => {
+  const run = harness({ failCandidateReservation: true });
+  assert.throws(
+    () =>
+      run.controller.start({
+        ...request(),
+        pipelineName: "candidate-race-boundary",
+      }),
+    /Injected candidate reservation race/,
+  );
+  assert.deepEqual(run.controller.list(), []);
+  assert.equal(run.sessions.length, 0);
+  assert.equal(run.lifecycles.length, 1);
+  assert.equal(run.lifecycles[0]?.cleaned, 1);
+  await run.controller.dispose();
 });
 
 test("start is fire-and-forget and multiple same-cwd runs are admitted", async () => {
