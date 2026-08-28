@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit -p .",
-    "prepare": "effect-tsgo patch",
-    "test": "node --test --experimental-strip-types manager.test.ts output.test.ts prompt.test.ts result-delivery.test.ts ps.test.ts"
+    "check": "bun node_modules/typescript/bin/tsc --noEmit -p .",
+    "test": "bun test manager.test.ts output.test.ts prompt.test.ts result-delivery.test.ts ps.test.ts",
+    "prepare:compiler": "bun node_modules/@effect/tsgo/dist/effect-tsgo.js patch"
   },
   "dependencies": {
     "effect": "^4.0.0-beta.99"

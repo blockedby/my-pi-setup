@@ -63,7 +63,7 @@ const fetchChangelog = () => {
 const run = () => {
   const [targetArgument, ...extraArguments] = process.argv.slice(2);
   if (!targetArgument || extraArguments.length > 0) {
-    throw new Error("Usage: npm run check:pipi-changelog -- <version>");
+    throw new Error("Usage: bun run check:pipi-changelog -- <version>");
   }
 
   const targetVersion = parseStableVersion(targetArgument);

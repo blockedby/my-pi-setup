@@ -6,6 +6,7 @@ import {
   getDeclaredPipiVersion,
   parseStableVersion,
   pipiPackageNames,
+  pipiResolutionPackageNames,
   readJson,
   validatePipiVersionState,
 } from "./pipi-version.mjs";
@@ -15,11 +16,11 @@ const defaultRepositoryRoot = resolve(
   "..",
 );
 
-const usage = `Usage: npm run update:pipi -- <version>
+const usage = `Usage: bun run update:pipi -- <version>
 
-Updates the aligned Pi AI, coding-agent, and TUI dependency ranges and regenerates
-package-lock.json. The script validates registry availability before editing files and
-restores both files if lockfile generation or alignment validation fails.
+Updates the aligned Pi dependency ranges and exact Bun resolution overrides, then
+regenerates bun.lock. Registry availability is validated before editing files, and
+package.json plus bun.lock are restored if generation or validation fails.
 `;
 
 const createCommandRunner =
@@ -41,27 +42,22 @@ const createCommandRunner =
   };
 
 const checkRegistry = (runCommand, packageName, version) => {
-  const output = runCommand(
-    "npm",
-    ["view", `${packageName}@${version}`, "version", "--json"],
+  const publishedVersion = runCommand(
+    "bun",
+    ["pm", "view", `${packageName}@${version}`, "version"],
     { capture: true },
   );
-  const publishedVersion = JSON.parse(output);
   if (publishedVersion !== version) {
     throw new Error(
-      `npm returned ${publishedVersion ?? "no version"} for ${packageName}@${version}.`,
+      `Bun returned ${publishedVersion || "no version"} for ${packageName}@${version}.`,
     );
   }
 };
 
-export const lockfileInstallArgs = (targetVersion) => [
+export const lockfileInstallArgs = () => [
   "install",
-  "--package-lock-only",
-  "--ignore-scripts",
-  "--no-audit",
-  "--no-fund",
-  "--save-prefix=^",
-  ...pipiPackageNames.map((packageName) => `${packageName}@${targetVersion}`),
+  "--lockfile-only",
+  "--save-text-lockfile",
 ];
 
 export const updatePipiVersion = ({
@@ -70,7 +66,7 @@ export const updatePipiVersion = ({
   runCommand = createCommandRunner(repositoryRoot),
 }) => {
   const manifestPath = join(repositoryRoot, "package.json");
-  const lockfilePath = join(repositoryRoot, "package-lock.json");
+  const lockfilePath = join(repositoryRoot, "bun.lock");
   const version = parseStableVersion(targetVersion);
   const originalManifest = readFileSync(manifestPath, "utf8");
   const originalLockfile = readFileSync(lockfilePath, "utf8");
@@ -85,8 +81,12 @@ export const updatePipiVersion = ({
     for (const packageName of pipiPackageNames) {
       manifest.dependencies[packageName] = `^${version}`;
     }
+    manifest.overrides ??= {};
+    for (const packageName of pipiResolutionPackageNames) {
+      manifest.overrides[packageName] = version;
+    }
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    runCommand("npm", lockfileInstallArgs(version));
+    runCommand("bun", lockfileInstallArgs(version));
     validatePipiVersionState(repositoryRoot);
   } catch (error) {
     writeFileSync(manifestPath, originalManifest);

@@ -7,7 +7,7 @@
 >
 > **Verified against** `effect@4.0.0-beta.98`, `@effect/platform-node@4.0.0-beta.98`,
 > `@effect/tsgo@0.19.0`, `typescript@7.0.2` (checked 2026-07-13, in `extensions/subagents`).
-> `npm run check` there passes clean — use it as the reference implementation.
+> `bun run check` there passes clean — use it as the reference implementation.
 >
 > Audience: the agents migrating `ask-user`, `model-info`, `git-info`,
 > `ui-customization`, and `copy-all`.
@@ -40,7 +40,7 @@ toolchain (§1) and leaving the body plain. Don't invent an Effect layer to have
 
 ## 1. Per-extension toolchain (copy this exactly)
 
-Each extension is its own npm package with its own `node_modules`. Replicate the pinned
+Each extension is a Bun workspace with an independently addressable `node_modules` view. Replicate the pinned
 setup — do **not** float the versions.
 
 `package.json`:
@@ -51,8 +51,8 @@ setup — do **not** float the versions.
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit -p .",
-    "prepare": "effect-tsgo patch", // patches the Effect LS into the tsgo binary
+    "check": "bun node_modules/typescript/bin/tsc --noEmit -p .",
+    "prepare:compiler": "bun node_modules/@effect/tsgo/dist/effect-tsgo.js patch" // serialized by the root postinstall
   },
   "dependencies": {
     "effect": "4.0.0-beta.98", // EXACT pin, no ^
@@ -85,16 +85,17 @@ the house style.
 ### The LSP / language-service, precisely
 
 - `typescript@7` is the **native (tsgo) TypeScript** — its `tsc` is a Go binary, and it's
-  what `npm run check` runs.
-- `@effect/language-service` is **not an installed npm package** here (you won't find it in
-  `node_modules`). It's delivered by `effect-tsgo patch`, run automatically by the `prepare`
-  lifecycle script on `npm install`. The patch injects the Effect Language Service into the
-  tsgo binary; the tsconfig `plugins` entry then turns on Effect-aware editor diagnostics and
-  quickfixes (e.g. "yield missing services", floating effects).
-- Practical sequence for a fresh/edited extension: `npm install` (runs the patch) →
-  `npm run check`. If editor diagnostics look stale, re-run `npx effect-tsgo patch`;
-  `npx effect-tsgo get-exe-path` prints the patched binary it resolved.
-- The plugin drives the _editor_; it does not change `tsc` exit codes. `npm run check` is
+  what `bun run check` runs.
+- `@effect/language-service` is **not an installed registry package** here (you won't find it in
+  `node_modules`). The root Bun postinstall runs each workspace's `prepare:compiler` command
+  sequentially because the workspaces share the TypeScript binary. The patch injects the
+  Effect Language Service into tsgo; the tsconfig `plugins` entry then enables Effect-aware
+  editor diagnostics and quickfixes (e.g. "yield missing services", floating effects).
+- Practical sequence for a fresh/edited extension: run root `bun install --frozen-lockfile`
+  (which serializes every compiler patch), then `bun run check` in the extension. If editor
+  diagnostics look stale, re-run `bun run prepare:compiler`;
+  `bun node_modules/@effect/tsgo/dist/effect-tsgo.js get-exe-path` prints the patched binary it resolved.
+- The plugin drives the _editor_; it does not change `tsc` exit codes. `bun run check` is
   still your ground-truth green/red signal.
 
 ---
@@ -320,12 +321,12 @@ or format:
 
 ```bash
 cd extensions/<ext>
-npm install        # first time / after dep or script edits — runs `prepare` (effect-tsgo patch)
-npm run check      # tsc --noEmit -p .  ← ground-truth green/red
-npm run test       # only if the extension defines tests; keep them minimal
+bun install        # first time / after dep or script edits — runs `prepare` (effect-tsgo patch)
+bun run check      # tsc --noEmit -p .  ← ground-truth green/red
+bun run test       # only if the extension defines tests; keep them minimal
 ```
 
-`extensions/subagents` is the known-green reference: `npm run check` there exits 0 against
+`extensions/subagents` is the known-green reference: `bun run check` there exits 0 against
 the pinned versions. If a migrated extension fails `check` with `Effect.fork`/`ServiceMap`/
 `Either` errors, it's using stale v3/early-beta APIs — consult the rename table in
 `effect-v4-notes.md`.
@@ -347,6 +348,6 @@ the pinned versions. If a migrated extension fails `check` with `Effect.fork`/`S
    in `session_shutdown` run them.
 5. **Don't over-test.** A `check` that passes plus one focused runtime test (where behavior
    is non-obvious) beats a wall of defensive unit tests.
-6. **Don't run root scripts.** No repo-root `tsc`, `prettier`, or `npm run format`; stay
+6. **Don't run root scripts.** No repo-root `tsc`, `prettier`, or `bun run format`; stay
 inside `extensions/<ext>`.
 </content>

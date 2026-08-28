@@ -3,12 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit -p .",
-    "format": "prettier --write \"**/*.{ts,json}\"",
-    "format:check": "prettier --check \"**/*.{ts,json}\"",
-    "prepare": "effect-tsgo patch",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "check": "bun node_modules/typescript/bin/tsc --noEmit -p .",
+    "format": "bun node_modules/prettier/bin/prettier.cjs --write \"**/*.{ts,json}\"",
+    "format:check": "bun node_modules/prettier/bin/prettier.cjs --check \"**/*.{ts,json}\"",
+    "test": "bun node_modules/vitest/vitest.mjs run",
+    "test:watch": "bun node_modules/vitest/vitest.mjs",
+    "prepare:compiler": "bun node_modules/@effect/tsgo/dist/effect-tsgo.js patch"
   },
   "dependencies": {
     "@effect/platform-node": "^4.0.0-beta.99",

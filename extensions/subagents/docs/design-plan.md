@@ -471,7 +471,7 @@ views are exercised end to end:
 ```
 /Users/davis/.pi/agent/extensions/subagents/
 ├── package.json               # name, "effect": "^4.0.0-beta.x"; pi extension entry via pi.extensions
-├── package-lock.json / node_modules/   (after npm install)
+├── node_modules/                    (from the root bun.lock workspace install)
 ├── docs/
 │   └── design-plan.md         # this document
 ├── index.ts                   # extension factory: runtime lifecycle, 5 tools, /subagents
@@ -501,7 +501,7 @@ views are exercised end to end:
 ```
 
 Notes:
-- `package.json` is needed because `effect` is an npm dependency (extension-with-deps
+- `package.json` is needed because `effect` is a registry dependency (extension-with-deps
   style from the extension docs). Everything else avoids new dependencies.
 - v1's `child-session.ts` trust/tool-policy helpers are **not** copied in v1 of v2 (the
   stubs don't need them); the real pi backend will bring the needed subset into
@@ -509,7 +509,7 @@ Notes:
   still referenced by the design (SpawnTask.parentContext.projectTrusted) so the tool
   layer computes trust the same way v1 does.
 - Suggested project scripts (per house rules, to be added): `check` (`tsc --noEmit`),
-  `test` (`node --test` or vitest for `result-delivery` + manager fold tests against
+  `test` (`bun test` or Vitest for `result-delivery` + manager fold tests against
   stub backends).
 
 ---

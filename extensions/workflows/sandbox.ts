@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveSandboxNodeRuntime } from "../shared/executable-runtime.ts";
 import { safeStringify, toSerializable } from "./serialization.ts";
 
 const MAX_SOURCE_BYTES = 512 * 1024;
@@ -75,15 +76,22 @@ function sanitizeAgentOptions(value: unknown): SandboxAgentOptions {
 
 /**
  * Execute orchestration code in a separate, permission-restricted Node process.
+ * This is Pipi's sole retained Node runtime exception: Bun 1.4 has no security
+ * boundary equivalent to Node permission mode plus the hardened node:vm child.
  * The child can only invoke the narrow agent/phase IPC protocol and is always
  * terminated on completion, cancellation, or protocol failure. The workflow
  * itself and its agent requests have no wall-clock deadline. Active requests
  * are aborted only when the workflow is cancelled or the sandbox is cleaned up.
  */
 export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
-  if (!process.allowedNodeEnvironmentFlags.has("--permission")) {
+  let nodeRuntime;
+  try {
+    nodeRuntime = resolveSandboxNodeRuntime();
+  } catch (error) {
     return Promise.reject(
-      new Error("This Node runtime cannot enforce workflow child permissions"),
+      new Error(
+        `Workflow sandbox requires the isolated Node fallback: ${errorText(error)}`,
+      ),
     );
   }
   if (byteLength(options.source) > MAX_SOURCE_BYTES) {
@@ -105,7 +113,7 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
       new URL("./sandbox-child.cjs", import.meta.url),
     );
     const child = spawn(
-      process.execPath,
+      nodeRuntime.executable,
       [
         "--permission",
         `--allow-fs-read=${path.dirname(workerPath)}`,

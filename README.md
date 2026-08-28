@@ -8,7 +8,7 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 - **Predictable delegation.** Choose a focused agent or a fixed pipeline instead of manually coordinating a large prompt.
 - **Safer automation.** Read-only roles, bounded tools, explicit commit permission, and deterministic checks keep authority narrow.
 - **Clear progress.** `/pipelines` shows active stages, agents, attempts, and status at a glance.
-- **Isolated setup.** Runtime, settings, sessions, and authentication live under `~/.pipi`; regular Pi remains untouched.
+- **Isolated setup.** Bun runtime wiring, settings, sessions, and authentication live under `~/.pipi`; regular Pi remains untouched.
 
 ## What is included
 
@@ -59,7 +59,7 @@ Implementation agents work in dedicated Git worktrees, keeping feature changes i
 
 ## Isolation and safety
 
-Pipi installs beside regular Pi and uses its own runtime, settings, sessions, MCP configuration, and authentication directory under `~/.pipi`. It does not copy regular Pi secrets. Authentication sharing is opt-in.
+Pipi installs beside regular Pi and requires a stable supported Bun 1.4+ command to be installed first; Pipi never downloads or replaces Bun. Root/extensions share one frozen Bun workspace lock; the isolated installed runtime has one exact deployment lock. Its settings, sessions, MCP configuration, and authentication directory remain under `~/.pipi`. It does not copy regular Pi secrets. Authentication sharing is opt-in. The capability-verified, permission-restricted workflow sandbox is the sole documented Node runtime exception because its security boundary must not be weakened.
 
 The installer pins and validates the bundled review, backlog, and Codex-tool submodules. Pipeline roles receive only the tools needed for their job, while commit authority is explicit and limited to the persistent implementation role.
 

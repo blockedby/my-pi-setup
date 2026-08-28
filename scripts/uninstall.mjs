@@ -21,7 +21,7 @@ const parseArgs = (args) => {
     }
     if (argument === "--help") {
       console.log(
-        `Usage: node scripts/uninstall.mjs [--purge] [--bin-dir PATH]\n\n--purge also removes ~/.pipi configuration and sessions.`,
+        `Usage: bun scripts/uninstall.mjs [--purge] [--bin-dir PATH]\n\n--purge also removes ~/.pipi configuration and sessions.`,
       );
       process.exit(0);
     }

@@ -111,8 +111,54 @@ test("sandbox source cannot escape the host accounting wrapper", async () => {
   assert.equal(calls, 0);
 });
 
+test("sandbox VM rejects dynamic code generation and constructor escapes", async () => {
+  await assert.rejects(
+    run(`return Function("return 1")();`),
+    /Code generation from strings disallowed/,
+  );
+  await assert.rejects(
+    run(`return globalThis.constructor.constructor("return process")();`),
+    /Code generation from strings disallowed/,
+  );
+  await assert.rejects(
+    run(`return await WebAssembly.compile(new Uint8Array([0]));`),
+    /Wasm code generation disallowed|WebAssembly\.compile\(\) is not allowed/,
+  );
+});
+
 test("sandbox VM still rejects non-yielding synchronous code", async () => {
   await assert.rejects(run(`while (true) {}`), /timed out/);
+});
+
+test("sandbox parent enforces its authenticated IPC request budget", async () => {
+  let calls = 0;
+  await assert.rejects(
+    run(
+      `return await Promise.all(Array.from({ length: 33 }, (_, index) => agent("request-" + index)));`,
+      {
+        onAgent: async () => {
+          calls++;
+          return { ok: true, output: "done" };
+        },
+      },
+    ),
+    /agent request budget/,
+  );
+  assert.ok(calls <= 32);
+});
+
+test("sandbox fails closed when the configured Node exception is unavailable", async () => {
+  const previous = process.env.PIPI_NODE_RUNTIME;
+  process.env.PIPI_NODE_RUNTIME = "/missing/pipi-sandbox-node";
+  try {
+    await assert.rejects(
+      run(`return "must-not-run";`),
+      /Workflow sandbox requires the isolated Node fallback.*PIPI_NODE_RUNTIME/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.PIPI_NODE_RUNTIME;
+    else process.env.PIPI_NODE_RUNTIME = previous;
+  }
 });
 
 test("workflow agent invocations have no per-request wall timer", async () => {

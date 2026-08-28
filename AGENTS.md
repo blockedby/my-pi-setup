@@ -14,4 +14,4 @@
 - update a submodule only by fetching/checking out a reviewed upstream commit inside it and committing the changed parent gitlink; keep `.gitmodules` and `config/submodules.json` synchronized
 - keep the canonical `code-review` skill loaded from `./vendor/gpt5.6-reviewer/skills` and `plan-gh-backlog` from `./vendor/plan-gh-backlog`; do not restore duplicate host copies under `skills/`
 - after substantial implementation, use `vendor/gpt5.6-reviewer/agents/code-reviewer.md`, load `vendor/gpt5.6-reviewer/skills/code-review/SKILL.md`, and follow the initial/closure routing in `vendor/gpt5.6-reviewer/AGENTS.md`
-- after submodule or skill integration changes, run `npm run check:submodules`, installer tests, type checks, and formatting checks
+- after submodule or skill integration changes, run `bun run check:submodules`, installer tests, type checks, and formatting checks
