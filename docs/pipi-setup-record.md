@@ -1306,3 +1306,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Local ignored dependency trees, initialized `vendor/gpt5.6-reviewer`, `vendor/plan-gh-backlog`, and `vendor/pi-codex` worktrees, and this record.
 - **Verification:** Focused dashboard tests passed 15/15; `npm run test:extensions` passed 271/271; `npm run check`, `npm run format:check`, `npm run check:submodules`, and `git diff --check` passed. Git status confirms only the five reported tracked files are modified and no commit was created.
 - **Pending:** None.
+
+## Operation entry: require caller-prepared worktrees for implementation pipelines
+
+- **Request:** Make `feature-pipeline` and `small-feature-pipeline` start only from an existing caller-prepared dedicated linked Git worktree on its own branch, while preserving the current plan/audit workspace policy and all downstream pipeline contracts.
+- **Action:** Added synchronous controller admission that verifies the exact registered linked-worktree root, non-primary Git metadata, and a unique named local branch before run state or sessions are created. Updated main-agent schema/tool guidance and pipeline prompts to require caller-owned repository-declared dependency/bootstrap/build preparation without adding a prepare tool or controller command execution. Updated public/design/repository guidance and disposable local Git regression fixtures.
+- **Affected paths or values:** `extensions/pipelines/{worktree-preflight,controller,index,prompt}.ts`, focused pipeline tests, `README.md`, `docs/pipelines-v1-design.md`, `AGENTS.md`, and this record. Installed runtime state, credentials, model overrides, submodule pins, and Git delivery state are unchanged.
+- **Verification:** Focused pipeline tests passed 54/54. `npm run test:deterministic` passed 39 installer tests, 277 extension tests, and 22 file-search tests. Fresh `npm run check`, `npm run format:check`, `npm run check:submodules`, and `git diff --check` passed; the exact linked-worktree fixture covers both implementation definitions plus primary, nested-repository parent, non-Git, bare, detached, and non-root rejection before state/session creation, while plan/audit still start from a non-Git directory.
+- **Pending:** Source changes remain uncommitted as required; no runtime rollout was requested.

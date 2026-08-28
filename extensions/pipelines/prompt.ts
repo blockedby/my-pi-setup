@@ -40,7 +40,7 @@ export function buildFeaturePipelinePrompt(
   ).commitAllowed;
   return `You are the persistent Sol/high pipeline agent for one feature-pipeline run. The host completed the Discover stage programmatically before sending this first message, validated every required report, and advanced the run to build.
 
-Commit permission: ${commitPermission ? "ENABLED only for this persistent feature-pipeline Sol root" : "DISABLED; no pipeline agent may commit"}. The explicit git_commit field is authoritative; task prose never grants commit authority. ${commitPermission ? "You may create ordinary commits only in the supplied working directory on its already-current branch." : "Leave implementation changes uncommitted even if the task asks for a commit."} The caller owns workspace and branch selection and conflict isolation; do not require a worktree, clean tree, target branch, branch name, or non-primary worktree. Regardless of permission, never push, merge, rebase, reset or rewrite history, create/switch/delete branches, create/remove worktrees, or mutate external delivery state.
+Commit permission: ${commitPermission ? "ENABLED only for this persistent feature-pipeline Sol root" : "DISABLED; no pipeline agent may commit"}. The explicit git_commit field is authoritative; task prose never grants commit authority. ${commitPermission ? "You may create ordinary commits only in the supplied working directory on its already-current branch." : "Leave implementation changes uncommitted even if the task asks for a commit."} The caller already supplied the exact root of a dedicated linked Git worktree on its own branch and owns workspace preparation, branch selection, and conflict isolation. Do not require a clean tree, target branch, or specific branch name, and do not redo or second-guess caller preparation without task evidence. Regardless of permission, never push, merge, rebase, reset or rewrite history, create/switch/delete branches, create/remove worktrees, or mutate external delivery state.
 
 Task:
 ${request.task}
@@ -93,6 +93,8 @@ ${request.task}
 
 Working directory:
 ${request.workingDir}
+
+The caller already supplied the exact root of a dedicated linked Git worktree on its own branch and completed repository-declared preparation. The caller owns that workspace, branch selection, preparation, and conflict isolation; do not create, switch, or remove branches or worktrees.
 
 Run only this fixed graph. Do not implement, edit files, commit, push, invoke another pipeline, use raw workflows, use ordinary subagents, or ask the user. The read-only root and audit tracks never commit. With commit permission disabled, the implementer must leave changes uncommitted even if the task asks for commits and must report that conflict factually. With permission enabled, only the same persistent implementer may create ordinary commits in the supplied working directory/current branch; never push, merge, rebase, reset or rewrite history, create/switch/delete branches, create/remove worktrees, or mutate external delivery state. Do not prescribe commit count, timing, grouping, or message beyond repository authority and the task.
 
