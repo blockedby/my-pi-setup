@@ -1370,3 +1370,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, and this record. Pipi remains at 0.84.3; credentials, authentication isolation, model overrides, MCP version, submodule pins, and external services are unchanged.
 - **Verification:** `npm run check:pipi-install` verified installed Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration. The delivered source passed focused discovery-report tests 8/8, TypeScript, formatting, and `git diff --check` before rollout.
 - **Pending:** Reload or restart sessions created before this reinstall so they load the increased discovery limit.
+
+## Operation entry: document repository pipeline preparation commands
+
+- **Request:** Record the three repository preparation commands required before launching an implementation pipeline and publish the guidance to `main`.
+- **Action:** Updated repository agent guidance to run `npm run install:dependencies`, `npm run check`, and `npm run format:check`, in that order, while preparing a dedicated caller-owned implementation worktree.
+- **Affected paths or values:** `AGENTS.md` and this record. Source behavior, installed runtime state, credentials, model overrides, submodule pins, and external services are unchanged.
+- **Verification:** `git diff --check` passed, and the staged diff contains only the preparation guidance and required durable operation entry.
+- **Pending:** None.
