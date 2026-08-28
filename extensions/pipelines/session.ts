@@ -532,12 +532,15 @@ export function createPipelineSessionFactory(
         resourceLoader: resources.loader,
         ...(sessionTools.length > 0 ? { customTools: sessionTools } : {}),
         ...(featureBoundary
-          ? { tools: [...featureBoundary.initialActiveTools] }
+          ? { tools: [...featureBoundary.availableToolNames] }
           : {}),
         ...pipelineSessionToolPolicy(definition, isRoot, spec.role),
       });
       try {
         await bindChildSessionExtensions(session);
+        if (featureBoundary) {
+          session.setActiveToolsByName([...featureBoundary.initialActiveTools]);
+        }
       } catch (error) {
         await shutdownAndDisposeChildSession(session);
         throw error;
