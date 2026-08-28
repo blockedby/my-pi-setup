@@ -754,6 +754,8 @@ export class PipelineController {
     );
     run.featureDiscoverySynthesis = discoverySynthesis;
     if (run.status !== "running") return;
+    run.stage = "build";
+    this.notify();
 
     const prepared = preparedDiscoveryPackage(
       run.request.task,
@@ -917,8 +919,10 @@ export class PipelineController {
       );
     }
     this.tree.reparent(discoverySynthesisAgent.id, postPromotionRoot.id);
+    for (const agent of [...candidateAgents, synthesisAgent]) {
+      this.tree.reparent(agent.id, postPromotionRoot.id);
+    }
     run.rootId = postPromotionRoot.id;
-    run.stage = "build";
     this.notify();
     await this.tree.startDeferred(
       postPromotionRoot.id,

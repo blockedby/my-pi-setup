@@ -25,6 +25,10 @@ import {
   type PipelineStage,
 } from "./domain.ts";
 import type { PipelineController } from "./controller.ts";
+import {
+  FEATURE_CANDIDATE_ROLES,
+  FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+} from "./feature-best-of-three.ts";
 
 export type PipelineRow =
   | {
@@ -97,7 +101,15 @@ function childStage(
 ): PipelineStage {
   const { definition } = run;
   const { role } = child;
-  if (role === SMALL_FEATURE_IMPLEMENTER_ROLE) return "build";
+  const isFeatureImplementation =
+    definition === "feature-pipeline" &&
+    (role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE ||
+      FEATURE_CANDIDATE_ROLES.some(
+        (candidateRole) => `candidate-${candidateRole.toLowerCase()}` === role,
+      ));
+  if (role === SMALL_FEATURE_IMPLEMENTER_ROLE || isFeatureImplementation) {
+    return "build";
+  }
   if (role === AUDIT_SYNTHESIS_ROLE) return "final-audit";
   if (role.startsWith("discover-")) return "discover";
   if (role.startsWith("audit-")) {
@@ -140,6 +152,13 @@ function stageAgentId(
   root: AgentNodeSnapshot | undefined,
   children: ReadonlyArray<AgentNodeSnapshot>,
 ) {
+  if (
+    run.definition === "feature-pipeline" &&
+    stage === "build" &&
+    root?.role === "pipeline-root"
+  ) {
+    return root.id;
+  }
   const matching = children.filter(
     (agent) => childStage(run, agent, children) === stage,
   );
@@ -246,7 +265,7 @@ export function buildPipelineRows(
               child.role,
               ...(child.attempt > 1 ? [`attempt ${child.attempt}`] : []),
               child.model,
-              pipelineThinkingLevel(child.model),
+              child.thinkingLevel ?? pipelineThinkingLevel(child.model),
               child.status,
             ].join(" · "),
             runId: run.id,

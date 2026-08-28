@@ -16,6 +16,10 @@ import {
   type PipelineRunSnapshot,
 } from "./domain.ts";
 import { handoffText } from "./index.ts";
+import {
+  FEATURE_CANDIDATE_ROLES,
+  FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+} from "./feature-best-of-three.ts";
 
 function agent(
   id: string,
@@ -233,6 +237,65 @@ test("agent rows show configured thinking and omit the first attempt marker", ()
   assert.equal(
     rows.find((row) => row.kind === "agent" && row.agentId === root.id)?.label,
     "root-1 · running",
+  );
+});
+
+test("feature Best-of-3 agents render under build with configured xhigh reasoning", () => {
+  const root = agent("root-1", {
+    role: "discover-synthesis",
+    model: "openai-codex/gpt-5.6-luna",
+  });
+  const candidates = FEATURE_CANDIDATE_ROLES.map((role, index) =>
+    agent(`candidate-${index + 1}`, {
+      parentId: root.id,
+      role: `candidate-${role.toLowerCase()}`,
+      title: `${role} candidate`,
+      model: "openai-codex/gpt-5.6-luna",
+      thinkingLevel: "xhigh",
+      createdAt: index + 2,
+    }),
+  );
+  const synthesis = agent("implementation-synthesis", {
+    parentId: root.id,
+    role: FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+    model: "openai-codex/gpt-5.6-luna",
+    thinkingLevel: "xhigh",
+    createdAt: 10,
+  });
+  const run = {
+    ...pipelineRun("run-1", [root, ...candidates, synthesis]),
+    stage: "build" as const,
+  };
+  const rows = buildPipelineRows([run], new Set([run.id]));
+  const buildAgents = rows.filter(
+    (row): row is Extract<PipelineRow, { kind: "agent" }> =>
+      row.kind === "agent" && row.depth === 3 && row.stageRunning,
+  );
+
+  assert.deepEqual(
+    buildAgents.map((row) => row.role),
+    [
+      ...FEATURE_CANDIDATE_ROLES.map(
+        (role) => `candidate-${role.toLowerCase()}`,
+      ),
+      FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+    ],
+  );
+  assert.equal(
+    buildAgents.every((row) => row.label.includes(" · xhigh · running")),
+    true,
+  );
+  const finalAuditIndex = rows.findIndex(
+    (row) => row.kind === "stage" && row.stage === "final-audit",
+  );
+  const finalResolveIndex = rows.findIndex(
+    (row) => row.kind === "stage" && row.stage === "final-resolve",
+  );
+  assert.equal(
+    rows
+      .slice(finalAuditIndex + 1, finalResolveIndex)
+      .some((row) => row.kind === "agent" && row.role.startsWith("candidate-")),
+    false,
   );
 });
 

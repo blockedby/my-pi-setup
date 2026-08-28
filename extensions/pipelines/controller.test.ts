@@ -1064,6 +1064,44 @@ test("start is fire-and-forget and multiple same-cwd runs are admitted", async (
   await gated.controller.dispose();
 });
 
+test("feature-pipeline enters build while Best-of-3 candidates are running", async () => {
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteDiscoverySynthesis: false,
+    autoCompleteCandidates: false,
+  });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) settleRole(run, role);
+  await settleInitialization();
+
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis?.discoverySubmit);
+  synthesis.discoverySubmit(discoverySynthesisResult());
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "" },
+  });
+  await settleInitialization();
+
+  assert.equal(run.controller.get(runId)?.stage, "build");
+  const candidates = run.sessions.filter((session) =>
+    candidateRoleFromSpec(session.spec.role),
+  );
+  assert.equal(candidates.length, 3);
+  assert.equal(
+    candidates.every(
+      (session) =>
+        session.isStreaming && session.spec.thinkingLevel === "xhigh",
+    ),
+    true,
+  );
+  await run.controller.cancelRun(runId);
+  await run.controller.dispose();
+});
+
 test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with identical complete context", async () => {
   const run = harness({
     autoCompleteFeatureDiscovery: false,
@@ -1171,6 +1209,38 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
     (session) => session.spec.role === "pipeline-root",
   );
   assert.ok(root);
+  const promotedSnapshot = run.controller.get(runId);
+  assert.ok(promotedSnapshot?.rootId);
+  const implementationRoles = [
+    ...FEATURE_CANDIDATE_ROLES.map((role) => `candidate-${role.toLowerCase()}`),
+    FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+  ];
+  assert.equal(
+    promotedSnapshot.agents
+      .filter((agent) => implementationRoles.includes(agent.role))
+      .every((agent) => agent.parentId === promotedSnapshot.rootId),
+    true,
+  );
+  const promotedRows = buildPipelineRows(
+    [promotedSnapshot],
+    new Set([promotedSnapshot.id]),
+  );
+  assert.deepEqual(
+    promotedRows
+      .filter(
+        (row) =>
+          row.kind === "agent" &&
+          row.key.startsWith(`agent:${runId}:build:`) &&
+          implementationRoles.includes(row.role),
+      )
+      .map((row) => (row.kind === "agent" ? row.role : "")),
+    implementationRoles,
+  );
+  const promotedBuildRow = promotedRows.find(
+    (row) => row.kind === "stage" && row.stage === "build",
+  );
+  assert.ok(promotedBuildRow?.kind === "stage");
+  assert.equal(promotedBuildRow.agentId, promotedSnapshot.rootId);
   assert.doesNotMatch(root.sends[0] ?? "", /bbbbbbbb|"primaryCandidate"/);
   assert.doesNotMatch(
     root.sends[0] ?? "",
@@ -1425,7 +1495,7 @@ test("selection is read-only before the same Luna agent receives primary-based a
     (session) => session.spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
   );
   assert.ok(synthesis);
-  assert.equal(run.controller.get(runId)?.stage, "discover");
+  assert.equal(run.controller.get(runId)?.stage, "build");
   assert.equal(run.lifecycles[0]?.selectionReadOnlyChecks, 0);
   assert.equal(run.lifecycles[0]?.synthesisCreated, 0);
   assert.match(synthesis.prompts[0] ?? "", /selection-only and read-only/i);
