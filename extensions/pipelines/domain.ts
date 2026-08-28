@@ -1,28 +1,11 @@
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
-
-export const PIPELINE_NAME_MAX_LENGTH = 64;
-export const PIPELINE_NAME_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+){2,4}$/;
-export const PIPELINE_ID_ATTEMPTS = 8;
-
-export function assertPipelineName(value: unknown) {
-  if (
-    typeof value !== "string" ||
-    value.length > PIPELINE_NAME_MAX_LENGTH ||
-    !PIPELINE_NAME_PATTERN.test(value)
-  ) {
-    throw new Error(
-      `pipeline_name must be 3–5 lowercase kebab-case words, start with a letter, contain only lowercase letters/digits, and be at most ${PIPELINE_NAME_MAX_LENGTH} characters; no trimming or normalization is applied.`,
-    );
-  }
-  return value;
-}
-
-export function isCanonicalPipelineRunId(value: string, pipelineName: string) {
-  return (
-    value.startsWith(`${pipelineName}-`) &&
-    /^[a-f0-9]{8}$/.test(value.slice(pipelineName.length + 1))
-  );
-}
+export {
+  assertPipelineName,
+  isCanonicalPipelineRunId,
+  PIPELINE_ID_ATTEMPT_LIMIT as PIPELINE_ID_ATTEMPTS,
+  PIPELINE_NAME_MAX_LENGTH,
+  PIPELINE_NAME_PATTERN,
+} from "./pipeline-identity.ts";
 
 export const FEATURE_PIPELINE_ID = "feature-pipeline" as const;
 export const SMALL_FEATURE_PIPELINE_ID = "small-feature-pipeline" as const;

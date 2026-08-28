@@ -309,6 +309,46 @@ test("feature commits reject generated dependency symlinks before commit", () =>
   }
 });
 
+test("feature commits permit legitimate nested paths and in-repository symlinks", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "legitimate-source-paths-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.mkdirSync(path.join(minimal.path, "src", "bin"), { recursive: true });
+    fs.mkdirSync(path.join(minimal.path, "docs", "tmp"), { recursive: true });
+    fs.writeFileSync(path.join(minimal.path, "implementation.txt"), "ok\n");
+    fs.writeFileSync(
+      path.join(minimal.path, "src", "bin", "tool.ts"),
+      "tool\n",
+    );
+    fs.writeFileSync(
+      path.join(minimal.path, "docs", "tmp", "example.md"),
+      "example\n",
+    );
+    fs.symlinkSync(
+      "../implementation.txt",
+      path.join(minimal.path, "src", "link.txt"),
+    );
+
+    const head = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+    );
+    assert.equal(
+      git(minimal.path, ["ls-tree", "-r", "--name-only", head]),
+      "base.txt\ndocs/tmp/example.md\nimplementation.txt\nsrc/bin/tool.ts\nsrc/link.txt",
+    );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("candidate and synthesis changed-path handoffs reject duplicates and omissions", () => {
   const repo = fixture();
   try {

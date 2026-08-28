@@ -357,6 +357,54 @@ function readStagedPaths(cwd: string) {
   return value ? value.split("\n").filter(Boolean) : [];
 }
 
+function pathExistsInCommit(cwd: string, commit: string, filePath: string) {
+  try {
+    execFileSync("git", ["cat-file", "-e", `${commit}:${filePath}`], {
+      cwd,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pathIsInsideWorktree(cwd: string, filePath: string) {
+  const worktreeRoot = path.resolve(cwd);
+  const target = fs.readlinkSync(path.join(cwd, filePath));
+  const targetPath = path.resolve(
+    path.dirname(path.join(cwd, filePath)),
+    target,
+  );
+  return (
+    targetPath === worktreeRoot ||
+    targetPath.startsWith(`${worktreeRoot}${path.sep}`)
+  );
+}
+
+const generatedDirectoryNames = new Set([
+  "node_modules",
+  ".cache",
+  ".pi",
+  ".pi-subagents",
+]);
+const generatedRootDirectoryNames = new Set([
+  "bin",
+  "build",
+  "dist",
+  "coverage",
+  "tmp",
+  "temp",
+]);
+
+function isGeneratedArtifactPath(filePath: string) {
+  const parts = filePath.split("/");
+  return (
+    parts.some((part) => generatedDirectoryNames.has(part)) ||
+    (parts.length > 0 && generatedRootDirectoryNames.has(parts[0]!))
+  );
+}
+
 function readStagedSymlinks(cwd: string) {
   const value = requireGit(
     cwd,
@@ -821,29 +869,23 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
     );
     const stagedPaths = readStagedPaths(resolved);
     const stagedSymlinks = new Set(readStagedSymlinks(resolved));
-    const ignoredStagedPaths = new Set(
-      readIgnoredStagedPaths(resolved, stagedPaths),
+    const baseCommit = candidateRole
+      ? this.caller.baseCommit
+      : this.synthesis?.primaryCommit;
+    if (!baseCommit) {
+      throw new Error("Unable to determine the assigned worktree base commit.");
+    }
+    const introducedPaths = stagedPaths.filter(
+      (item) => !pathExistsInCommit(resolved, baseCommit, item),
     );
-    const generated = stagedPaths.filter(
+    const ignoredStagedPaths = new Set(
+      readIgnoredStagedPaths(resolved, introducedPaths),
+    );
+    const generated = introducedPaths.filter(
       (item) =>
-        stagedSymlinks.has(item) ||
         ignoredStagedPaths.has(item) ||
-        item
-          .split("/")
-          .some((part) =>
-            [
-              "node_modules",
-              ".cache",
-              ".pi",
-              ".pi-subagents",
-              "bin",
-              "build",
-              "dist",
-              "coverage",
-              "tmp",
-              "temp",
-            ].includes(part),
-          ),
+        isGeneratedArtifactPath(item) ||
+        (stagedSymlinks.has(item) && !pathIsInsideWorktree(resolved, item)),
     );
     if (generated.length > 0) {
       requireGit(

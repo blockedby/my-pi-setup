@@ -194,6 +194,7 @@ test("pipeline names enforce exact word, casing, separator, and length boundarie
     "one--two-three",
     "one-two-three-",
     "one-two-three!",
+    "one-two-three\n",
     `${maxName}x`,
   ]) {
     assert.equal(

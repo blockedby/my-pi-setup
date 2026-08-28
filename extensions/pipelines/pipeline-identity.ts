@@ -1,11 +1,12 @@
 import { randomBytes } from "node:crypto";
 
 export const PIPELINE_NAME_MAX_LENGTH = 64;
-export const PIPELINE_NAME_PATTERN = "^[a-z][a-z0-9]*(?:-[a-z0-9]+){2,4}$";
+export const PIPELINE_NAME_PATTERN =
+  "^[a-z][a-z0-9]*(?:-[a-z0-9]+){2,4}$(?![\\s\\S])";
 export const PIPELINE_RUN_ID_PATTERN =
-  "^[a-z][a-z0-9]*(?:-[a-z0-9]+){2,4}-[0-9a-f]{8}$";
+  "^[a-z][a-z0-9]*(?:-[a-z0-9]+){2,4}-[0-9a-f]{8}$(?![\\s\\S])";
 export const PIPELINE_RUN_ID_MAX_LENGTH = PIPELINE_NAME_MAX_LENGTH + 1 + 8;
-export const PIPELINE_ID_ATTEMPT_LIMIT = 32;
+export const PIPELINE_ID_ATTEMPT_LIMIT = 8;
 
 const pipelineNamePattern = new RegExp(PIPELINE_NAME_PATTERN);
 const pipelineTokenPattern = /^[0-9a-f]{8}$/;
@@ -26,10 +27,7 @@ export function assertPipelineName(value: unknown): asserts value is string {
       `pipeline_name exceeds the maximum length of ${PIPELINE_NAME_MAX_LENGTH} characters.`,
     );
   }
-  if (
-    !pipelineNamePattern.test(value) ||
-    pipelineNamePattern.exec(value)?.[0] !== value
-  ) {
+  if (pipelineNamePattern.exec(value)?.[0] !== value) {
     throw new Error(nameRuleDiagnostic());
   }
 }
@@ -57,7 +55,14 @@ const canonicalPipelineIdPattern = new RegExp(PIPELINE_RUN_ID_PATTERN);
 export function isCanonicalPipelineId(value: string) {
   return (
     value.length <= PIPELINE_RUN_ID_MAX_LENGTH &&
-    canonicalPipelineIdPattern.test(value) &&
     canonicalPipelineIdPattern.exec(value)?.[0] === value
+  );
+}
+
+export function isCanonicalPipelineRunId(value: string, pipelineName: string) {
+  return (
+    isCanonicalPipelineId(value) &&
+    value.startsWith(`${pipelineName}-`) &&
+    value.length === pipelineName.length + 9
   );
 }

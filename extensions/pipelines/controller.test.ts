@@ -1032,6 +1032,22 @@ async function finishEmbeddedAudit(
   }
 }
 
+test("controller rejects a trailing-newline pipeline name before creating state", async () => {
+  const run = harness();
+  assert.throws(
+    () =>
+      run.controller.start({
+        ...request(),
+        pipelineName: "invalid-trailing-newline\n",
+      }),
+    /pipeline_name/,
+  );
+  assert.deepEqual(run.controller.list(), []);
+  assert.equal(run.sessions.length, 0);
+  assert.equal(run.lifecycles.length, 0);
+  await run.controller.dispose();
+});
+
 test("canonical ID admission retries live and namespace collisions before discovery", async () => {
   const base = "collision-safe-feature";
   const occupiedId = `${base}-aaaaaaaa`;

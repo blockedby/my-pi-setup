@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
   defineTool,
@@ -108,6 +107,10 @@ import {
   type AuditSegmentContext,
 } from "./audit-segment.ts";
 import { assertImplementationPipelineWorkspace } from "./worktree-preflight.ts";
+import {
+  canonicalPipelineId,
+  securePipelineToken,
+} from "./pipeline-identity.ts";
 
 export function pipelineDiscoveryToolAllowed(
   definition: PipelineDefinitionId,
@@ -198,10 +201,6 @@ function deferredSignal() {
     resolve = done;
   });
   return { promise, resolve };
-}
-
-function defaultPipelineToken() {
-  return randomBytes(4).toString("hex");
 }
 
 function scopedSessionTitle(runId: string, title: string) {
@@ -411,7 +410,10 @@ export class PipelineController {
     this.makeRunId =
       options.makeRunId ??
       ((pipelineName) =>
-        `${pipelineName}-${(options.makeRunToken ?? defaultPipelineToken)()}`);
+        canonicalPipelineId(
+          pipelineName,
+          (options.makeRunToken ?? securePipelineToken)(),
+        ));
     this.featureGit = options.featureGit ?? defaultFeatureGitOperations;
     this.tree = new AgentTreeController({
       factory: options.createSessionFactory(
