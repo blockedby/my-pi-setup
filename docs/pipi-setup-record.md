@@ -1266,3 +1266,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `tests/scripts/install.test.mjs` and this record. Installer production behavior, installed runtime state, credentials, model overrides, submodule pins, and Git delivery state are unchanged.
 - **Verification:** `npm run test:installer` passed 39/39. Fresh `npm run test:deterministic` passed 39 installer tests, 270 deterministic extension tests, and 22 file-search tests.
 - **Pending:** None for the fixture correction; rollout of the separate pipeline behavior remains pending as recorded above.
+
+## Operation entry: roll out final-audit and discovery policy changes
+
+- **Request:** Commit and push the completed pipeline changes directly to `main`, then update the installed Pipi runtime.
+- **Action:** Installed Pipi from the synchronized primary checkout at source commit `1085d67` with repository dependency installation skipped. The rollout loads the standalone/feature final-audit full-suite instruction, F1/P1 prompt-enforced read-only `gh` access, and the corrected installer fixture into managed Pipi state.
+- **Affected paths or values:** Managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, and this record. Pipi remains at 0.84.3; credentials, model overrides, submodule pins, and authentication isolation are unchanged.
+- **Verification:** `npm run check:pipi-install` verified installed Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration. Pre-rollout repository verification passed 39/39 installer tests, 270/270 deterministic extension tests, 22/22 file-search tests, TypeScript, formatting, exact-submodule validation, and `git diff --check`.
+- **Pending:** Reload or restart sessions created before this rollout so they load the updated pipeline prompts and tool policy.
