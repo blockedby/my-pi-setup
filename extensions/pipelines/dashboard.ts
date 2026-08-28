@@ -30,6 +30,10 @@ import {
   FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
 } from "./feature-best-of-three.ts";
 
+type DashboardStage = PipelineStage | "synthesis";
+type DashboardStageStatus =
+  "pending" | "running" | "done" | "failed" | "cancelled";
+
 export type PipelineRow =
   | {
       readonly key: string;
@@ -52,8 +56,8 @@ export type PipelineRow =
       readonly depth: 2;
       readonly label: string;
       readonly runId: string;
-      readonly stage: PipelineStage;
-      readonly status: "pending" | "running" | "done" | "failed" | "cancelled";
+      readonly stage: DashboardStage;
+      readonly status: DashboardStageStatus;
       readonly agentId?: string;
     }
   | {
@@ -68,8 +72,18 @@ export type PipelineRow =
       readonly status: AgentNodeSnapshot["status"];
     };
 
-function stageLabel(stage: PipelineStage) {
+function stageLabel(stage: DashboardStage) {
   return stage === "complete" ? "completion stage" : stage;
+}
+
+function dashboardStages(run: PipelineRunSnapshot) {
+  const stages: ReadonlyArray<DashboardStage> = stagesForDefinition(
+    run.definition,
+  );
+  if (run.definition !== "feature-pipeline") return stages;
+  return stages.flatMap((stage) =>
+    stage === "build" ? ([stage, "synthesis"] as const) : [stage],
+  );
 }
 
 function isPipelineAuditRole(role: string) {
@@ -98,16 +112,21 @@ function childStage(
   run: PipelineRunSnapshot,
   child: AgentNodeSnapshot,
   children: ReadonlyArray<AgentNodeSnapshot>,
-): PipelineStage {
+): DashboardStage {
   const { definition } = run;
   const { role } = child;
-  const isFeatureImplementation =
+  if (
     definition === "feature-pipeline" &&
-    (role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE ||
-      FEATURE_CANDIDATE_ROLES.some(
-        (candidateRole) => `candidate-${candidateRole.toLowerCase()}` === role,
-      ));
-  if (role === SMALL_FEATURE_IMPLEMENTER_ROLE || isFeatureImplementation) {
+    role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE
+  ) {
+    return "synthesis";
+  }
+  const isFeatureCandidate =
+    definition === "feature-pipeline" &&
+    FEATURE_CANDIDATE_ROLES.some(
+      (candidateRole) => `candidate-${candidateRole.toLowerCase()}` === role,
+    );
+  if (role === SMALL_FEATURE_IMPLEMENTER_ROLE || isFeatureCandidate) {
     return "build";
   }
   if (role === AUDIT_SYNTHESIS_ROLE) return "final-audit";
@@ -132,7 +151,7 @@ function latestAgentId(agents: ReadonlyArray<AgentNodeSnapshot>) {
 
 function childrenForStage(
   run: PipelineRunSnapshot,
-  stage: PipelineStage,
+  stage: DashboardStage,
   children: ReadonlyArray<AgentNodeSnapshot>,
 ) {
   const matching = children.filter(
@@ -148,7 +167,7 @@ function childrenForStage(
 
 function stageAgentId(
   run: PipelineRunSnapshot,
-  stage: PipelineStage,
+  stage: DashboardStage,
   root: AgentNodeSnapshot | undefined,
   children: ReadonlyArray<AgentNodeSnapshot>,
 ) {
@@ -188,6 +207,33 @@ function stageAgentId(
     return root?.id;
   }
   return undefined;
+}
+
+function stageStatus(
+  run: PipelineRunSnapshot,
+  stage: DashboardStage,
+  stages: ReadonlyArray<DashboardStage>,
+  children: ReadonlyArray<AgentNodeSnapshot>,
+): DashboardStageStatus {
+  const currentStageIndex = stages.indexOf(run.stage);
+  const stageIndex = stages.indexOf(stage);
+  if (run.definition === "feature-pipeline" && run.stage === "build") {
+    const synthesis = children.find(
+      (agent) => agent.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+    );
+    if (stage === "build" && synthesis) return "done";
+    if (stage === "synthesis") {
+      if (!synthesis) return "pending";
+      if (synthesis.status === "error") return "failed";
+      if (synthesis.status === "cancelled") return "cancelled";
+      if (synthesis.status === "done") return "done";
+      return "running";
+    }
+  }
+  if (stageIndex < currentStageIndex) return "done";
+  if (stageIndex > currentStageIndex) return "pending";
+  if (run.status === "failed" || run.status === "cancelled") return run.status;
+  return run.status === "completed" ? "done" : "running";
 }
 
 export function buildPipelineRows(
@@ -233,27 +279,17 @@ export function buildPipelineRows(
           status: root.status,
         });
       }
-      const stages = stagesForDefinition(run.definition);
-      const currentStageIndex = stages.indexOf(run.stage);
-      for (const [stageIndex, stage] of stages.entries()) {
-        const stageStatus =
-          stageIndex < currentStageIndex
-            ? "done"
-            : stageIndex > currentStageIndex
-              ? "pending"
-              : run.status === "failed" || run.status === "cancelled"
-                ? run.status
-                : run.status === "completed"
-                  ? "done"
-                  : "running";
+      const stages = dashboardStages(run);
+      for (const stage of stages) {
+        const status = stageStatus(run, stage, stages, children);
         rows.push({
           key: `stage:${run.id}:${stage}`,
           kind: "stage",
           depth: 2,
-          label: `${stageLabel(stage)} · ${stageStatus}`,
+          label: `${stageLabel(stage)} · ${status}`,
           runId: run.id,
           stage,
-          status: stageStatus,
+          status,
           agentId: stageAgentId(run, stage, root, children),
         });
         for (const child of childrenForStage(run, stage, children)) {
@@ -271,7 +307,7 @@ export function buildPipelineRows(
             runId: run.id,
             agentId: child.id,
             role: child.role,
-            stageRunning: stageStatus === "running",
+            stageRunning: status === "running",
             status: child.status,
           });
         }

@@ -240,7 +240,7 @@ test("agent rows show configured thinking and omit the first attempt marker", ()
   );
 });
 
-test("feature Best-of-3 agents render under build with configured xhigh reasoning", () => {
+test("feature Best-of-3 candidates and implementation synthesis render in separate dashboard stages", () => {
   const root = agent("root-1", {
     role: "discover-synthesis",
     model: "openai-codex/gpt-5.6-luna",
@@ -269,22 +269,31 @@ test("feature Best-of-3 agents render under build with configured xhigh reasonin
   const rows = buildPipelineRows([run], new Set([run.id]));
   const buildAgents = rows.filter(
     (row): row is Extract<PipelineRow, { kind: "agent" }> =>
-      row.kind === "agent" && row.depth === 3 && row.stageRunning,
+      row.kind === "agent" && row.key.includes(":build:"),
+  );
+  const synthesisStage = rows.find(
+    (row): row is Extract<PipelineRow, { kind: "stage" }> =>
+      row.kind === "stage" && row.stage === "synthesis",
+  );
+  const synthesisRow = rows.find(
+    (row): row is Extract<PipelineRow, { kind: "agent" }> =>
+      row.kind === "agent" && row.agentId === synthesis.id,
   );
 
   assert.deepEqual(
     buildAgents.map((row) => row.role),
-    [
-      ...FEATURE_CANDIDATE_ROLES.map(
-        (role) => `candidate-${role.toLowerCase()}`,
-      ),
-      FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
-    ],
+    FEATURE_CANDIDATE_ROLES.map((role) => `candidate-${role.toLowerCase()}`),
   );
   assert.equal(
     buildAgents.every((row) => row.label.includes(" · xhigh · running")),
     true,
   );
+  assert.ok(synthesisStage);
+  assert.equal(synthesisStage.label, "synthesis · running");
+  assert.equal(synthesisStage.agentId, synthesis.id);
+  assert.ok(synthesisRow);
+  assert.match(synthesisRow.key, /:synthesis:/);
+  assert.match(synthesisRow.label, / · xhigh · running$/);
   const finalAuditIndex = rows.findIndex(
     (row) => row.kind === "stage" && row.stage === "final-audit",
   );
@@ -296,6 +305,38 @@ test("feature Best-of-3 agents render under build with configured xhigh reasonin
       .slice(finalAuditIndex + 1, finalResolveIndex)
       .some((row) => row.kind === "agent" && row.role.startsWith("candidate-")),
     false,
+  );
+});
+
+test("feature dashboard reserves a pending synthesis stage before its agent starts", () => {
+  const root = agent("root-1", { role: "discover-synthesis" });
+  const candidate = agent("candidate-1", {
+    parentId: root.id,
+    role: "candidate-minimal",
+    thinkingLevel: "xhigh",
+  });
+  const run = {
+    ...pipelineRun("run-1", [root, candidate]),
+    stage: "build" as const,
+  };
+  const rows = buildPipelineRows([run], new Set([run.id]));
+  const stages = rows.filter(
+    (row): row is Extract<PipelineRow, { kind: "stage" }> =>
+      row.kind === "stage",
+  );
+
+  assert.deepEqual(
+    stages.slice(0, 4).map((row) => [row.stage, row.status]),
+    [
+      ["discover", "done"],
+      ["build", "running"],
+      ["synthesis", "pending"],
+      ["audit", "pending"],
+    ],
+  );
+  assert.equal(
+    stages.find((row) => row.stage === "synthesis")?.agentId,
+    undefined,
   );
 });
 
