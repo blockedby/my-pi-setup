@@ -1234,7 +1234,16 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
           implementationRoles.includes(row.role),
       )
       .map((row) => (row.kind === "agent" ? row.role : "")),
-    implementationRoles,
+    implementationRoles.slice(0, -1),
+  );
+  const promotedSynthesisRow = promotedRows.find(
+    (row) =>
+      row.kind === "agent" && row.key.startsWith(`agent:${runId}:synthesis:`),
+  );
+  assert.equal(promotedSynthesisRow?.kind, "agent");
+  assert.equal(
+    promotedSynthesisRow?.kind === "agent" ? promotedSynthesisRow.role : "",
+    FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
   );
   const promotedBuildRow = promotedRows.find(
     (row) => row.kind === "stage" && row.stage === "build",
