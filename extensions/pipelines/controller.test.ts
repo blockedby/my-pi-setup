@@ -2780,6 +2780,108 @@ test("child wait delivers the validated final audit report even when synthesis f
   await run.controller.dispose();
 });
 
+test("child wait joins the active audit pump before delivering final synthesis", async () => {
+  const run = harness();
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  run.controller.setStage(runId, "final-audit");
+  await run.controller.startFinalAudit(runId, {
+    acceptanceContract: "The approved feature contract",
+    assumptions: [],
+    checks: ["focused checks passed"],
+  });
+
+  const firstRole = AUDIT_SEGMENT_LUNA_ROLES[0];
+  settleRole(run, firstRole);
+  await settleInitialization();
+  for (const role of AUDIT_SEGMENT_LUNA_ROLES.slice(1)) settleRole(run, role);
+
+  const synthesisSession = run.sessions.find(
+    (session) => session.spec.role === "audit-synthesis",
+  );
+  assert.ok(synthesisSession);
+  synthesisSession.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: synthesisReport("audit-synthesis-intermediate", [firstRole]),
+    },
+  });
+  await settleInitialization();
+
+  const synthesisNode = run.controller.agentView
+    .list()
+    .find((agent) => agent.role === "audit-synthesis");
+  assert.ok(synthesisNode);
+  assert.equal(synthesisNode.status, "running");
+  const waitTool = run.rootTool(runId, "pipeline_child_wait");
+  assert.ok(waitTool);
+  const waiting = waitTool.execute(
+    "final-audit-race",
+    { ids: [synthesisNode.id] },
+    undefined,
+    undefined,
+    {} as ExtensionContext,
+  );
+
+  synthesisSession.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: synthesisReport(
+        "audit-synthesis-final",
+        AUDIT_SEGMENT_LUNA_ROLES,
+        {
+          baseSha:
+            run.lifecycles.find((lifecycle) =>
+              lifecycle.temporaryRoot.includes(runId),
+            )?.caller.baseCommit ?? BASE_COMMIT,
+          headSha: execFileSync("git", ["rev-parse", "HEAD"], {
+            cwd: synthesisSession.spec.cwd,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          }).trim(),
+        },
+      ),
+    },
+  });
+
+  const rendered = JSON.stringify(await waiting);
+  assert.equal(run.controller.get(runId)?.stage, "final-resolve");
+  assert.match(
+    rendered,
+    /VALIDATED_FINAL_AUDIT_REPORT_FOR_REQUIRED_RESOLUTION/,
+  );
+  assert.match(rendered, /"finalAuditReportDelivered":true/);
+  await run.controller.dispose();
+});
+
+test("controller-owned audit tracks do not report false finalText contract violations", async () => {
+  const run = harness();
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  await finishEmbeddedAudit(run, runId, false);
+
+  const track = [...run.controller.agentView.list()]
+    .reverse()
+    .find((agent) => agent.role === AUDIT_SEGMENT_LUNA_ROLES[0]);
+  assert.ok(track);
+  Reflect.set(track, "finalText", "");
+  const waitTool = run.rootTool(runId, "pipeline_child_wait");
+  assert.ok(waitTool);
+  const rendered = JSON.stringify(
+    await waitTool.execute(
+      "audit-track-wait",
+      { ids: [track.id] },
+      undefined,
+      undefined,
+      {} as ExtensionContext,
+    ),
+  );
+  assert.doesNotMatch(rendered, /Report contract violation/);
+  await run.controller.dispose();
+});
+
 test("embedded roots cannot cancel a busy controller-owned audit synthesizer", async () => {
   const run = harness();
   const runId = run.controller.start(request());
