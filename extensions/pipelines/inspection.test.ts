@@ -483,7 +483,7 @@ test("audit segment inspection is explicit, bounded, and omits private reducer e
       agent({
         id: "executor-1",
         parentId: "audit-root",
-        role: "executor-audit",
+        role: "audit-executor",
         model: "openai-codex/gpt-5.6-luna",
         status: "running",
         transcript: [
@@ -526,9 +526,9 @@ test("audit segment inspection is explicit, bounded, and omits private reducer e
   ]) {
     assert.equal(serialized.includes(privateField), false);
   }
-  assert.equal(projected.agents[1]?.role, "executor-audit");
+  assert.equal(projected.agents[1]?.role, "audit-executor");
   assert.equal("preview" in (projected.agents[1] ?? {}), false);
-  assert.match(formatPipelineCheck(projected), /executor-audit/);
+  assert.match(formatPipelineCheck(projected), /audit-executor/);
   assert.match(formatPipelineCheck(projected), /Open tool: bash/);
   assert.match(formatPipelineCheck(projected), /reports accepted 3\/5/);
 });

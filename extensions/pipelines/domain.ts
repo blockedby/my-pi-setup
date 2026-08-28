@@ -64,7 +64,7 @@ export const FEATURE_CORRECTNESS_AUDIT_ROLE =
   "audit-functional-correctness" as const;
 export const FEATURE_RELIABILITY_AUDIT_ROLE =
   "audit-reliability-regressions" as const;
-export const EXECUTOR_AUDIT_ROLE = "executor-audit" as const;
+export const EXECUTOR_AUDIT_ROLE = "audit-executor" as const;
 
 /** The pre-final feature and small-feature audit wave remains four static tracks. */
 export const STATIC_LUNA_AUDIT_ROLES = [

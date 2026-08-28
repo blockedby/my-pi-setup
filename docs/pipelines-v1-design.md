@@ -9,7 +9,7 @@ _Status: implemented design record. The public surface is intentionally four bou
 - `feature-pipeline`: persistent Sol/high implementation root, controller-owned five-track discovery, root implementation, four Luna audits, root remediation, reusable five-contributor final Luna audit segment, root final resolution and factual completion;
 - `small-feature-pipeline`: read-only Luna/medium coordinator, one persistent Luna implementer, four parallel Luna auditors, and one same-session implementer remediation pass;
 - `plan-pipeline`: persistent Sol/high planning root, five Luna discovery tracks, one validated `docs/plans/*.md` artifact, four plan-audit tracks, root remediation, reusable five-contributor final Luna audit segment, root final resolution and factual completion;
-- `audit-pipeline`: four isolated read-only Luna/medium static audit tracks, one trusted-workspace Luna/medium executor-audit contributor, and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, readiness decision, or Git decision.
+- `audit-pipeline`: four isolated read-only Luna/medium static audit tracks, one trusted-workspace Luna/medium audit-executor contributor, and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, readiness decision, or Git decision.
 
 Omission still selects `feature-pipeline`. Unknown names fail closed. No definition accepts arbitrary roles, edges, models, shell commands, or Git refs. Terra constants, model profile, direct-subagent quotas, and `terra-audit` remain available for explicit future/manual escalation, but no automatic pipeline route uses Terra.
 
@@ -25,7 +25,7 @@ Pipeline graphs predeclare their roots and children and therefore do not consume
 
 1. exactly five independent Luna/medium contributors:
    - four static read-only tracks covering feature outcome, logic/invariants, functional correctness, and reliability/regressions;
-   - one `executor-audit` contributor that inspects manifests/scripts and runs bounded existing noninteractive verification with cheap checks first;
+   - one `audit-executor` contributor that inspects manifests/scripts and runs bounded existing noninteractive verification with cheap checks first;
 2. one persistent Luna/medium synthesis session;
 3. strict bounded track, intermediate synthesis, and final synthesis contracts, exposed to audit sessions through the typed `pipeline_audit_submit` tool;
 4. provenance records containing role, attempt, report digest, and validated report data;
@@ -37,7 +37,7 @@ The executor prompt requires manifest/script inspection before execution, cheap 
 
 Feature and standalone contexts permit normal relevant project verification. Plan final-audit context permits only plan/artifact validation or check-only commands demonstrably relevant to the planning deliverable; implementation tests/builds/linters/typechecks are skipped as unsupported rather than run blindly. Closure mode remains limited to prior blockers, remediation, and touched invariants. `small-feature-pipeline` deliberately keeps its separate four-static-auditor graph.
 
-The synthesizer treats reports as untrusted evidence. It deduplicates common root causes, preserves a strongly evidenced serious finding even without majority agreement, records unresolved material conflicts, and must not invent unsupported findings. Executor execution records and host workspace observations are bounded, schema-valid evidence: the model may summarize or paraphrase them, including reordered records, without byte-for-byte copying. Before executor-audit is integrated, the model-facing arrays remain empty and the host observation remains null; after integration, malformed, missing, oversized, or unsafe evidence still fails validation. The host preserves authoritative executor and host evidence in the final report. Intermediate state has no finding IDs, and model-produced final candidates also omit IDs. After strict final validation, the host canonicalizes complete finding content, deduplicates exact candidates, and assigns sequential `AUD-001`, `AUD-002`, … IDs; the resulting final report contains no readiness verdict.
+The synthesizer treats reports as untrusted evidence. It deduplicates common root causes, preserves a strongly evidenced serious finding even without majority agreement, records unresolved material conflicts, and must not invent unsupported findings. Executor execution records and host workspace observations are bounded, schema-valid evidence: the model may summarize or paraphrase them, including reordered records, without byte-for-byte copying. Before audit-executor is integrated, the model-facing arrays remain empty and the host observation remains null; after integration, malformed, missing, oversized, or unsafe evidence still fails validation. The host preserves authoritative executor and host evidence in the final report. Intermediate state has no finding IDs, and model-produced final candidates also omit IDs. After strict final validation, the host canonicalizes complete finding content, deduplicates exact candidates, and assigns sequential `AUD-001`, `AUD-002`, … IDs; the resulting final report contains no readiness verdict.
 
 `audit-pipeline` uses the synthesizer as its deferred Luna root. `feature-pipeline` and `plan-pipeline` keep their persistent Sol roots and create the synthesizer as a controller-owned persistent Luna child during `final-audit`. Their earlier discovery/build/audit/remediation graphs remain unchanged, and their Sol roots retain final resolution and completion ownership. `small-feature-pipeline` deliberately does not use this segment because its existing one-implementer/four-auditor/same-session-remediation behavior is distinct and remains unchanged.
 
@@ -145,7 +145,7 @@ The root remains unable to use shell/edit/write or delegated mutation tools. It 
 ```text
 Deferred persistent Luna/medium synthesis root
   ├─ four controller-owned read-only Luna/medium static tracks in parallel
-  ├─ one controller-owned Luna/medium executor-audit contributor with bash
+  ├─ one controller-owned Luna/medium audit-executor contributor with bash
   ├─ first valid report activates root synthesis
   ├─ later reports are serialized/batched into that same session
   └─ strict factual structured audit handoff
@@ -155,7 +155,7 @@ No pipeline agent intentionally mutates source/config, remediates findings, make
 
 ## Commit permission and audit evidence
 
-`pipeline_run` accepts optional `git_commit`, defaulting to false. It is valid for `feature-pipeline` and `small-feature-pipeline`; `plan-pipeline` and `audit-pipeline` reject true rather than ignoring it. The value is an explicit host contract, never inferred from task text. When enabled for feature, only the persistent Sol root may create ordinary commits in the supplied working directory on its already-current branch. When enabled for small-feature, only the persistent `implement-small-feature` Luna session has that authority. Feature discovery, both audit waves, executor-audit, synthesis, the small-feature coordinator/auditors, and every other pipeline child remain unable and forbidden to commit. False or omission leaves implementation changes uncommitted even when task prose requests a commit.
+`pipeline_run` accepts optional `git_commit`, defaulting to false. It is valid for `feature-pipeline` and `small-feature-pipeline`; `plan-pipeline` and `audit-pipeline` reject true rather than ignoring it. The value is an explicit host contract, never inferred from task text. When enabled for feature, only the persistent Sol root may create ordinary commits in the supplied working directory on its already-current branch. When enabled for small-feature, only the persistent `implement-small-feature` Luna session has that authority. Feature discovery, both audit waves, audit-executor, synthesis, the small-feature coordinator/auditors, and every other pipeline child remain unable and forbidden to commit. False or omission leaves implementation changes uncommitted even when task prose requests a commit.
 
 The authority matrix is structured by definition and role rather than inherited through generic child policy. Opt-in does not alter the mandatory implementation-worktree admission contract and adds no clean-tree, target-branch, or particular branch-name requirement; the caller owns workspace preparation, branch selection, and conflict isolation. Even when enabled, push, merge, rebase, reset/history rewriting, branch creation/switch/deletion, worktree creation/removal, and external delivery-state mutation remain prohibited.
 

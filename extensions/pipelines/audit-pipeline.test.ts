@@ -684,7 +684,7 @@ test("standalone audit graph is Luna-only and activates synthesis on the first v
 
 test("controller captures fresh Git status and diff evidence after executor settlement", async () => {
   const workspace = fs.mkdtempSync(
-    path.join(os.tmpdir(), "pipi-executor-audit-"),
+    path.join(os.tmpdir(), "pipi-audit-executor-"),
   );
   execFileSync("git", ["init", "-q"], { cwd: workspace });
   execFileSync("git", ["config", "user.name", "Pipi Test"], {

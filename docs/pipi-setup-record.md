@@ -1314,3 +1314,27 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/{worktree-preflight,controller,index,prompt}.ts`, focused pipeline tests, `README.md`, `docs/pipelines-v1-design.md`, `AGENTS.md`, and this record. Installed runtime state, credentials, model overrides, submodule pins, and Git delivery state are unchanged.
 - **Verification:** Focused pipeline tests passed 54/54. `npm run test:deterministic` passed 39 installer tests, 277 extension tests, and 22 file-search tests. Fresh `npm run check`, `npm run format:check`, `npm run check:submodules`, and `git diff --check` passed; the exact linked-worktree fixture covers both implementation definitions plus primary, nested-repository parent, non-Git, bare, detached, and non-root rejection before state/session creation, while plan/audit still start from a non-Git directory.
 - **Pending:** Source changes remain uncommitted as required; no runtime rollout was requested.
+
+## Operation entry: roll out relaxed audit synthesis and pipeline TUI metadata
+
+- **Request:** Install the newly merged Pipi source after delivering the relaxed audit synthesis evidence contract and pipeline TUI agent metadata.
+- **Action:** Reinstalled Pipi from synchronized `main` at source commit `0ee2c5f` with repository dependency installation skipped. The managed runtime now loads model-interpreted bounded audit evidence, authoritative final host evidence, thinking-level labels in `/pipelines`, and hidden first-attempt metadata. The published Pipi package version remains the current npm release, 0.84.3.
+- **Affected paths or values:** Managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, and this record. Credentials, model overrides, authentication isolation, MCP version, submodule pins, and external services are unchanged.
+- **Verification:** npm reported 0.84.3 as the current `@earendil-works/pi-coding-agent` release. `npm run check:pipi-install` verified installed Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration.
+- **Pending:** Reload or restart sessions created before this rollout so they load the updated pipeline behavior and TUI rendering.
+
+## Operation entry: roll out mandatory implementation worktree preflight
+
+- **Request:** Reinstall Pipi after merging the mandatory caller-prepared worktree admission for feature implementation pipelines.
+- **Action:** Reinstalled Pipi from synchronized `main` at source commit `257ba7d` with repository dependency installation skipped. The managed runtime now rejects `feature-pipeline` and `small-feature-pipeline` startup outside an exact caller-prepared dedicated linked Git worktree root on its own named branch; plan and audit workspace policies remain unchanged.
+- **Affected paths or values:** Managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, and this record. Pipi remains at 0.84.3; credentials, model overrides, authentication isolation, MCP version, submodule pins, and external services are unchanged.
+- **Verification:** `npm run check:pipi-install` verified installed Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration.
+- **Pending:** Reload or restart sessions created before this rollout so they load mandatory implementation-worktree admission.
+
+## Operation entry: simplify product README and rename audit executor role
+
+- **Request:** Keep `README.md` focused on user-facing features rather than pipeline internals, add that documentation policy to `AGENTS.md`, describe implementation agents simply as using isolated worktrees, and rename the visible `executor-audit` role to `audit-executor`.
+- **Action:** Removed the pipeline schema, preparation, permission, and final-audit implementation details from the product README and replaced them with one feature-level worktree-isolation statement. Added durable agent guidance to keep README content feature-oriented and route internals to design documentation. Renamed the active audit executor role across runtime constants, schemas, prompts, diagnostics, tests, and design documentation while preserving historical operation-log wording.
+- **Affected paths or values:** `README.md`, `AGENTS.md`, `extensions/pipelines/{domain,audit-segment,prompt,index}.ts`, focused tests, `docs/pipelines-v1-design.md`, and this record. Pipeline graph behavior, permissions, installed runtime state, credentials, model overrides, submodule pins, and external state are unchanged.
+- **Verification:** Focused pipeline tests passed 55/55. `npm run test:deterministic` passed 39 installer tests, 277 extension tests, and 22 file-search tests; `npm run check`, `npm run format:check`, `npm run check:submodules`, and `git diff --check` passed.
+- **Pending:** Deliver and reinstall the source change, then reload active sessions to see the renamed role and simplified bundled guidance.
