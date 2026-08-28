@@ -1507,3 +1507,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `AGENTS.md` and this record. Installed runtime state, dependencies, lockfiles, credentials, model overrides, submodules, and external services are unchanged.
 - **Verification:** TypeScript checking, repository formatting validation, and `git diff --check` passed under Bun 1.4.0.
 - **Pending:** None.
+
+## Operation entry: roll out the feature synthesis commit-tool fix
+
+- **Request:** Reinstall Pipi after merging the feature synthesis `pipeline_feature_commit` activation fix, using the repository's Bun-based installation flow.
+- **Action:** Initialized the rollout worktree's read-only submodules at their authoritative gitlink commits, then reinstalled Pipi from merged `main` source commit `14841f7` with repository dependency preparation skipped. The isolated runtime was freshly installed with Bun 1.4.0 and now includes merge commit `69528c5`, which keeps the controller-owned synthesis commit tool registered for activation after primary selection.
+- **Affected paths or values:** Managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, browser/MCP assets, Herdr integration, and this record. Pipi remains at 0.84.3; credentials, model overrides, submodule pins, regular Pi state, and project repositories are unchanged.
+- **Verification:** `bun run check:submodules` verified all three authoritative pins. `bun run install:pipi -- --skip-repository-dependencies` installed 233 isolated packages through Bun 1.4.0. `bun run check:pipi-install` verified Pipi 0.84.3, launcher/resume branding, MCP 2.15.0, install policy, model overrides, and Herdr integration; `/home/kcnc/.local/bin/pipi --version` returned `0.84.3`.
+- **Pending:** Reload or restart sessions created before this reinstall so they load the corrected pipeline extension.
