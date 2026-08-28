@@ -1,20 +1,36 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { hostname, tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { normalizeCodexToolsPackage } from "../../scripts/install.mjs";
+import {
+  installAssetDirectory,
+  normalizeCodexToolsPackage,
+} from "../../scripts/install.mjs";
+import {
+  acquireInstallLock,
+  encodeInstallLockOwner,
+} from "../../scripts/install-state.mjs";
+import {
+  readBunLock,
+  validatePipiVersionState,
+} from "../../scripts/pipi-version.mjs";
 
 const repositoryRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -22,7 +38,8 @@ const repositoryRoot = resolve(
 );
 const installScript = join(repositoryRoot, "scripts", "install.mjs");
 const uninstallScript = join(repositoryRoot, "scripts", "uninstall.mjs");
-const mcpAdapterPackage = "npm:pi-mcp-adapter@2.15.0";
+const mcpAdapterPackage = (home) =>
+  join(home, ".pipi", "agent", "runtime", "node_modules", "pi-mcp-adapter");
 const legacyMcpAdapterPackage = "npm:pi-mcp-adapter";
 const legacyPiSubagentsPackage = "npm:pi-subagents";
 const browserSkillSource = join(
@@ -58,6 +75,7 @@ const createFixture = async () => {
   mkdirSync(codexTools, { recursive: true });
 
   const piPath = join(fakeBin, "pi");
+  // Keep a Node shebang to prove the managed launcher ignores it and invokes Bun.
   writeFileSync(
     piPath,
     `#!/usr/bin/env node
@@ -70,6 +88,11 @@ process.stdout.write(JSON.stringify({
   pipiAgentDir: process.env.PIPI_CODING_AGENT_DIR,
   pipiSessionDir: process.env.PIPI_CODING_AGENT_SESSION_DIR,
   herdrAgent: process.env.HERDR_AGENT,
+  runtime: process.env.PIPI_RUNTIME,
+  bunRuntime: process.env.PIPI_BUN_RUNTIME,
+  browserRuntime: process.env.BROWSER_CHROME_NODE,
+  execPath: process.execPath,
+  bunVersion: process.versions.bun,
   codex,
   args: process.argv.slice(2),
 }));
@@ -81,60 +104,106 @@ process.stdout.write(JSON.stringify({
   writeFileSync(codexPath, "#!/bin/sh\nprintf 'codex-test\\n'\n");
   chmodSync(codexPath, 0o755);
 
+  const fakeBunPath = join(fakeBin, "bun");
+  const bunInstallLog = join(home, "bun-install-invocations.log");
+  const npmLog = join(home, "npm-invocations.log");
+  writeFileSync(
+    fakeBunPath,
+    `#!${process.execPath}
+const { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, symlinkSync, writeFileSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const { join } = require("node:path");
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  process.stdout.write("1.4.0\\n");
+  process.exit(0);
+}
+if (args[0] === "install") {
+  if (process.env.PIPI_TEST_BUN_INSTALL_LOG) appendFileSync(process.env.PIPI_TEST_BUN_INSTALL_LOG, args.join(" ") + "\\n");
+  if (process.env.PIPI_TEST_BUN_INSTALL_FAIL === "1") process.exit(23);
+  if (process.env.PIPI_TEST_BUN_HOLD_MARKER) {
+    writeFileSync(process.env.PIPI_TEST_BUN_HOLD_MARKER, "holding\\n");
+    const wait = new Int32Array(new SharedArrayBuffer(4));
+    while (true) {
+      try { process.kill(process.ppid, 0); } catch { process.exit(44); }
+      Atomics.wait(wait, 0, 0, 25);
+    }
+  }
+  const cwd = args[args.indexOf("--cwd") + 1];
+  if (process.env.PIPI_TEST_CONCURRENT_SETTINGS) {
+    const agentDir = join(process.env.HOME, ".pipi", "agent");
+    const marker = join(agentDir, "concurrent-settings-written");
+    if (!existsSync(marker)) {
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+        concurrentValue: "preserved",
+        packages: ["concurrent-package"],
+      }));
+      writeFileSync(marker, "written");
+    }
+  }
+  if (
+    cwd.includes(".pipi-install-stage-") &&
+    cwd.includes("runtime.stage-")
+  ) {
+    const binDir = join(cwd, "node_modules", ".bin");
+    const piPackage = join(cwd, "node_modules", "@earendil-works", "pi-coding-agent");
+    const adapterPackage = join(cwd, "node_modules", "pi-mcp-adapter");
+    const browserPackage = join(cwd, "node_modules", "chrome-devtools-mcp");
+    mkdirSync(binDir, { recursive: true });
+    const piEntry = join(piPackage, "dist", "bundle", "cli.js");
+    const adapterEntry = join(adapterPackage, "cli.js");
+    const browserEntry = join(browserPackage, "build", "src", "bin", "chrome-devtools-mcp.js");
+    mkdirSync(join(piPackage, "dist", "bundle"), { recursive: true });
+    mkdirSync(adapterPackage, { recursive: true });
+    mkdirSync(join(browserPackage, "build", "src", "bin"), { recursive: true });
+    writeFileSync(join(piPackage, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: ${JSON.stringify(runtimePiVersion)}, piConfig: { configDir: ".pi" }, bin: { pi: "dist/bundle/cli.js" } }));
+    writeFileSync(join(adapterPackage, "package.json"), JSON.stringify({ name: "pi-mcp-adapter", version: "2.15.0", bin: { "pi-mcp-adapter": "cli.js" } }));
+    writeFileSync(join(browserPackage, "package.json"), JSON.stringify({ name: "chrome-devtools-mcp", version: "1.8.0", bin: { "chrome-devtools-mcp": "build/src/bin/chrome-devtools-mcp.js" } }));
+    cpSync(process.env.PIPI_TEST_PI_FIXTURE, piEntry);
+    chmodSync(piEntry, 0o755);
+    writeFileSync(adapterEntry, "process.exit(0);\\n");
+    writeFileSync(join(adapterPackage, "index.ts"), "export default {};\\n");
+    writeFileSync(join(adapterPackage, "types.ts"), "export {};\\n");
+    chmodSync(adapterEntry, 0o755);
+    writeFileSync(browserEntry, 'process.stdout.write(JSON.stringify({ execPath: process.execPath, bunVersion: process.versions.bun, noUpdateChecks: process.env.CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS, args: process.argv.slice(2) }));\\n');
+    chmodSync(browserEntry, 0o755);
+    symlinkSync("../@earendil-works/pi-coding-agent/dist/bundle/cli.js", join(binDir, "pi"));
+    symlinkSync("../pi-mcp-adapter/cli.js", join(binDir, "pi-mcp-adapter"));
+    symlinkSync("../chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js", join(binDir, "chrome-devtools-mcp"));
+  }
+  process.exit(0);
+}
+const result = spawnSync(${JSON.stringify(process.execPath)}, args, { env: process.env, stdio: "inherit" });
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);
+`,
+  );
+  chmodSync(fakeBunPath, 0o755);
+
   const npmPath = join(fakeBin, "npm");
   writeFileSync(
     npmPath,
-    `#!/usr/bin/env node
-const { chmodSync, mkdirSync, rmSync, writeFileSync } = require("node:fs");
-const { join } = require("node:path");
-const args = process.argv.slice(2);
-if (args[0] === "ci" && process.env.PIPI_TEST_CONCURRENT_SETTINGS) {
-  const agentDir = join(process.env.HOME, ".pipi", "agent");
-  const marker = join(agentDir, "concurrent-settings-written");
-  if (!require("node:fs").existsSync(marker)) {
-    mkdirSync(agentDir, { recursive: true });
-    writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
-      concurrentValue: "preserved",
-      packages: ["concurrent-package"],
-    }));
-    writeFileSync(marker, "written");
-  }
-}
-if (args[0] === "install") {
-  const prefix = args[args.indexOf("--prefix") + 1];
-  const spec = args.at(-1);
-  if (args.includes("--no-save"))
-    rmSync(join(prefix, "node_modules"), { recursive: true, force: true });
-  const separator = spec.lastIndexOf("@");
-  const packageName = spec.slice(0, separator);
-  const version = spec.slice(separator + 1);
-  const manifestPath = join(prefix, "package.json");
-  const manifest = require("node:fs").existsSync(manifestPath)
-    ? JSON.parse(require("node:fs").readFileSync(manifestPath, "utf8"))
-    : { private: true, dependencies: {} };
-  manifest.dependencies[packageName] = args.includes("--save-exact")
-    ? version
-    : "^" + version;
-  mkdirSync(prefix, { recursive: true });
-  writeFileSync(manifestPath, JSON.stringify(manifest));
-  if (spec.startsWith("@earendil-works/pi-coding-agent@")) {
-    const binDir = join(prefix, "node_modules", ".bin");
-    mkdirSync(join(prefix, "node_modules", "@earendil-works", "pi-coding-agent"), { recursive: true });
-    mkdirSync(binDir, { recursive: true });
-    writeFileSync(join(prefix, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"), JSON.stringify({ version, piConfig: { configDir: ".pi" } }));
-    const piPath = join(binDir, "pi");
-    writeFileSync(piPath, '#!/usr/bin/env node\\nprocess.stdout.write(JSON.stringify({ pipiProfile: process.env.PIPI_PROFILE, agentDir: process.env.PI_CODING_AGENT_DIR, pipiAgentDir: process.env.PIPI_CODING_AGENT_DIR, args: process.argv.slice(2) }));\\n');
-    chmodSync(piPath, 0o755);
-  }
-  if (spec.startsWith("pi-mcp-adapter@")) {
-    const packageDir = join(prefix, "node_modules", "pi-mcp-adapter");
-    mkdirSync(packageDir, { recursive: true });
-    writeFileSync(join(packageDir, "package.json"), JSON.stringify({ version: spec.slice(spec.lastIndexOf("@") + 1) }));
-  }
-}
+    `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(npmLog)}
+echo "npm must not be invoked" >&2
+exit 99
 `,
   );
   chmodSync(npmPath, 0o755);
+  const npxPath = join(fakeBin, "npx");
+  writeFileSync(
+    npxPath,
+    `#!/bin/sh
+printf 'npx %s\\n' "$*" >> ${JSON.stringify(npmLog)}
+echo "npx must not be invoked" >&2
+exit 98
+`,
+  );
+  chmodSync(npxPath, 0o755);
+  const curlPath = join(fakeBin, "curl");
+  writeFileSync(curlPath, "#!/bin/sh\nprintf '{}\\n'\n");
+  chmodSync(curlPath, 0o755);
   writeFileSync(
     join(codexTools, "package.json"),
     JSON.stringify({ name: "pi-codex-tools" }),
@@ -149,18 +218,97 @@ if (args[0] === "install") {
     HOME: home,
     HERDR_TEST_LOG: herdrLog,
     PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+    PIPI_BUN_RUNTIME: fakeBunPath,
+    PIPI_TEST_BUN_INSTALL_LOG: bunInstallLog,
+    PIPI_TEST_PI_FIXTURE: piPath,
   });
 
   return {
     home,
     fakeBin,
     piPath,
+    fakeBunPath,
+    bunInstallLog,
+    npmLog,
     codexPath,
     codexTools,
     herdrLog,
     env,
   };
 };
+
+const snapshotTree = (path) => {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return { type: "absent" };
+    }
+    throw error;
+  }
+  const mode = stat.mode & 0o777;
+  if (stat.isSymbolicLink()) {
+    return { type: "symlink", mode, target: readlinkSync(path) };
+  }
+  if (stat.isDirectory()) {
+    return {
+      type: "directory",
+      mode,
+      entries: Object.fromEntries(
+        readdirSync(path)
+          .sort()
+          .map((entry) => [entry, snapshotTree(join(path, entry))]),
+      ),
+    };
+  }
+  return {
+    type: "file",
+    mode,
+    bytes: readFileSync(path).toString("base64"),
+  };
+};
+
+const snapshotManagedState = (home) => ({
+  pipi: snapshotTree(join(home, ".pipi")),
+  launcher: snapshotTree(join(home, ".local", "bin", "pipi")),
+  lock: snapshotTree(join(home, ".pipi-install-lock")),
+  stages: readdirSync(home)
+    .filter((entry) => entry.startsWith(".pipi-install-stage-"))
+    .sort(),
+});
+
+const snapshotRepositoryAuthority = () => {
+  const paths = [
+    "package.json",
+    "bun.lock",
+    "config/pipi-runtime/package.json",
+    "config/pipi-runtime/bun.lock",
+    ...readdirSync(join(repositoryRoot, "extensions"), {
+      withFileTypes: true,
+    })
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          existsSync(
+            join(repositoryRoot, "extensions", entry.name, "package.json"),
+          ),
+      )
+      .map((entry) => `extensions/${entry.name}/package.json`)
+      .sort(),
+  ];
+  return Object.fromEntries(
+    paths.map((path) => [
+      path,
+      readFileSync(join(repositoryRoot, path)).toString("base64"),
+    ]),
+  );
+};
+
+const browserTransactionArtifacts = (browserTarget) =>
+  readdirSync(dirname(browserTarget))
+    .filter((entry) => entry.startsWith(`${basename(browserTarget)}.`))
+    .sort();
 
 const addFakeHerdr = (
   fixture,
@@ -169,7 +317,7 @@ const addFakeHerdr = (
   const herdrPath = join(fixture.fakeBin, "herdr");
   writeFileSync(
     herdrPath,
-    `#!/usr/bin/env node
+    `#!${process.execPath}
 const { appendFileSync, mkdirSync, writeFileSync } = require("node:fs");
 const { dirname, join } = require("node:path");
 const record = {
@@ -194,9 +342,7 @@ const install = (fixture, extraArgs = []) =>
     process.execPath,
     [
       installScript,
-      "--skip-dependencies",
-      "--pi",
-      fixture.piPath,
+      "--skip-repository-dependencies",
       "--codex-tools",
       fixture.codexTools,
       ...extraArgs,
@@ -207,13 +353,25 @@ const install = (fixture, extraArgs = []) =>
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 
 const expectedBrowserMcpServers = (home) => {
-  const skillDir = join(home, ".pipi", "agent", "skills", "browser-chrome");
-  const commonEnv = { CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1" };
+  const agentDir = join(home, ".pipi", "agent");
+  const skillDir = join(agentDir, "skills", "browser-chrome");
+  const browserBunWrapper = join(agentDir, "bin", "pipi-browser-bun");
+  const bunRuntime = join(home, "fake-bin", "bun");
+  const commonEnv = {
+    CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1",
+    PIPI_BUN_RUNTIME: bunRuntime,
+    BROWSER_CHROME_NPX: browserBunWrapper,
+    BROWSER_CHROME_MCP_PACKAGE: "chrome-devtools-mcp@1.8.0",
+  };
   return {
     "browser-chrome-control": {
       command: join(skillDir, "scripts", "control-mcp.sh"),
       args: [],
       lifecycle: "lazy",
+      env: {
+        BROWSER_CHROME_NODE: bunRuntime,
+        PIPI_BUN_RUNTIME: bunRuntime,
+      },
     },
     "browser-chrome-headed": {
       command: join(skillDir, "scripts", "mcp.sh"),
@@ -278,6 +436,13 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     existsSync(join(fixture.home, ".pipi", "agent", "auth.json")),
     false,
   );
+  assert.equal(
+    readFileSync(join(fixture.home, ".pipi", "agent", "models.json"), "utf8"),
+    readFileSync(
+      join(repositoryRoot, "config", "pipi-model-overrides.json"),
+      "utf8",
+    ),
+  );
 
   const settings = readJson(settingsPath);
   assert.equal(settings.defaultProvider, "provider-test");
@@ -286,7 +451,7 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   assert.equal(settings.theme, "github-dark-default");
   assert.deepEqual(settings.packages, [
     repositoryRoot,
-    mcpAdapterPackage,
+    mcpAdapterPackage(fixture.home),
     fixture.codexTools,
   ]);
 
@@ -316,6 +481,30 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   assert.deepEqual(readJson(pipiMcpPath), {
     mcpServers: expectedBrowserMcpServers(fixture.home),
   });
+  const browserBunWrapper = join(pipiAgentDir, "bin", "pipi-browser-bun");
+  assert.equal(lstatSync(browserBunWrapper).mode & 0o111, 0o100);
+  assert.doesNotMatch(readFileSync(browserBunWrapper, "utf8"), /npm exec/);
+  assert.match(readFileSync(browserBunWrapper, "utf8"), /PIPI_BUN_RUNTIME/);
+  const browserProbe = JSON.parse(
+    execFileSync(
+      browserBunWrapper,
+      ["-y", "chrome-devtools-mcp@1.8.0", "argument with spaces"],
+      {
+        env: {
+          ...fixture.env,
+          PIPI_BUN_RUNTIME: fixture.fakeBunPath,
+        },
+        encoding: "utf8",
+      },
+    ),
+  );
+  assert.deepEqual(browserProbe, {
+    execPath: process.execPath,
+    bunVersion: process.versions.bun,
+    noUpdateChecks: "1",
+    args: ["argument with spaces"],
+  });
+  assert.equal(existsSync(fixture.npmLog), false);
   assert.equal(
     readFileSync(join(regularAgentDir, "mcp.json"), "utf8"),
     regularMcp,
@@ -335,6 +524,11 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     sessionDir: join(fixture.home, ".pipi", "sessions"),
     pipiAgentDir: join(fixture.home, ".pipi", "agent"),
     pipiSessionDir: join(fixture.home, ".pipi", "sessions"),
+    runtime: "bun",
+    bunRuntime: fixture.fakeBunPath,
+    browserRuntime: fixture.fakeBunPath,
+    execPath: process.execPath,
+    bunVersion: process.versions.bun,
     codex: fixture.codexPath,
     args: ["--version", "argument with spaces"],
   });
@@ -469,40 +663,14 @@ test("install rejects a false-success Herdr integration result", async (t) => {
 
 test("Pi package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
   const manifest = readJson(join(repositoryRoot, "package.json"));
-  const lockfile = readJson(join(repositoryRoot, "package-lock.json"));
-  const rootPackages = lockfile.packages;
+  const lockfile = readBunLock(join(repositoryRoot, "bun.lock"));
 
-  for (const packageName of [
-    "@earendil-works/pi-ai",
-    "@earendil-works/pi-coding-agent",
-    "@earendil-works/pi-tui",
-  ]) {
-    assert.equal(manifest.dependencies[packageName], `^${runtimePiVersion}`);
-    assert.equal(
-      rootPackages[`node_modules/${packageName}`].version,
-      runtimePiVersion,
-    );
-  }
-  assert.equal(manifest.dependencies.typebox, "^1.3.7");
-  assert.equal(rootPackages["node_modules/typebox"].version, "1.3.7");
-
-  const codingAgent = rootPackages[`node_modules/${runtimePiPackage}`];
-  assert.deepEqual(
-    {
-      "@earendil-works/pi-agent-core":
-        codingAgent.dependencies["@earendil-works/pi-agent-core"],
-      "@earendil-works/pi-ai":
-        codingAgent.dependencies["@earendil-works/pi-ai"],
-      "@earendil-works/pi-tui":
-        codingAgent.dependencies["@earendil-works/pi-tui"],
-      typebox: codingAgent.dependencies.typebox,
-    },
-    {
-      "@earendil-works/pi-agent-core": `^${runtimePiVersion}`,
-      "@earendil-works/pi-ai": `^${runtimePiVersion}`,
-      "@earendil-works/pi-tui": `^${runtimePiVersion}`,
-      typebox: "1.3.7",
-    },
+  assert.equal(validatePipiVersionState(repositoryRoot), runtimePiVersion);
+  assert.equal(manifest.dependencies.typebox, "1.3.7");
+  assert.match(lockfile.packages.typebox[0], /typebox@1\.3\.7$/);
+  assert.equal(
+    lockfile.packages[runtimePiPackage][2].dependencies.typebox,
+    "1.3.7",
   );
 });
 
@@ -630,14 +798,14 @@ test("default install replaces sibling Codex tools with the pinned submodule", a
 
   const result = spawnSync(
     process.execPath,
-    [installScript, "--skip-dependencies", "--pi", fixture.piPath],
+    [installScript, "--skip-repository-dependencies"],
     { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
   );
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(readJson(join(pipiAgentDir, "settings.json")).packages, [
     repositoryRoot,
-    mcpAdapterPackage,
+    mcpAdapterPackage(fixture.home),
     codexSubmodule,
   ]);
 });
@@ -654,12 +822,14 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(
-    result.stdout.includes(`Installing dependencies in ${codexSubmodule}`),
+    result.stdout.includes(
+      `Preparing repository Bun workspace dependency cache in ${repositoryRoot}`,
+    ),
     true,
   );
-  const pipiNpm = join(fixture.home, ".pipi", "agent", "npm");
+  const pipiRuntime = join(fixture.home, ".pipi", "agent", "runtime");
   const runtimeManifestPath = join(
-    pipiNpm,
+    pipiRuntime,
     "node_modules",
     "@earendil-works",
     "pi-coding-agent",
@@ -667,29 +837,38 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
   );
   const installedRuntime = readJson(runtimeManifestPath);
   assert.equal(installedRuntime.version, runtimePiVersion);
+  assert.equal(existsSync(fixture.npmLog), false);
   assert.deepEqual(installedRuntime.piConfig, {
     configDir: ".pi",
     name: "pipi",
   });
   assert.equal(
-    readJson(join(pipiNpm, "node_modules", "pi-mcp-adapter", "package.json"))
-      .version,
+    readJson(
+      join(pipiRuntime, "node_modules", "pi-mcp-adapter", "package.json"),
+    ).version,
     "2.15.0",
   );
-  const isolatedManifest = readJson(join(pipiNpm, "package.json"));
+  const isolatedManifest = readJson(join(pipiRuntime, "package.json"));
   assert.deepEqual(isolatedManifest.dependencies, {
     "@earendil-works/pi-coding-agent": runtimePiVersion,
+    "chrome-devtools-mcp": "1.8.0",
     "pi-mcp-adapter": "2.15.0",
   });
-  assert.deepEqual(isolatedManifest.allowScripts, {
-    "@google/genai@1.52.0": true,
-    "protobufjs@7.6.5": true,
-  });
+  assert.deepEqual(isolatedManifest.trustedDependencies, [
+    "@google/genai",
+    "protobufjs",
+  ]);
   const launcherPath = join(fixture.home, ".local", "bin", "pipi");
   const launcher = readFileSync(launcherPath, "utf8");
   assert.match(
     launcher,
-    new RegExp(`exec '${join(pipiNpm, "node_modules", ".bin", "pi")}'`),
+    new RegExp(`export PIPI_BUN_RUNTIME='${fixture.fakeBunPath}'`),
+  );
+  assert.match(
+    launcher,
+    new RegExp(
+      `exec "\\$PIPI_BUN_RUNTIME" '${join(pipiRuntime, "node_modules", ".bin", "pi")}'`,
+    ),
   );
   assert.equal(launcher.includes(fixture.piPath), false);
   assert.deepEqual(
@@ -702,7 +881,15 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
     {
       pipiProfile: "1",
       agentDir: join(fixture.home, ".pipi", "agent"),
+      sessionDir: join(fixture.home, ".pipi", "sessions"),
       pipiAgentDir: join(fixture.home, ".pipi", "agent"),
+      pipiSessionDir: join(fixture.home, ".pipi", "sessions"),
+      runtime: "bun",
+      bunRuntime: fixture.fakeBunPath,
+      browserRuntime: fixture.fakeBunPath,
+      execPath: process.execPath,
+      bunVersion: process.versions.bun,
+      codex: fixture.codexPath,
       args: ["--version"],
     },
   );
@@ -711,12 +898,8 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
     runtimeManifestPath,
     `${JSON.stringify({ ...installedRuntime, piConfig: { configDir: ".pi" } })}\n`,
   );
-  const skipped = spawnSync(
-    process.execPath,
-    [installScript, "--skip-dependencies", "--codex-tools", fixture.codexTools],
-    { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
-  );
-  assert.equal(skipped.status, 0, skipped.stderr);
+  const reinstalled = install(fixture);
+  assert.equal(reinstalled.status, 0, reinstalled.stderr);
   assert.equal(readFileSync(launcherPath, "utf8"), launcher);
   assert.deepEqual(readJson(runtimeManifestPath).piConfig, {
     configDir: ".pi",
@@ -770,11 +953,11 @@ test("repository dependency skip still installs isolated runtime dependencies", 
     false,
   );
 
-  const pipiNpm = join(fixture.home, ".pipi", "agent", "npm");
+  const pipiRuntime = join(fixture.home, ".pipi", "agent", "runtime");
   assert.equal(
     readJson(
       join(
-        pipiNpm,
+        pipiRuntime,
         "node_modules",
         "@earendil-works",
         "pi-coding-agent",
@@ -784,30 +967,94 @@ test("repository dependency skip still installs isolated runtime dependencies", 
     runtimePiVersion,
   );
   assert.equal(
-    readJson(join(pipiNpm, "node_modules", "pi-mcp-adapter", "package.json"))
-      .version,
+    readJson(
+      join(pipiRuntime, "node_modules", "pi-mcp-adapter", "package.json"),
+    ).version,
     "2.15.0",
   );
 });
 
-test("install repairs non-exact isolated package metadata", async (t) => {
+test("failed isolated Bun preparation preserves the prior runtime for retry", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const runtime = join(fixture.home, ".pipi", "agent", "runtime");
+  mkdirSync(runtime, { recursive: true });
+  writeFileSync(join(runtime, "preserved"), "previous working runtime\n");
+
+  const failed = spawnSync(
+    process.execPath,
+    [installScript, "--codex-tools", fixture.codexTools],
+    {
+      cwd: repositoryRoot,
+      env: { ...fixture.env, PIPI_TEST_BUN_INSTALL_FAIL: "1" },
+      encoding: "utf8",
+    },
+  );
+  assert.notEqual(failed.status, 0);
+  assert.equal(
+    readFileSync(join(runtime, "preserved"), "utf8"),
+    "previous working runtime\n",
+  );
+  assert.equal(
+    existsSync(join(fixture.home, ".pipi", "agent", ".pipi-install-lock")),
+    false,
+  );
+
+  const retry = spawnSync(
+    process.execPath,
+    [installScript, "--codex-tools", fixture.codexTools],
+    { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
+  );
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.equal(existsSync(join(runtime, "preserved")), false);
+  assert.equal(
+    readJson(
+      join(
+        runtime,
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "package.json",
+      ),
+    ).version,
+    runtimePiVersion,
+  );
+});
+
+test("installer lock rejects concurrent mutation of one Pipi HOME", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const agentDir = join(fixture.home, ".pipi", "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const settings = join(agentDir, "settings.json");
+  writeFileSync(settings, '{"preserved":true}\n');
+  const heldLock = acquireInstallLock({ home: fixture.home });
+  t.after(() => heldLock.release());
+
+  const result = install(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Another Pipi installer is active/);
+  assert.equal(readFileSync(settings, "utf8"), '{"preserved":true}\n');
+});
+
+test("install repairs stale isolated Bun package metadata", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
 
-  const pipiNpm = join(fixture.home, ".pipi", "agent", "npm");
+  const pipiRuntime = join(fixture.home, ".pipi", "agent", "runtime");
   const piPackageDir = join(
-    pipiNpm,
+    pipiRuntime,
     "node_modules",
     "@earendil-works",
     "pi-coding-agent",
   );
-  const mcpPackageDir = join(pipiNpm, "node_modules", "pi-mcp-adapter");
-  const binDir = join(pipiNpm, "node_modules", ".bin");
+  const mcpPackageDir = join(pipiRuntime, "node_modules", "pi-mcp-adapter");
+  const binDir = join(pipiRuntime, "node_modules", ".bin");
   mkdirSync(piPackageDir, { recursive: true });
   mkdirSync(mcpPackageDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
   writeFileSync(
-    join(pipiNpm, "package.json"),
+    join(pipiRuntime, "package.json"),
     JSON.stringify({
       private: true,
       dependencies: {
@@ -838,24 +1085,307 @@ test("install repairs non-exact isolated package metadata", async (t) => {
     { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
   );
   assert.equal(result.status, 0, result.stderr);
-  const isolatedManifest = readJson(join(pipiNpm, "package.json"));
+  const isolatedManifest = readJson(join(pipiRuntime, "package.json"));
   assert.deepEqual(isolatedManifest.dependencies, {
     "@earendil-works/pi-coding-agent": runtimePiVersion,
+    "chrome-devtools-mcp": "1.8.0",
     "pi-mcp-adapter": "2.15.0",
   });
-  assert.deepEqual(isolatedManifest.allowScripts, {
-    "@google/genai@1.52.0": true,
-    "protobufjs@7.6.5": true,
-  });
+  assert.deepEqual(isolatedManifest.trustedDependencies, [
+    "@google/genai",
+    "protobufjs",
+  ]);
 });
 
-test("skipped dependency installation ignores npm's repository-local binary shim", async (t) => {
+test("browser asset activation and rollback restore a dangling target without following it", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pipi-browser-assets-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, "source");
+  const target = join(root, "managed", "browser-chrome");
+  const externalTarget = join(root, "external", "missing-browser-skill");
+  mkdirSync(source, { recursive: true });
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(join(source, "SKILL.md"), "fresh browser skill\n");
+
+  symlinkSync(externalTarget, target);
+  const before = snapshotTree(target);
+  let observedBackup;
+  assert.throws(
+    () =>
+      installAssetDirectory(source, target, {
+        beforeActivation: ({ backup, stage }) => {
+          observedBackup = backup;
+          assert.equal(snapshotTree(target).type, "absent");
+          assert.deepEqual(snapshotTree(backup), before);
+          assert.equal(snapshotTree(stage).type, "directory");
+          assert.equal(snapshotTree(externalTarget).type, "absent");
+          throw new Error("injected browser asset activation failure");
+        },
+      }),
+    /injected browser asset activation failure/,
+  );
+  assert.deepEqual(snapshotTree(target), before);
+  assert.equal(snapshotTree(externalTarget).type, "absent");
+  assert.equal(snapshotTree(observedBackup).type, "absent");
+  assert.deepEqual(browserTransactionArtifacts(target), []);
+
+  const transaction = installAssetDirectory(source, target);
+  assert.equal(lstatSync(target).isDirectory(), true);
+  assert.equal(
+    readFileSync(join(target, "SKILL.md"), "utf8"),
+    "fresh browser skill\n",
+  );
+  assert.equal(snapshotTree(externalTarget).type, "absent");
+  transaction.rollback();
+  assert.deepEqual(snapshotTree(target), before);
+  assert.equal(snapshotTree(externalTarget).type, "absent");
+  assert.deepEqual(browserTransactionArtifacts(target), []);
+});
+
+test("browser asset replacement preserves a pre-existing dangling backup until commit", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pipi-browser-backup-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, "source");
+  const target = join(root, "managed", "browser-chrome");
+  const backup = `${target}.rollback-${process.pid}`;
+  const externalTarget = join(root, "external", "missing-browser-skill");
+  const externalBackupTarget = join(root, "external", "missing-browser-backup");
+  mkdirSync(source, { recursive: true });
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(join(source, "SKILL.md"), "fresh browser skill\n");
+  symlinkSync(externalTarget, target);
+  symlinkSync(externalBackupTarget, backup);
+  const before = {
+    target: snapshotTree(target),
+    backup: snapshotTree(backup),
+  };
+
+  assert.throws(
+    () =>
+      installAssetDirectory(source, target, {
+        beforeActivation: () => {
+          assert.equal(snapshotTree(target).type, "absent");
+          assert.deepEqual(snapshotTree(backup), before.target);
+          throw new Error("injected activation with occupied backup");
+        },
+      }),
+    /injected activation with occupied backup/,
+  );
+  assert.deepEqual(snapshotTree(target), before.target);
+  assert.deepEqual(snapshotTree(backup), before.backup);
+  assert.equal(snapshotTree(externalTarget).type, "absent");
+  assert.equal(snapshotTree(externalBackupTarget).type, "absent");
+  assert.deepEqual(browserTransactionArtifacts(target), [basename(backup)]);
+
+  const rolledBack = installAssetDirectory(source, target);
+  rolledBack.rollback();
+  assert.deepEqual(snapshotTree(target), before.target);
+  assert.deepEqual(snapshotTree(backup), before.backup);
+  assert.deepEqual(browserTransactionArtifacts(target), [basename(backup)]);
+
+  const committed = installAssetDirectory(source, target);
+  committed.commit();
+  assert.equal(lstatSync(target).isDirectory(), true);
+  assert.equal(snapshotTree(backup).type, "absent");
+  assert.equal(snapshotTree(externalTarget).type, "absent");
+  assert.equal(snapshotTree(externalBackupTarget).type, "absent");
+  assert.deepEqual(browserTransactionArtifacts(target), []);
+});
+
+test("normal and repository-skip reinstall replace a dangling browser skill", async () => {
+  for (const skipRepositoryDependencies of [false, true]) {
+    const fixture = await createFixture();
+    try {
+      const browserTarget = join(
+        fixture.home,
+        ".pipi",
+        "agent",
+        "skills",
+        "browser-chrome",
+      );
+      const externalTarget = join(
+        fixture.home,
+        "external",
+        "missing-browser-skill",
+      );
+      mkdirSync(dirname(browserTarget), { recursive: true });
+      symlinkSync(externalTarget, browserTarget);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          installScript,
+          ...(skipRepositoryDependencies
+            ? ["--skip-repository-dependencies"]
+            : []),
+          "--codex-tools",
+          fixture.codexTools,
+        ],
+        { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(lstatSync(browserTarget).isDirectory(), true);
+      assert.equal(lstatSync(browserTarget).isSymbolicLink(), false);
+      assert.equal(
+        existsSync(join(browserTarget, "scripts", "control-mcp.sh")),
+        true,
+      );
+      assert.equal(snapshotTree(externalTarget).type, "absent");
+      assert.deepEqual(browserTransactionArtifacts(browserTarget), []);
+      assert.deepEqual(snapshotManagedState(fixture.home).stages, []);
+      const rootPreflights = readFileSync(fixture.bunInstallLog, "utf8")
+        .trim()
+        .split("\n")
+        .filter((line) => line.includes(`--cwd ${repositoryRoot}`));
+      assert.equal(rootPreflights.length, skipRepositoryDependencies ? 0 : 1);
+      assert.equal(existsSync(fixture.npmLog), false);
+    } finally {
+      await rm(fixture.home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("late managed failure restores a dangling browser skill exactly", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const browserTarget = join(
+    fixture.home,
+    ".pipi",
+    "agent",
+    "skills",
+    "browser-chrome",
+  );
+  const externalTarget = join(
+    fixture.home,
+    "external",
+    "missing-browser-skill",
+  );
+  mkdirSync(dirname(browserTarget), { recursive: true });
+  symlinkSync(externalTarget, browserTarget);
+  const before = snapshotManagedState(fixture.home);
 
   const result = spawnSync(
     process.execPath,
-    [installScript, "--skip-dependencies", "--codex-tools", fixture.codexTools],
+    [
+      installScript,
+      "--skip-repository-dependencies",
+      "--codex-tools",
+      fixture.codexTools,
+    ],
+    {
+      cwd: repositoryRoot,
+      env: {
+        ...fixture.env,
+        PIPI_TEST_FAIL_AFTER_STEP: "launcher-stage",
+      },
+      encoding: "utf8",
+    },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /after launcher-stage/);
+  assert.deepEqual(snapshotManagedState(fixture.home), before);
+  assert.equal(snapshotTree(externalTarget).type, "absent");
+  assert.deepEqual(browserTransactionArtifacts(browserTarget), []);
+  assert.equal(existsSync(fixture.npmLog), false);
+});
+
+test("repository preflight remains retryable after a late managed failure", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const authorityBefore = snapshotRepositoryAuthority();
+  const managedBefore = snapshotManagedState(fixture.home);
+
+  const failed = spawnSync(
+    process.execPath,
+    [installScript, "--codex-tools", fixture.codexTools],
+    {
+      cwd: repositoryRoot,
+      env: {
+        ...fixture.env,
+        PIPI_TEST_FAIL_AFTER_STEP: "launcher-stage",
+      },
+      encoding: "utf8",
+    },
+  );
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /after launcher-stage/);
+  assert.deepEqual(snapshotManagedState(fixture.home), managedBefore);
+  assert.deepEqual(snapshotRepositoryAuthority(), authorityBefore);
+
+  const retry = spawnSync(
+    process.execPath,
+    [installScript, "--codex-tools", fixture.codexTools],
+    { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
+  );
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.deepEqual(snapshotRepositoryAuthority(), authorityBefore);
+  const rootPreflights = readFileSync(fixture.bunInstallLog, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => line.includes(`--cwd ${repositoryRoot}`));
+  assert.equal(rootPreflights.length, 2);
+  assert.deepEqual(snapshotManagedState(fixture.home).stages, []);
+  assert.equal(existsSync(fixture.npmLog), false);
+});
+
+test("normal install replaces a dangling isolated-runtime path with a fresh runtime", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const agentDir = join(fixture.home, ".pipi", "agent");
+  const runtime = join(agentDir, "runtime");
+  const missingTarget = join(fixture.home, "missing-external-runtime");
+  mkdirSync(agentDir, { recursive: true });
+  symlinkSync(missingTarget, runtime);
+
+  const result = install(fixture);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(lstatSync(runtime).isDirectory(), true);
+  assert.equal(lstatSync(runtime).isSymbolicLink(), false);
+  assert.equal(existsSync(missingTarget), false);
+  assert.equal(
+    readJson(
+      join(
+        runtime,
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "package.json",
+      ),
+    ).piConfig.name,
+    "pipi",
+  );
+});
+
+test("normal reinstall ignores a repository-local Pi shim and refreshes isolated runtime", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const prepared = install(fixture);
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const runtime = join(fixture.home, ".pipi", "agent", "runtime");
+  const staleRuntimeMarker = join(runtime, "mutable-runtime-sentinel");
+  const browserEntrypoint = join(
+    runtime,
+    "node_modules",
+    "chrome-devtools-mcp",
+    "build",
+    "src",
+    "bin",
+    "chrome-devtools-mcp.js",
+  );
+  writeFileSync(staleRuntimeMarker, "must be removed by fresh staging\n");
+  writeFileSync(
+    browserEntrypoint,
+    "throw new Error('stale browser dependency');\n",
+  );
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      installScript,
+      "--skip-repository-dependencies",
+      "--codex-tools",
+      fixture.codexTools,
+    ],
     {
       cwd: repositoryRoot,
       env: {
@@ -871,8 +1401,26 @@ test("skipped dependency installation ignores npm's repository-local binary shim
     join(fixture.home, ".local", "bin", "pipi"),
     "utf8",
   );
-  assert.match(launcher, new RegExp(`exec '${fixture.piPath}'`));
+  assert.match(
+    launcher,
+    new RegExp(`export PIPI_BUN_RUNTIME='${fixture.fakeBunPath}'`),
+  );
+  assert.match(
+    launcher,
+    new RegExp(
+      `exec "\\$PIPI_BUN_RUNTIME" '${join(fixture.home, ".pipi", "agent", "runtime", "node_modules", ".bin", "pi")}'`,
+    ),
+  );
   assert.equal(launcher.includes(join(repositoryRoot, "node_modules")), false);
+  assert.equal(existsSync(staleRuntimeMarker), false);
+  assert.doesNotMatch(readFileSync(browserEntrypoint, "utf8"), /stale browser/);
+  const isolatedInstalls = readFileSync(fixture.bunInstallLog, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => line.includes("runtime.stage-"));
+  assert.equal(isolatedInstalls.length, 2);
+  assert.notEqual(isolatedInstalls[0], isolatedInstalls[1]);
+  assert.equal(existsSync(fixture.npmLog), false);
 });
 
 test("existing Pipi settings retain unrelated values and packages", async (t) => {
@@ -922,7 +1470,10 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
     packages: [
       "existing-package",
       repositoryRoot,
-      { source: mcpAdapterPackage, extensions: ["index.ts"] },
+      {
+        source: mcpAdapterPackage(fixture.home),
+        extensions: ["index.ts"],
+      },
       fixture.codexTools,
     ],
   });
@@ -954,7 +1505,7 @@ test("install rejects uninitialized submodules before writing Pipi state", async
     process.execPath,
     [
       join(cloneRoot, "scripts", "install.mjs"),
-      "--skip-dependencies",
+      "--skip-repository-dependencies",
       "--pi",
       fixture.piPath,
       "--codex-tools",
@@ -1023,7 +1574,7 @@ test("install rejects every configured missing submodule asset before writing Pi
         process.execPath,
         [
           join(cloneRoot, "scripts", "install.mjs"),
-          "--skip-dependencies",
+          "--skip-repository-dependencies",
           "--pi",
           fixture.piPath,
           "--codex-tools",
@@ -1104,7 +1655,7 @@ test("install rejects backlog submodule pin, origin, and cleanliness drift befor
       process.execPath,
       [
         join(cloneRoot, "scripts", "install.mjs"),
-        "--skip-dependencies",
+        "--skip-repository-dependencies",
         "--pi",
         fixture.piPath,
         "--codex-tools",
@@ -1171,12 +1722,56 @@ test("install rejects backlog submodule pin, origin, and cleanliness drift befor
   );
 });
 
+test("install rejects missing, old, and prerelease Bun before managed mutation", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const oldBun = join(fixture.fakeBin, "old-bun");
+  const prereleaseBun = join(fixture.fakeBin, "prerelease-bun");
+  writeFileSync(oldBun, "#!/bin/sh\nprintf '1.3.9\\n'\n", { mode: 0o755 });
+  writeFileSync(prereleaseBun, "#!/bin/sh\nprintf '1.4.1-canary.2\\n'\n", {
+    mode: 0o755,
+  });
+
+  for (const [name, bun, pattern] of [
+    [
+      "missing",
+      join(fixture.home, "missing-bun"),
+      /Bun >= 1\.4\.0.*PIPI_BUN_RUNTIME/,
+    ],
+    ["old", oldBun, /Bun >= 1\.4\.0.*unsupported 1\.3\.9/],
+    [
+      "prerelease",
+      prereleaseBun,
+      /Bun >= 1\.4\.0.*unsupported 1\.4\.1-canary\.2/,
+    ],
+  ]) {
+    const before = snapshotManagedState(fixture.home);
+    const result = install(fixture, ["--bun", bun]);
+    assert.notEqual(result.status, 0, name);
+    assert.match(result.stderr, pattern, name);
+    assert.deepEqual(snapshotManagedState(fixture.home), before, name);
+    assert.equal(existsSync(fixture.bunInstallLog), false, name);
+    assert.equal(existsSync(fixture.npmLog), false, name);
+  }
+});
+
 test("install refuses a missing Pi executable before writing files", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
-  fixture.piPath = join(fixture.home, "missing-pi");
+  const missingPi = join(fixture.home, "missing-pi");
 
-  const result = install(fixture);
+  const result = spawnSync(
+    process.execPath,
+    [
+      installScript,
+      "--skip-repository-dependencies",
+      "--pi",
+      missingPi,
+      "--codex-tools",
+      fixture.codexTools,
+    ],
+    { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
+  );
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Pi executable/);
   assert.equal(existsSync(join(fixture.home, ".local", "bin", "pipi")), false);
@@ -1215,6 +1810,605 @@ test("auth sharing is explicit and creates a symlink without copying", async (t)
   assert.equal(lstatSync(pipiAuthPath).isSymbolicLink(), true);
   assert.equal(readlinkSync(pipiAuthPath), regularAuthPath);
   assert.equal(readFileSync(regularAuthPath, "utf8"), secret);
+});
+
+test("late installer failures restore the complete prior managed state", async (t) => {
+  const steps = [
+    "legacy-removals",
+    "runtime",
+    "browser-assets",
+    "browser-boundary",
+    "mcp-config",
+    "settings-config",
+    "model-config",
+    "agent-activation",
+    "herdr-integration",
+    "auth-link",
+    "launcher-stage",
+    "session-activation",
+    "launcher-activation",
+  ];
+
+  for (const step of steps) {
+    const fixture = await createFixture();
+    try {
+      addFakeHerdr(fixture);
+      const agentDir = join(fixture.home, ".pipi", "agent");
+      const sessionDir = join(fixture.home, ".pipi", "sessions");
+      const launcher = join(fixture.home, ".local", "bin", "pipi");
+      mkdirSync(join(agentDir, "skills", "aad-task-package"), {
+        recursive: true,
+      });
+      mkdirSync(join(agentDir, "npm", "node_modules", "legacy"), {
+        recursive: true,
+      });
+      mkdirSync(join(agentDir, "extensions"), { recursive: true });
+      mkdirSync(sessionDir, { recursive: true });
+      mkdirSync(dirname(launcher), { recursive: true });
+      writeFileSync(join(agentDir, "settings.json"), '{"prior":true}\n', {
+        mode: 0o640,
+      });
+      writeFileSync(join(agentDir, "mcp.json"), '{"mcpServers":{}}\n', {
+        mode: 0o620,
+      });
+      writeFileSync(join(agentDir, "models.json"), '{"priorModel":true}\n', {
+        mode: 0o600,
+      });
+      writeFileSync(
+        join(agentDir, "extensions", "herdr-agent-state.ts"),
+        "// prior integration\n",
+        { mode: 0o640 },
+      );
+      writeFileSync(
+        join(agentDir, "skills", "aad-task-package", "SKILL.md"),
+        "prior removed skill\n",
+      );
+      writeFileSync(
+        join(agentDir, "npm", "node_modules", "legacy", "state"),
+        "prior removed runtime\n",
+      );
+      writeFileSync(
+        join(sessionDir, "prior-session.jsonl"),
+        "prior session\n",
+        {
+          mode: 0o640,
+        },
+      );
+      writeFileSync(
+        launcher,
+        "#!/bin/sh\n# Managed by pipi-alias installer.\necho prior\n",
+        { mode: 0o751 },
+      );
+      const regularAuth = join(fixture.home, ".pi", "agent", "auth.json");
+      mkdirSync(dirname(regularAuth), { recursive: true });
+      writeFileSync(regularAuth, '{"secret":"never-read-by-snapshot"}\n', {
+        mode: 0o600,
+      });
+
+      const before = snapshotManagedState(fixture.home);
+      const result = spawnSync(
+        process.execPath,
+        [
+          installScript,
+          "--skip-repository-dependencies",
+          "--share-auth",
+          "--codex-tools",
+          fixture.codexTools,
+        ],
+        {
+          cwd: repositoryRoot,
+          env: { ...fixture.env, PIPI_TEST_FAIL_AFTER_STEP: step },
+          encoding: "utf8",
+        },
+      );
+      assert.notEqual(result.status, 0, step);
+      assert.match(result.stderr, new RegExp(`after ${step}`), step);
+      assert.deepEqual(snapshotManagedState(fixture.home), before, step);
+      assert.equal(lstatSync(regularAuth).mode & 0o777, 0o600, step);
+    } finally {
+      await rm(fixture.home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a failing late Herdr command restores configs, removals, links, launcher, and modes", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  addFakeHerdr(fixture, { fail: true });
+  const agentDir = join(fixture.home, ".pipi", "agent");
+  const launcher = join(fixture.home, ".local", "bin", "pipi");
+  mkdirSync(join(agentDir, "npm"), { recursive: true });
+  mkdirSync(dirname(launcher), { recursive: true });
+  writeFileSync(join(agentDir, "settings.json"), '{"prior":true}\n', {
+    mode: 0o640,
+  });
+  writeFileSync(join(agentDir, "mcp.json"), '{"mcpServers":{}}\n', {
+    mode: 0o620,
+  });
+  writeFileSync(join(agentDir, "npm", "prior"), "restore removal\n");
+  writeFileSync(
+    launcher,
+    "#!/bin/sh\n# Managed by pipi-alias installer.\necho prior\n",
+    { mode: 0o751 },
+  );
+  const before = snapshotManagedState(fixture.home);
+
+  const result = install(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /Failed to install the official Herdr Pi integration/,
+  );
+  assert.deepEqual(snapshotManagedState(fixture.home), before);
+});
+
+test("fresh-state activation failures remove every created managed directory", async (t) => {
+  for (const step of [
+    "agent-activation",
+    "session-activation",
+    "launcher-activation",
+  ]) {
+    const fixture = await createFixture();
+    try {
+      const before = snapshotManagedState(fixture.home);
+      const result = spawnSync(
+        process.execPath,
+        [
+          installScript,
+          "--skip-repository-dependencies",
+          "--codex-tools",
+          fixture.codexTools,
+        ],
+        {
+          cwd: repositoryRoot,
+          env: { ...fixture.env, PIPI_TEST_FAIL_AFTER_STEP: step },
+          encoding: "utf8",
+        },
+      );
+      assert.notEqual(result.status, 0, step);
+      assert.deepEqual(snapshotManagedState(fixture.home), before, step);
+    } finally {
+      await rm(fixture.home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("--skip-dependencies is unsupported before Bun, lock, HOME, launcher, or runtime mutation", async (t) => {
+  for (const name of ["path-pi", "counterfeit-runtime"]) {
+    const fixture = await createFixture();
+    try {
+      if (name === "counterfeit-runtime") {
+        const runtime = join(fixture.home, ".pipi", "agent", "runtime");
+        mkdirSync(runtime, { recursive: true });
+        writeFileSync(
+          join(runtime, "counterfeit"),
+          "mutable runtime must not be reused\n",
+        );
+      }
+      const before = snapshotManagedState(fixture.home);
+      const result = spawnSync(
+        process.execPath,
+        [
+          installScript,
+          "--skip-dependencies",
+          "--codex-tools",
+          fixture.codexTools,
+        ],
+        {
+          cwd: repositoryRoot,
+          env: {
+            ...fixture.env,
+            PIPI_BUN_RUNTIME: join(
+              fixture.home,
+              "counterfeit-bun-that-must-not-be-probed",
+            ),
+          },
+          encoding: "utf8",
+        },
+      );
+      assert.notEqual(result.status, 0, name);
+      assert.match(result.stderr, /--skip-dependencies is unsupported/, name);
+      assert.match(result.stderr, /normal frozen Bun installation/, name);
+      assert.deepEqual(snapshotManagedState(fixture.home), before, name);
+      assert.equal(existsSync(fixture.bunInstallLog), false, name);
+      assert.equal(existsSync(fixture.npmLog), false, name);
+    } finally {
+      await rm(fixture.home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("installer lock recovers dead owners but preserves foreign and malformed locks", async (t) => {
+  const deadFixture = await createFixture();
+  t.after(() => rm(deadFixture.home, { recursive: true, force: true }));
+  const deadToken = randomUUID();
+  const deadLock = join(deadFixture.home, ".pipi-install-lock");
+  symlinkSync(
+    encodeInstallLockOwner({
+      version: 1,
+      host: hostname(),
+      pid: 999_999_999,
+      bootId: null,
+      processStart: "dead-owner",
+      token: deadToken,
+    }),
+    deadLock,
+  );
+  const staleStage = join(deadFixture.home, `.pipi-install-stage-${deadToken}`);
+  mkdirSync(staleStage);
+  writeFileSync(join(staleStage, "partial"), "interrupted\n");
+  const recovered = install(deadFixture);
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.equal(existsSync(staleStage), false);
+  assert.equal(snapshotTree(deadLock).type, "absent");
+
+  for (const [name, createLock, pattern] of [
+    [
+      "foreign",
+      (path) =>
+        symlinkSync(
+          encodeInstallLockOwner({
+            version: 1,
+            host: "foreign-host.invalid",
+            pid: 42,
+            bootId: null,
+            processStart: null,
+            token: randomUUID(),
+          }),
+          path,
+        ),
+      /belongs to another host/,
+    ],
+    ["malformed", (path) => mkdirSync(path), /malformed or ambiguous/],
+    [
+      "truncated",
+      (path) => symlinkSync("pipi-install-lock-v1:truncated", path),
+      /malformed or ambiguous/,
+    ],
+  ]) {
+    const fixture = await createFixture();
+    try {
+      const lockPath = join(fixture.home, ".pipi-install-lock");
+      createLock(lockPath);
+      const result = install(fixture);
+      assert.notEqual(result.status, 0, name);
+      assert.match(result.stderr, pattern, name);
+      assert.notEqual(snapshotTree(lockPath).type, "absent", name);
+      assert.equal(existsSync(join(fixture.home, ".pipi")), false, name);
+    } finally {
+      await rm(fixture.home, { recursive: true, force: true });
+    }
+  }
+
+  const reusedFixture = await createFixture();
+  t.after(() => rm(reusedFixture.home, { recursive: true, force: true }));
+  symlinkSync(
+    encodeInstallLockOwner({
+      version: 1,
+      host: hostname(),
+      pid: process.pid,
+      bootId: null,
+      processStart: "a-different-process-start-identity",
+      token: randomUUID(),
+    }),
+    join(reusedFixture.home, ".pipi-install-lock"),
+  );
+  const reused = install(reusedFixture);
+  assert.equal(reused.status, 0, reused.stderr);
+
+  const recoveryFixture = await createFixture();
+  t.after(() => rm(recoveryFixture.home, { recursive: true, force: true }));
+  const recoveryPath = join(
+    recoveryFixture.home,
+    ".pipi-install-lock.recovery",
+  );
+  symlinkSync(
+    encodeInstallLockOwner({
+      version: 1,
+      host: hostname(),
+      pid: 999_999_999,
+      bootId: null,
+      processStart: "dead-recovery-owner",
+      token: randomUUID(),
+    }),
+    recoveryPath,
+  );
+  const recoveredMarker = install(recoveryFixture);
+  assert.equal(recoveredMarker.status, 0, recoveredMarker.stderr);
+  assert.equal(snapshotTree(recoveryPath).type, "absent");
+
+  const liveRecoveryFixture = await createFixture();
+  t.after(() => rm(liveRecoveryFixture.home, { recursive: true, force: true }));
+  const liveRecoveryPath = join(
+    liveRecoveryFixture.home,
+    ".pipi-install-lock.recovery",
+  );
+  symlinkSync(
+    encodeInstallLockOwner({
+      version: 1,
+      host: hostname(),
+      pid: process.pid,
+      bootId: null,
+      processStart: null,
+      token: randomUUID(),
+    }),
+    liveRecoveryPath,
+  );
+  const liveRecovery = install(liveRecoveryFixture);
+  assert.notEqual(liveRecovery.status, 0);
+  assert.match(liveRecovery.stderr, /recovering stale ownership/);
+  assert.notEqual(snapshotTree(liveRecoveryPath).type, "absent");
+});
+
+test("SIGKILL-left installer ownership is recovered on retry", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const holdMarker = join(fixture.home, "bun-holding");
+  const child = spawn(
+    process.execPath,
+    [
+      installScript,
+      "--skip-repository-dependencies",
+      "--codex-tools",
+      fixture.codexTools,
+    ],
+    {
+      cwd: repositoryRoot,
+      env: { ...fixture.env, PIPI_TEST_BUN_HOLD_MARKER: holdMarker },
+      stdio: "ignore",
+    },
+  );
+  for (
+    let attempt = 0;
+    attempt < 500 && !existsSync(holdMarker);
+    attempt += 1
+  ) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  }
+  assert.equal(existsSync(holdMarker), true);
+  child.kill("SIGKILL");
+  await new Promise((resolveExit) => child.once("exit", resolveExit));
+  assert.notEqual(
+    snapshotTree(join(fixture.home, ".pipi-install-lock")).type,
+    "absent",
+  );
+
+  const retry = install(fixture);
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.equal(
+    snapshotTree(join(fixture.home, ".pipi-install-lock")).type,
+    "absent",
+  );
+  assert.equal(
+    readdirSync(fixture.home).some((entry) =>
+      entry.startsWith(".pipi-install-stage-"),
+    ),
+    false,
+  );
+});
+
+test("installed direct browser, install-local, and generated MCP paths stay on pinned Bun", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const installed = install(fixture);
+  assert.equal(installed.status, 0, installed.stderr);
+  const skill = join(
+    fixture.home,
+    ".pipi",
+    "agent",
+    "skills",
+    "browser-chrome",
+  );
+  const directEnv = {
+    ...fixture.env,
+    BROWSER_CHROME_HEADED_URL: "http://127.0.0.1:9233",
+  };
+  delete directEnv.PIPI_BUN_RUNTIME;
+  delete directEnv.BROWSER_CHROME_NPX;
+  delete directEnv.BROWSER_CHROME_MCP_PACKAGE;
+  const direct = JSON.parse(
+    execFileSync(
+      join(skill, "scripts", "mcp.sh"),
+      ["headed", "argument with spaces"],
+      {
+        env: directEnv,
+        encoding: "utf8",
+      },
+    ),
+  );
+  assert.equal(direct.bunVersion, process.versions.bun);
+  assert.equal(direct.noUpdateChecks, "1");
+  assert.deepEqual(direct.args, [
+    "--no-usage-statistics",
+    "--no-performance-crux",
+    "--browser-url=http://127.0.0.1:9233",
+    "argument with spaces",
+  ]);
+
+  const localInstall = execFileSync(
+    join(skill, "scripts", "install-local.sh"),
+    [],
+    {
+      env: fixture.env,
+      encoding: "utf8",
+    },
+  );
+  assert.match(localInstall, /Installed Bun-safe browser-chrome MCP wiring/);
+  assert.deepEqual(
+    readJson(join(fixture.home, ".pipi", "agent", "mcp.json")).mcpServers,
+    expectedBrowserMcpServers(fixture.home),
+  );
+
+  const alternateAgent = join(fixture.home, "alternate-agent");
+  const alternateSkill = join(alternateAgent, "skills", "browser-chrome");
+  const alternateMcp = join(alternateAgent, "mcp.json");
+  execFileSync(join(skill, "scripts", "install-local.sh"), [], {
+    env: {
+      ...fixture.env,
+      PI_AGENT_DIR: alternateAgent,
+      BROWSER_CHROME_SKILL_TARGET: alternateSkill,
+      BROWSER_CHROME_MCP_JSON: alternateMcp,
+    },
+  });
+  const alternateServers = readJson(alternateMcp).mcpServers;
+  assert.equal(
+    alternateServers["browser-chrome-headed"].command,
+    join(alternateSkill, "scripts", "mcp.sh"),
+  );
+  const alternateDirect = JSON.parse(
+    execFileSync(
+      join(alternateSkill, "scripts", "mcp.sh"),
+      ["headed", "alternate target argument"],
+      { env: directEnv, encoding: "utf8" },
+    ),
+  );
+  assert.equal(alternateDirect.bunVersion, process.versions.bun);
+  assert.equal(alternateDirect.noUpdateChecks, "1");
+  assert.equal(alternateDirect.args.at(-1), "alternate target argument");
+
+  const invalid = spawnSync(join(skill, "scripts", "mcp.sh"), ["headed"], {
+    env: { ...directEnv, PIPI_BUN_RUNTIME: join(fixture.home, "wrong-bun") },
+    encoding: "utf8",
+  });
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /must match the recorded Pipi Bun runtime/);
+  assert.equal(existsSync(fixture.npmLog), false);
+
+  const control = join(skill, "scripts", "control-mcp.sh");
+  const controlServer = join(skill, "control-mcp", "server.mjs");
+  const controlLog = join(fixture.home, "control-starts.jsonl");
+  writeFileSync(
+    controlServer,
+    `import { appendFileSync } from "node:fs";
+appendFileSync(process.env.PIPI_TEST_CONTROL_LOG, JSON.stringify({ args: process.argv.slice(2), runtime: process.execPath, bunVersion: process.versions.bun }) + "\\n");
+`,
+  );
+  const controlEnv = {
+    ...directEnv,
+    PIPI_TEST_CONTROL_LOG: controlLog,
+  };
+  execFileSync(control, ["argument with spaces", "--flag=value"], {
+    env: controlEnv,
+  });
+  execFileSync(control, ["matching runtime"], {
+    env: { ...controlEnv, PIPI_BUN_RUNTIME: fixture.fakeBunPath },
+  });
+  const allowedStarts = readFileSync(controlLog, "utf8")
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.deepEqual(allowedStarts[0].args, [
+    "--skill-dir",
+    skill,
+    "argument with spaces",
+    "--flag=value",
+  ]);
+  assert.equal(allowedStarts[0].bunVersion, process.versions.bun);
+  assert.equal(allowedStarts[1].args.at(-1), "matching runtime");
+  rmSync(controlLog);
+
+  const alternateBun = join(fixture.fakeBin, "alternate-bun");
+  writeFileSync(alternateBun, "#!/bin/sh\nprintf '1.4.0\\n'\n", {
+    mode: 0o755,
+  });
+  for (const [name, override] of [
+    ["alternate", alternateBun],
+    ["missing", join(fixture.home, "missing-bun")],
+  ]) {
+    const rejected = spawnSync(control, [], {
+      env: { ...controlEnv, PIPI_BUN_RUNTIME: override },
+      encoding: "utf8",
+    });
+    assert.notEqual(rejected.status, 0, name);
+    assert.match(
+      rejected.stderr,
+      /PIPI_BUN_RUNTIME must match the recorded Pipi Bun runtime/,
+      name,
+    );
+    assert.equal(existsSync(controlLog), false, name);
+  }
+
+  const recordedBunBytes = readFileSync(fixture.fakeBunPath);
+  const recordedBunMode = lstatSync(fixture.fakeBunPath).mode & 0o777;
+  const savedBun = `${fixture.fakeBunPath}.saved`;
+  renameSync(fixture.fakeBunPath, savedBun);
+  const missingRecorded = spawnSync(control, [], {
+    env: { ...controlEnv, PIPI_BUN_RUNTIME: fixture.fakeBunPath },
+    encoding: "utf8",
+  });
+  assert.notEqual(missingRecorded.status, 0);
+  assert.match(missingRecorded.stderr, /not executable/);
+  assert.equal(existsSync(controlLog), false);
+  renameSync(savedBun, fixture.fakeBunPath);
+
+  for (const [name, version] of [
+    ["prerelease", "1.4.0-beta.1"],
+    ["fake", "not-bun"],
+  ]) {
+    writeFileSync(
+      fixture.fakeBunPath,
+      `#!/bin/sh\nif [ "\${1:-}" = "--version" ]; then printf '${version}\\n'; exit 0; fi\necho server-must-not-start >&2\nexit 91\n`,
+      { mode: recordedBunMode },
+    );
+    const rejected = spawnSync(control, [], {
+      env: { ...controlEnv, PIPI_BUN_RUNTIME: fixture.fakeBunPath },
+      encoding: "utf8",
+    });
+    assert.notEqual(rejected.status, 0, name);
+    assert.match(rejected.stderr, /must remain stable version/, name);
+    assert.equal(existsSync(controlLog), false, name);
+  }
+  writeFileSync(fixture.fakeBunPath, recordedBunBytes, {
+    mode: recordedBunMode,
+  });
+  assert.equal(existsSync(fixture.npmLog), false);
+
+  const installedText = [
+    readFileSync(join(skill, "scripts", "control-mcp.sh"), "utf8"),
+    readFileSync(join(skill, "scripts", "mcp.sh"), "utf8"),
+    readFileSync(join(skill, "scripts", "install-local.sh"), "utf8"),
+    readFileSync(join(skill, "README.md"), "utf8"),
+    readFileSync(join(skill, "references", "mcp-config.md"), "utf8"),
+  ].join("\n");
+  assert.doesNotMatch(installedText, /chrome-devtools-mcp@latest/);
+  assert.doesNotMatch(installedText, /(?:^|\s)npx(?:\s|$)/m);
+});
+
+test("removed Bun bootstrap surfaces are absent from the active package, API, and docs", () => {
+  assert.equal(
+    existsSync(join(repositoryRoot, "scripts", "bootstrap-bun.sh")),
+    false,
+  );
+  assert.equal(
+    existsSync(
+      join(repositoryRoot, "tests", "scripts", "bootstrap-bun.test.mjs"),
+    ),
+    false,
+  );
+  const manifest = readJson(join(repositoryRoot, "package.json"));
+  assert.equal(Object.hasOwn(manifest.scripts, "bootstrap:bun"), false);
+
+  const installerSource = readFileSync(installScript, "utf8");
+  assert.doesNotMatch(installerSource, /bootstrap-bun|pipi-bun-bootstrap/);
+  assert.doesNotMatch(
+    installerSource,
+    /validateIsolatedBunRuntime|skipDependencies/,
+  );
+  const help = spawnSync(process.execPath, [installScript, "--help"], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  });
+  assert.equal(help.status, 0, help.stderr);
+  assert.doesNotMatch(help.stdout, /--skip-dependencies/);
+
+  for (const path of ["README.md", "SETUP.md", "docs/bun-runtime.md"]) {
+    const text = readFileSync(join(repositoryRoot, path), "utf8");
+    assert.doesNotMatch(
+      text,
+      /bootstrap-bun|pipi-bun-bootstrap|pipi-bootstrap-recovery/,
+      path,
+    );
+  }
 });
 
 test("uninstall removes only the managed launcher unless purge is explicit", async (t) => {

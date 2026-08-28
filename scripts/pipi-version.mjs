@@ -7,6 +7,16 @@ export const pipiPackageNames = [
   "@earendil-works/pi-tui",
 ];
 
+export const pipiResolutionPackageNames = [
+  "@earendil-works/pi-agent-core",
+  "@earendil-works/pi-ai",
+  "@earendil-works/pi-client",
+  "@earendil-works/pi-coding-agent",
+  "@earendil-works/pi-protocol",
+  "@earendil-works/pi-telemetry",
+  "@earendil-works/pi-tui",
+];
+
 export const parseStableVersion = (value) => {
   if (!/^\d+\.\d+\.\d+$/.test(value)) {
     throw new Error(
@@ -17,6 +27,9 @@ export const parseStableVersion = (value) => {
 };
 
 export const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
+
+export const readBunLock = (path) =>
+  JSON.parse(readFileSync(path, "utf8").replace(/,\s*([}\]])/g, "$1"));
 
 const versionParts = (version) =>
   parseStableVersion(version).split(".").map(Number);
@@ -65,30 +78,46 @@ export const getDeclaredPipiVersion = (manifest) => {
   return version;
 };
 
+const lockedPackageVersion = (lockfile, packageName) => {
+  const resolution = lockfile.packages?.[packageName]?.[0];
+  if (typeof resolution !== "string") return undefined;
+  return resolution.startsWith(`${packageName}@`)
+    ? resolution.slice(packageName.length + 1)
+    : undefined;
+};
+
 export const validatePipiVersionState = (repositoryRoot) => {
   const manifest = readJson(join(repositoryRoot, "package.json"));
-  const lockfile = readJson(join(repositoryRoot, "package-lock.json"));
+  const lockfile = readBunLock(join(repositoryRoot, "bun.lock"));
   const version = getDeclaredPipiVersion(manifest);
   const expectedRange = `^${version}`;
 
   for (const packageName of pipiPackageNames) {
-    const locked = lockfile.packages?.[`node_modules/${packageName}`];
-    if (locked?.version !== version) {
-      throw new Error(
-        `package-lock.json resolves ${packageName} to ${locked?.version ?? "nothing"}; expected ${version}.`,
-      );
-    }
     if (
-      lockfile.packages?.[""]?.dependencies?.[packageName] !== expectedRange
+      lockfile.workspaces?.[""]?.dependencies?.[packageName] !== expectedRange
     ) {
       throw new Error(
-        `package-lock.json root dependency for ${packageName} is not ${expectedRange}.`,
+        `bun.lock root dependency for ${packageName} is not ${expectedRange}.`,
+      );
+    }
+  }
+
+  for (const packageName of pipiResolutionPackageNames) {
+    if (manifest.overrides?.[packageName] !== version) {
+      throw new Error(
+        `package.json override for ${packageName} is not ${version}.`,
+      );
+    }
+    const lockedVersion = lockedPackageVersion(lockfile, packageName);
+    if (lockedVersion !== version) {
+      throw new Error(
+        `bun.lock resolves ${packageName} to ${lockedVersion ?? "nothing"}; expected ${version}.`,
       );
     }
   }
 
   const codingAgent =
-    lockfile.packages?.["node_modules/@earendil-works/pi-coding-agent"];
+    lockfile.packages?.["@earendil-works/pi-coding-agent"]?.[2];
   for (const dependencyName of [
     "@earendil-works/pi-agent-core",
     "@earendil-works/pi-ai",

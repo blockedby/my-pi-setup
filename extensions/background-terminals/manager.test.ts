@@ -1,8 +1,8 @@
 /**
  * End-to-end tests: manager behavior through a real ManagedRuntime with real
- * child processes, exactly as the tool handlers drive it. Commands use
- * `node -e` one-liners for portability (node exists on any machine running
- * pi). Tests are event-driven (kill()/nextChange/settle hooks), not
+ * child processes, exactly as the tool handlers drive it. Commands use the
+ * active Bun executable so process-group, signal, and stdio behavior is tested
+ * under Pipi's authoritative runtime. Tests are event-driven, not
  * timing-based.
  */
 
@@ -23,9 +23,13 @@ import { createTerminalRuntime, runTool } from "./src/runtime.ts";
 
 const cwd = process.cwd();
 
-/** Quote a `node -e` script for sh -c. */
-function nodeCmd(script: string) {
-  return `node -e '${script}'`;
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+/** Quote an active-runtime eval script for sh -c. */
+function runtimeCmd(script: string) {
+  return `${shellQuote(process.execPath)} -e ${shellQuote(script)}`;
 }
 
 async function withManager(
@@ -92,7 +96,7 @@ test("happy path: stdout and stderr captured separately, settles done, hook fire
     const snap = await runTool(
       runtime,
       manager.start({
-        command: nodeCmd(
+        command: runtimeCmd(
           'process.stdout.write("out-line\\n"); process.stderr.write("err-line\\n");',
         ),
         title: "happy",
@@ -142,7 +146,7 @@ test("non-zero exit settles as failed with the exit code", async () => {
     const snap = await runTool(
       runtime,
       manager.start({
-        command: nodeCmd("process.exit(3)"),
+        command: runtimeCmd("process.exit(3)"),
         title: "fails",
         cwd,
       }),
@@ -158,7 +162,7 @@ test("kill settles a never-exiting process as killed and resolves after settle; 
     const snap = await runTool(
       runtime,
       manager.start({
-        command: nodeCmd("setInterval(() => {}, 1000)"),
+        command: runtimeCmd("setInterval(() => {}, 1000)"),
         title: "immortal",
         cwd,
       }),
@@ -192,7 +196,7 @@ test(
       const snap = await runTool(
         runtime,
         manager.start({
-          command: `exec ${nodeCmd(
+          command: `exec ${runtimeCmd(
             'process.on("SIGTERM", () => process.stdout.write("term\\n")); process.stdout.write("ready\\n"); setInterval(() => {}, 1000);',
           )}`,
           title: "term-resistant",
@@ -234,7 +238,7 @@ test("concurrent overlapping multi-id kills observe each settlement exactly once
         ["first", "second"],
         (title) =>
           manager.start({
-            command: nodeCmd("setInterval(() => {}, 1000)"),
+            command: runtimeCmd("setInterval(() => {}, 1000)"),
             title,
             cwd,
           }),
@@ -283,9 +287,9 @@ test(
       const snap = await runTool(
         runtime,
         manager.start({
-          // sh spawns node in the background and prints the grandchild pid,
+          // sh spawns Bun in the background and prints the grandchild pid,
           // then waits forever so the group stays alive.
-          command: `node -e 'const fs = require("node:fs"); const file = ${JSON.stringify(sentinel)}; let n = 0; fs.writeFileSync(file, String(n)); setInterval(() => fs.writeFileSync(file, String(++n)), 25)' & echo "child:$!"; wait`,
+          command: `${runtimeCmd(`const fs = require("node:fs"); const file = ${JSON.stringify(sentinel)}; let n = 0; fs.writeFileSync(file, String(n)); setInterval(() => fs.writeFileSync(file, String(++n)), 25)`)} & echo "child:$!"; wait`,
           title: "tree",
           cwd,
         }),
@@ -340,7 +344,7 @@ test(
       const snap = await runTool(
         runtime,
         manager.start({
-          command: `node -e "setInterval(()=>{},1e3)" & echo "child:$!"; exit 0`,
+          command: `${runtimeCmd("setInterval(()=>{},1e3)")} & echo "child:$!"; exit 0`,
           title: "exited-shell",
           cwd,
         }),
@@ -385,7 +389,7 @@ test(
       const snap = await runTool(
         runtime,
         manager.start({
-          command: `node -e "setInterval(()=>{},1e3)" & echo "child:$!"; exit 0`,
+          command: `${runtimeCmd("setInterval(()=>{},1e3)")} & echo "child:$!"; exit 0`,
           title: "natural-race",
           cwd,
         }),
@@ -422,7 +426,7 @@ test("concurrency cap rejects an extra start; a failed spawn releases its slot",
         Array.from({ length: MAX_RUNNING }, (_, n) => n),
         (n) =>
           manager.start({
-            command: nodeCmd("setInterval(() => {}, 1000)"),
+            command: runtimeCmd("setInterval(() => {}, 1000)"),
             title: `filler-${n}`,
             cwd,
           }),
@@ -452,7 +456,7 @@ test("concurrency cap rejects an extra start; a failed spawn releases its slot",
     const again = await runTool(
       runtime,
       manager.start({
-        command: nodeCmd("setInterval(() => {}, 1000)"),
+        command: runtimeCmd("setInterval(() => {}, 1000)"),
         title: "refill",
         cwd,
       }),
@@ -470,7 +474,7 @@ test("a settle during an in-flight kill reports consumed: true", async () => {
     const snap = await runTool(
       runtime,
       manager.start({
-        command: nodeCmd("setInterval(() => {}, 1000)"),
+        command: runtimeCmd("setInterval(() => {}, 1000)"),
         title: "consumed",
         cwd,
       }),
@@ -490,7 +494,7 @@ test("UI requestKill settles as killed and is NOT consumed", async () => {
     const snap = await runTool(
       runtime,
       manager.start({
-        command: nodeCmd("setInterval(() => {}, 1000)"),
+        command: runtimeCmd("setInterval(() => {}, 1000)"),
         title: "ui-kill",
         cwd,
       }),
@@ -513,7 +517,7 @@ test("runtime.dispose kills running processes; no settle hook fires after dispos
   const snap = await runTool(
     runtime,
     manager.start({
-      command: nodeCmd("setInterval(() => {}, 1000)"),
+      command: runtimeCmd("setInterval(() => {}, 1000)"),
       title: "disposed",
       cwd,
     }),
@@ -538,7 +542,7 @@ test("pruning drops the oldest settled entries past MAX_TRACKED, never running o
     const keeper = await runTool(
       runtime,
       manager.start({
-        command: nodeCmd("setInterval(() => {}, 1000)"),
+        command: runtimeCmd("setInterval(() => {}, 1000)"),
         title: "keeper",
         cwd,
       }),
@@ -576,7 +580,11 @@ test("runtime disposal removes the private spill directory", async () => {
   const manager = await runtime.runPromise(TerminalManager);
   const snap = await runTool(
     runtime,
-    manager.start({ command: "node --version", title: "cleanup", cwd }),
+    manager.start({
+      command: `${JSON.stringify(process.execPath)} --version`,
+      title: "cleanup",
+      cwd,
+    }),
   );
   const { snap: done } = await settlement(manager, snap.id);
   assert.ok(done.stdout.spillPath);
@@ -649,7 +657,7 @@ test("the spill file holds the complete capture when the settle hook fires, beyo
     const snap = await runTool(
       runtime,
       manager.start({
-        command: nodeCmd(
+        command: runtimeCmd(
           `const s = "x".repeat(${chunk}); for (let i = 0; i < ${writes}; i++) process.stdout.write(s);`,
         ),
         title: "firehose",
@@ -683,8 +691,8 @@ test("aborting the kill wait does not cancel the termination", async () => {
       manager.start({
         command:
           process.platform === "win32"
-            ? nodeCmd("setInterval(() => {}, 1000)")
-            : `exec ${nodeCmd(
+            ? runtimeCmd("setInterval(() => {}, 1000)")
+            : `exec ${runtimeCmd(
                 'process.on("SIGTERM", () => process.stdout.write("term\\n")); process.stdout.write("ready\\n"); setInterval(() => {}, 1000);',
               )}`,
         title: "abort-race",

@@ -3,11 +3,12 @@ import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolveBunRuntime } from "../extensions/shared/executable-runtime.ts";
 import { getDeclaredPipiVersion, readJson } from "./pipi-version.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const home = process.env.HOME || homedir();
-const isolatedPrefix = join(home, ".pipi", "agent", "npm");
+const isolatedPrefix = join(home, ".pipi", "agent", "runtime");
 const manifest = readJson(join(repositoryRoot, "package.json"));
 const expectedVersion = getDeclaredPipiVersion(manifest);
 const installedPackage = readJson(
@@ -20,10 +21,8 @@ const installedPackage = readJson(
   ),
 );
 const isolatedManifest = readJson(join(isolatedPrefix, "package.json"));
-const expectedAllowScripts = {
-  "@google/genai@1.52.0": true,
-  "protobufjs@7.6.5": true,
-};
+const bunRuntime = resolveBunRuntime();
+const expectedTrustedDependencies = ["@google/genai", "protobufjs"];
 
 const findExecutable = (command) => {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
@@ -63,11 +62,16 @@ if (isolatedManifest.dependencies?.["pi-mcp-adapter"] !== "2.15.0") {
     "The isolated Pipi manifest does not pin MCP adapter 2.15.0.",
   );
 }
+if (isolatedManifest.dependencies?.["chrome-devtools-mcp"] !== "1.8.0") {
+  throw new Error(
+    "The isolated Pipi manifest does not pin chrome-devtools-mcp 1.8.0.",
+  );
+}
 if (
-  JSON.stringify(isolatedManifest.allowScripts) !==
-  JSON.stringify(expectedAllowScripts)
+  JSON.stringify(isolatedManifest.trustedDependencies) !==
+  JSON.stringify(expectedTrustedDependencies)
 ) {
-  throw new Error("The isolated Pipi install-script policy is unexpected.");
+  throw new Error("The isolated Pipi trusted-dependency policy is unexpected.");
 }
 
 const trackedOverrides = readFileSync(
@@ -103,6 +107,9 @@ for (const variable of [
   "PIPI_CODING_AGENT_SESSION_DIR",
   "PI_CODING_AGENT_DIR",
   "PI_CODING_AGENT_SESSION_DIR",
+  "PIPI_RUNTIME",
+  "PIPI_BUN_RUNTIME",
+  "BROWSER_CHROME_NODE",
 ]) {
   if (!launcherSource.includes(`export ${variable}=`)) {
     throw new Error(`Pipi launcher does not export ${variable}.`);
@@ -114,6 +121,16 @@ if (
 ) {
   throw new Error(
     "Pipi launcher does not scope the Pi detection hint to Herdr.",
+  );
+}
+if (!launcherSource.includes('exec "$PIPI_BUN_RUNTIME"')) {
+  throw new Error("Pipi launcher does not execute its recorded Bun runtime.");
+}
+if (
+  !launcherSource.includes('export BROWSER_CHROME_NODE="$PIPI_BUN_RUNTIME"')
+) {
+  throw new Error(
+    "Pipi launcher does not share its recorded Bun with browser control.",
   );
 }
 const launcherVersion = execFileSync(launcher, ["--version"], {
@@ -144,9 +161,8 @@ const interactiveModule = pathToFileURL(
   ),
 ).href;
 const resumeCommand = execFileSync(
-  process.execPath,
+  bunRuntime.executable,
   [
-    "--input-type=module",
     "--eval",
     `Object.defineProperty(process.stdout, "isTTY", { value: true });
 const { formatResumeCommand } = await import(${JSON.stringify(interactiveModule)});

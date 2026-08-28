@@ -2,9 +2,11 @@ import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBunRuntime } from "../extensions/shared/executable-runtime.ts";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const extensionsRoot = join(repositoryRoot, "extensions");
+const bunRuntime = resolveBunRuntime();
 const liveTests = new Set([
   "extensions/subagents/claude.test.ts",
   "extensions/subagents/codex.test.ts",
@@ -28,11 +30,10 @@ if (testFiles.length === 0) {
   console.log(
     `Running ${testFiles.length} deterministic extension test files (live Claude/Codex tests excluded).`,
   );
-  const result = spawnSync(
-    process.execPath,
-    ["--test", "--experimental-strip-types", ...testFiles],
-    { cwd: repositoryRoot, stdio: "inherit" },
-  );
+  const result = spawnSync(bunRuntime.executable, ["test", ...testFiles], {
+    cwd: repositoryRoot,
+    stdio: "inherit",
+  });
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;
 }

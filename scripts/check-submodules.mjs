@@ -107,6 +107,37 @@ for (const [name, submodule] of entries) {
         `Submodule ${name} package name is ${packageManifest.name ?? "missing"}; expected ${submodule.piPackageName}`,
       );
     }
+    if (submodule.bunDependencyBoundary !== undefined) {
+      if (
+        !submodule.bunDependencyBoundary ||
+        typeof submodule.bunDependencyBoundary !== "object" ||
+        Array.isArray(submodule.bunDependencyBoundary)
+      ) {
+        fail(`Submodule ${name} has an invalid bunDependencyBoundary`);
+      }
+      for (const [packageName, version] of Object.entries(
+        submodule.bunDependencyBoundary,
+      )) {
+        if (manifest.dependencies?.[packageName] !== version) {
+          fail(
+            `Root Bun dependency boundary for ${name} must pin ${packageName}@${version}`,
+          );
+        }
+        if (typeof packageManifest.dependencies?.[packageName] !== "string") {
+          fail(
+            `Submodule ${name} does not declare boundary package ${packageName}`,
+          );
+        }
+      }
+      const workspacePackages = Array.isArray(manifest.workspaces)
+        ? manifest.workspaces
+        : (manifest.workspaces?.packages ?? []);
+      if (workspacePackages.includes(submodule.path)) {
+        fail(
+          `Read-only submodule ${name} must not participate directly in the Bun workspace`,
+        );
+      }
+    }
   }
 
   if (submodule.piSkillPath !== undefined) {

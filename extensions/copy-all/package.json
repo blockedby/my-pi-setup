@@ -1,8 +1,8 @@
 {
   "name": "copy-all",
   "scripts": {
-    "check": "tsc --noEmit -p .",
-    "prepare": "effect-tsgo patch"
+    "check": "bun node_modules/typescript/bin/tsc --noEmit -p .",
+    "prepare:compiler": "bun node_modules/@effect/tsgo/dist/effect-tsgo.js patch"
   },
   "type": "module",
   "private": true,
