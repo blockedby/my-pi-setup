@@ -33,7 +33,8 @@ const CHECK_TRUNCATION_MARKER =
 export const PIPELINE_CHECK_PARAMETERS = Type.Object(
   {
     id: Type.String({
-      description: "Session-scoped pipeline run id to inspect.",
+      description:
+        "Canonical pipeline run id to inspect (the supplied pipeline_name plus eight lowercase hexadecimal characters).",
       minLength: 1,
       maxLength: 1024,
     }),
@@ -464,7 +465,7 @@ export function createPipelineInspectionTools(
       name: "pipeline_check",
       label: "Check Pipeline",
       description:
-        "Synchronously inspect one session-scoped pipeline run without waiting, changing lifecycle state, or consuming its automatic completion handoff. Active previews and total output are bounded.",
+        "Synchronously inspect one canonical pipeline run without waiting, changing lifecycle state, or consuming its automatic completion handoff. Active previews and total output are bounded.",
       promptSnippet: "Inspect one known pipeline run without waiting",
       promptGuidelines: [
         "Use pipeline_check only for an occasional nonblocking snapshot of a known run. Do not poll: pipeline completion arrives automatically as a follow-up handoff.",
@@ -478,7 +479,7 @@ export function createPipelineInspectionTools(
       name: "pipeline_list",
       label: "List Pipelines",
       description:
-        "List all session-scoped pipeline runs newest-first using a compact projection. Returns No pipelines. when none are tracked.",
+        "List all canonical pipeline runs newest-first using a compact projection. Returns No pipelines. when none are tracked.",
       promptSnippet: "List tracked pipeline runs without waiting",
       promptGuidelines: [
         "Use pipeline_list only when selecting among known session-scoped runs. Do not poll: pipeline completion arrives automatically as a follow-up handoff.",

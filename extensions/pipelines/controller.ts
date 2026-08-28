@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
   defineTool,
@@ -28,6 +29,9 @@ import {
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SMALL_FEATURE_PIPELINE_ID,
   assertPipelineGitCommitSupported,
+  assertPipelineName,
+  isCanonicalPipelineRunId,
+  PIPELINE_ID_ATTEMPTS,
   childContextPolicyFor,
   definitionFor,
   initialStageForDefinition,
@@ -92,6 +96,7 @@ import {
 import {
   defaultFeatureGitOperations,
   type FeatureCallerWorktree,
+  type FeatureTemporaryWorktree,
   type FeatureGitOperations,
   type FeatureWorktreeLifecycle,
   type FrozenFeatureCandidate,
@@ -195,6 +200,14 @@ function deferredSignal() {
   return { promise, resolve };
 }
 
+function defaultPipelineToken() {
+  return randomBytes(4).toString("hex");
+}
+
+function scopedSessionTitle(runId: string, title: string) {
+  return `${title} · ${runId}`;
+}
+
 function boundedPipelineError(error: unknown) {
   return truncateHead(error instanceof Error ? error.message : String(error), {
     maxBytes: 16 * 1024,
@@ -229,6 +242,7 @@ interface MutableRun {
   planWrittenPath?: string;
   featureCaller?: FeatureCallerWorktree;
   featureLifecycle?: FeatureWorktreeLifecycle;
+  featureCandidateWorktrees?: ReadonlyArray<FeatureTemporaryWorktree>;
   featureDiscoverySynthesis?: FeatureDiscoverySynthesis;
   featureCandidates?: ReadonlyArray<{
     readonly candidate: FrozenFeatureCandidate;
@@ -321,7 +335,8 @@ export interface PipelineControllerOptions {
     featureCommit?: (runId: string, role: string, workingDir: string) => string,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
-  readonly makeRunId?: () => string;
+  readonly makeRunId?: (pipelineName: string) => string;
+  readonly makeRunToken?: () => string;
   readonly makeAgentId?: () => string;
   readonly featureGit?: FeatureGitOperations;
 }
@@ -387,15 +402,16 @@ export class PipelineController {
   private readonly discoverySubmissions = new Map<string, unknown>();
   private readonly tree: AgentTreeController;
   private readonly onHandoff: PipelineControllerOptions["onHandoff"];
-  private readonly makeRunId: () => string;
   private readonly featureGit: FeatureGitOperations;
-  private runSequence = 0;
+  private readonly makeRunId: (pipelineName: string) => string;
   private shuttingDown = false;
 
   constructor(options: PipelineControllerOptions) {
     this.onHandoff = options.onHandoff;
     this.makeRunId =
-      options.makeRunId ?? (() => `pipeline-${++this.runSequence}`);
+      options.makeRunId ??
+      ((pipelineName) =>
+        `${pipelineName}-${(options.makeRunToken ?? defaultPipelineToken)()}`);
     this.featureGit = options.featureGit ?? defaultFeatureGitOperations;
     this.tree = new AgentTreeController({
       factory: options.createSessionFactory(
@@ -610,7 +626,33 @@ export class PipelineController {
     };
   }
 
+  private allocateRunId(
+    pipelineName: string,
+    featureCaller?: FeatureCallerWorktree,
+  ) {
+    for (let attempt = 0; attempt < PIPELINE_ID_ATTEMPTS; attempt++) {
+      const id = this.makeRunId(pipelineName);
+      if (!isCanonicalPipelineRunId(id, pipelineName)) {
+        throw new Error(
+          `Pipeline run ID generator returned an invalid ID; expected ${pipelineName}- followed by exactly eight lowercase hexadecimal characters.`,
+        );
+      }
+      if (this.runs.has(id)) continue;
+      if (
+        featureCaller &&
+        !this.featureGit.namespaceAvailable(featureCaller, id)
+      ) {
+        continue;
+      }
+      return id;
+    }
+    throw new Error(
+      `Unable to allocate a unique pipeline run ID and feature namespace after ${PIPELINE_ID_ATTEMPTS} attempts. No pipeline state was created.`,
+    );
+  }
+
   start(request: PipelineRunRequest) {
+    assertPipelineName(request.pipelineName);
     if (this.shuttingDown)
       throw new Error("Pipeline controller is shutting down.");
     const definition = request.pipeline ?? FEATURE_PIPELINE_ID;
@@ -664,10 +706,19 @@ export class PipelineController {
       definition === AUDIT_PIPELINE_ID
         ? { ...effectiveRequest, audit }
         : effectiveRequest;
-    const id = this.makeRunId();
-    const featureLifecycle = featureCaller
-      ? this.featureGit.createLifecycle(featureCaller, id)
-      : undefined;
+    const id = this.allocateRunId(request.pipelineName, featureCaller);
+    let featureLifecycle: FeatureWorktreeLifecycle | undefined;
+    let featureCandidateWorktrees:
+      ReadonlyArray<FeatureTemporaryWorktree> | undefined;
+    if (featureCaller) {
+      featureLifecycle = this.featureGit.createLifecycle(featureCaller, id);
+      try {
+        featureCandidateWorktrees = featureLifecycle.createCandidateWorktrees();
+      } catch (error) {
+        featureLifecycle.cleanup();
+        throw error;
+      }
+    }
     const rootReady = deferredSignal();
     const run: MutableRun = {
       id,
@@ -688,6 +739,7 @@ export class PipelineController {
       planDiscoveryReports: new Map(),
       ...(featureCaller ? { featureCaller } : {}),
       ...(featureLifecycle ? { featureLifecycle } : {}),
+      ...(featureCandidateWorktrees ? { featureCandidateWorktrees } : {}),
       featureSynthesisChecks: [],
       finalAuditReportDelivered: false,
     };
@@ -712,7 +764,10 @@ export class PipelineController {
               ? PLAN_PIPELINE_SYNTHESIS_ROLE
               : "pipeline-root",
         attempt: 1,
-        title: definitionFor(run.definition).rootTitle,
+        title: scopedSessionTitle(
+          run.id,
+          definitionFor(run.definition).rootTitle,
+        ),
         model: definitionFor(run.definition).rootModel,
         thinkingLevel:
           run.definition === PLAN_PIPELINE_ID ? "xhigh" : undefined,
@@ -970,7 +1025,7 @@ export class PipelineController {
       scopeId: run.id,
       role: FEATURE_DISCOVERY_SYNTHESIS_ROLE,
       attempt: 1,
-      title: "Feature discovery synthesis",
+      title: scopedSessionTitle(run.id, "Feature discovery synthesis"),
       model: LUNA_MODEL,
       thinkingLevel: "medium",
       cwd: run.request.workingDir,
@@ -1015,7 +1070,8 @@ export class PipelineController {
     );
     const preparedPackageJson = JSON.stringify(prepared);
     assertBoundedSynthesisInput(prepared);
-    const candidateWorktrees = lifecycle.createCandidateWorktrees();
+    const candidateWorktrees =
+      run.featureCandidateWorktrees ?? lifecycle.createCandidateWorktrees();
     const candidateAgents = await Promise.all(
       candidateWorktrees.map((worktree) =>
         this.tree.spawn({
@@ -1023,7 +1079,10 @@ export class PipelineController {
           parentId: discoverySynthesisAgent.id,
           role: `candidate-${worktree.role.toLowerCase()}`,
           attempt: 1,
-          title: `${worktree.role} implementation candidate`,
+          title: scopedSessionTitle(
+            run.id,
+            `${worktree.role} implementation candidate`,
+          ),
           model: LUNA_MODEL,
           thinkingLevel: "xhigh",
           cwd: worktree.path,
@@ -1075,7 +1134,10 @@ export class PipelineController {
       parentId: discoverySynthesisAgent.id,
       role: FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
       attempt: 1,
-      title: "Best-of-3 selection and bounded synthesis",
+      title: scopedSessionTitle(
+        run.id,
+        "Best-of-3 selection and bounded synthesis",
+      ),
       model: LUNA_MODEL,
       thinkingLevel: "xhigh",
       cwd: selectionDirectory,
@@ -1155,7 +1217,10 @@ export class PipelineController {
       scopeId: run.id,
       role: "pipeline-root",
       attempt: 1,
-      title: definitionFor(run.definition).rootTitle,
+      title: scopedSessionTitle(
+        run.id,
+        definitionFor(run.definition).rootTitle,
+      ),
       model: LUNA_MODEL,
       thinkingLevel: "xhigh",
       cwd: run.request.workingDir,
@@ -1560,7 +1625,7 @@ export class PipelineController {
         parentId: run.rootId,
         role: AUDIT_SYNTHESIS_ROLE,
         attempt: 1,
-        title: titleForRole(AUDIT_SYNTHESIS_ROLE),
+        title: scopedSessionTitle(run.id, titleForRole(AUDIT_SYNTHESIS_ROLE)),
         model: modelForRole(AUDIT_SYNTHESIS_ROLE),
         cwd: run.request.workingDir,
         prompt: "Controller-deferred audit synthesis.",
@@ -1581,7 +1646,7 @@ export class PipelineController {
           parentId: run.rootId,
           role,
           attempt,
-          title: titleForRole(role),
+          title: scopedSessionTitle(run.id, titleForRole(role)),
           model: modelForRole(role),
           cwd: run.request.workingDir,
           prompt: buildAuditTrackPrompt(role, context),
@@ -2237,7 +2302,7 @@ export class PipelineController {
       parentId: run.rootId,
       role,
       attempt,
-      title: titleForRole(role),
+      title: scopedSessionTitle(run.id, titleForRole(role)),
       model: modelForRole(role),
       thinkingLevel:
         run.definition === PLAN_PIPELINE_ID ? ("medium" as const) : undefined,

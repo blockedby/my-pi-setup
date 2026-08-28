@@ -99,7 +99,7 @@ function harness() {
     | undefined;
   let agent = 0;
   const controller = new PipelineController({
-    makeRunId: () => "audit-run",
+    makeRunId: (pipelineName) => `${pipelineName}-00000001`,
     makeAgentId: () => `audit-agent-${++agent}`,
     createSessionFactory: (
       _rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
@@ -153,7 +153,12 @@ function harness() {
     },
     submitUnauthorized(role: string, value: unknown) {
       assert.ok(submitAuditCallback);
-      submitAuditCallback("audit-run", role, "unauthorized-token", value);
+      submitAuditCallback(
+        "audit-submission-run-00000001",
+        role,
+        "unauthorized-token",
+        value,
+      );
     },
   };
 }
@@ -479,6 +484,7 @@ test("audit submission tool policy is limited to reusable audit-segment sessions
 test("audit submissions reject unregistered session tokens", async () => {
   const run = harness();
   run.controller.start({
+    pipelineName: "audit-submission-run",
     pipeline: "audit-pipeline",
     task: "Audit submission authorization",
     workingDir: "/tmp/work",
@@ -599,6 +605,7 @@ test("executor prompt requires script inspection, safe execution, workspace repo
 test("standalone audit graph is Luna-only and activates synthesis on the first valid report", async () => {
   const run = harness();
   const runId = run.controller.start({
+    pipelineName: "audit-bounded-change-run",
     pipeline: "audit-pipeline",
     task: "Audit the bounded change",
     workingDir: "/tmp/work",
@@ -706,6 +713,7 @@ test("controller captures fresh Git status and diff evidence after executor sett
   const run = harness();
   try {
     const runId = run.controller.start({
+      pipelineName: "observe-executor-artifacts",
       pipeline: "audit-pipeline",
       task: "Observe executor artifacts",
       workingDir: workspace,
@@ -756,6 +764,7 @@ test("controller captures fresh Git status and diff evidence after executor sett
 test("track schema corrections are independent per session and preserve the run", async () => {
   const run = harness();
   const runId = run.controller.start({
+    pipelineName: "audit-retry-isolation",
     pipeline: "audit-pipeline",
     task: "Audit retry isolation",
     workingDir: "/tmp/work",
@@ -792,6 +801,7 @@ test("track schema corrections are independent per session and preserve the run"
 test("malformed executor evidence receives same-session correction without losing peers", async () => {
   const run = harness();
   const runId = run.controller.start({
+    pipelineName: "audit-executor-correction",
     pipeline: "audit-pipeline",
     task: "Audit executor correction",
     workingDir: "/tmp/work",
@@ -822,6 +832,7 @@ test("malformed executor evidence receives same-session correction without losin
 test("a fourth schema error in one track session fails and cancels the run", async () => {
   const run = harness();
   const runId = run.controller.start({
+    pipelineName: "audit-exhausted-retry",
     pipeline: "audit-pipeline",
     task: "Audit exhausted retry budget",
     workingDir: "/tmp/work",
@@ -845,6 +856,7 @@ test("a fourth schema error in one track session fails and cancels the run", asy
 test("a corrected synthesis tool submission continues and finalizes", async () => {
   const run = harness();
   const runId = run.controller.start({
+    pipelineName: "audit-synthesis-recovery",
     pipeline: "audit-pipeline",
     task: "Audit synthesis recovery",
     workingDir: "/tmp/work",
@@ -884,6 +896,7 @@ test("a corrected synthesis tool submission continues and finalizes", async () =
 test("synthesis schema correction budget is cumulative across reducer revisions", async () => {
   const run = harness();
   const runId = run.controller.start({
+    pipelineName: "audit-cumulative-retry",
     pipeline: "audit-pipeline",
     task: "Audit cumulative synthesis retry budget",
     workingDir: "/tmp/work",
@@ -1316,6 +1329,7 @@ test("closure audit input rejects an empty directly touched invariant scope", as
   assert.throws(
     () =>
       run.controller.start({
+        pipelineName: "incomplete-closure-audit",
         pipeline: "audit-pipeline",
         task: "Incomplete closure audit",
         workingDir: "/tmp/work",
@@ -1335,6 +1349,7 @@ test("closure audit input rejects an empty directly touched invariant scope", as
 test("standalone audit fails closed on malformed or missing reports", async () => {
   const malformed = harness();
   const malformedId = malformed.controller.start({
+    pipelineName: "audit-malformed-output",
     pipeline: "audit-pipeline",
     task: "Audit malformed output",
     workingDir: "/tmp/work",
@@ -1356,6 +1371,7 @@ test("standalone audit fails closed on malformed or missing reports", async () =
 
   const missing = harness();
   const missingId = missing.controller.start({
+    pipelineName: "audit-missing-output",
     pipeline: "audit-pipeline",
     task: "Audit missing output",
     workingDir: "/tmp/work",
@@ -1373,6 +1389,7 @@ test("standalone audit fails closed on malformed or missing reports", async () =
 test("standalone closure audit preserves supplied blocker scope and cancels session-scoped agents", async () => {
   const run = harness();
   const runId = run.controller.start({
+    pipelineName: "verify-blocker-closure",
     pipeline: "audit-pipeline",
     task: "Verify blocker closure",
     workingDir: "/tmp/work",
@@ -1413,6 +1430,7 @@ test("standalone closure audit preserves supplied blocker scope and cancels sess
 test("closure finalization rejects blocker substitution", async () => {
   const run = harness();
   const runId = run.controller.start({
+    pipelineName: "closure-blocker-check",
     pipeline: "audit-pipeline",
     task: "Verify blocker closure",
     workingDir: "/tmp/work",

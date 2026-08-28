@@ -19,6 +19,8 @@ import {
   FEATURE_PIPELINE_ID,
   PIPELINE_DEFINITION_IDS,
   assertPipelineGitCommitSupported,
+  PIPELINE_NAME_MAX_LENGTH,
+  PIPELINE_NAME_PATTERN,
   type PipelineDefinitionId,
   type PipelineHandoff,
 } from "./domain.ts";
@@ -113,6 +115,12 @@ const PLAN_PATH_PARAMETER = Type.Union(
 
 const NON_PLAN_PIPELINE_PARAMETERS = Type.Object(
   {
+    pipeline_name: Type.String({
+      description:
+        "Required unchanged human-readable base: exactly 3–5 lowercase kebab-case words and at most 64 characters (for example, replace-heavy-plan-pipeline); input is not trimmed or normalized.",
+      pattern: PIPELINE_NAME_PATTERN.source,
+      maxLength: PIPELINE_NAME_MAX_LENGTH,
+    }),
     pipeline: Type.Optional(
       StringEnum(
         [FEATURE_PIPELINE_ID, "small-feature-pipeline", AUDIT_PIPELINE_ID],
@@ -287,11 +295,11 @@ export default function pipelines(pi: ExtensionAPI) {
     name: "pipeline_run",
     label: "Run Pipeline",
     description:
-      "Start one of four known hardcoded pipelines in a caller-provided working directory and return its run id immediately: feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/xHIGH implementation candidates; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. plan-pipeline produces a complete repository-grounded plan through six parallel Luna discoveries and one Luna/xHIGH synthesis; pass plan_path explicitly as a destination or null. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
+      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name (maximum 64 characters) and return its canonical name-plus-eight-hex run id immediately: feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/xHIGH implementation candidates; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. plan-pipeline produces a complete repository-grounded plan through six parallel Luna discoveries and one Luna/xHIGH synthesis; pass plan_path explicitly as a destination or null. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
     promptSnippet:
       "Start a background implementation, planning, or Luna audit pipeline",
     promptGuidelines: [
-      "Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline request. Use audit-pipeline for routine repository initial or closure audits that require four independent static Luna tracks, one audit-executor contributor, and incremental Luna synthesis without remediation. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
+      "Always supply pipeline_name unchanged as a recognizable base of exactly 3–5 lowercase kebab-case words and at most 64 characters; do not trim or normalize it. Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline request. Use audit-pipeline for routine repository initial or closure audits that require four independent static Luna tracks, one audit-executor contributor, and incremental Luna synthesis without remediation. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
       "Automatically use plan-pipeline for a durable audited implementation plan, task breakdown, dependency waves, or test/release plan when at least one complexity signal applies: the goal spans two or more of frontend, backend, data, DevOps, or runtime; it includes migration, rollout, rollback, operational readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies require repository discovery. An explicit plan-pipeline request does not require a complexity signal.",
       "Do not choose plan-pipeline merely because an implementation request is cross-layer. Do not use implementation or planning pipelines for bugs, refactors, research-only work, or trivial edits; use audit-pipeline only when the requested outcome is a bounded repository audit rather than implementation. A small feature is bounded implementation work that still benefits from independent audit; it is not a synonym for a trivial edit. If the user has not made the desired deliverable—plan versus implementation—clear, ask before launching. Before feature-pipeline or small-feature-pipeline, create and prepare a dedicated linked Git worktree and pass its exact root. git_commit is authoritative and never inferred from task prose. feature-pipeline additionally rejects omission/false and requires Linux bubblewrap plus a clean stable HEAD; its controller alone owns temporary candidate/synthesis branches, worktrees, exact promotion, and cleanup. No pipeline receives push, delivery-merge, history-rewrite, deployment, or external-state authority. After launch, do not duplicate work in the same workspace; use pipeline_check occasionally or /pipelines for live inspection while continuing only unrelated work. Do not poll; completion arrives automatically as a follow-up handoff.",
     ],
@@ -342,6 +350,7 @@ export default function pipelines(pi: ExtensionAPI) {
           }
         : undefined;
       const runId = getController(ctx).start({
+        pipelineName: params.pipeline_name,
         task: params.task,
         workingDir,
         pipeline: definition,
@@ -384,12 +393,7 @@ export default function pipelines(pi: ExtensionAPI) {
       const header =
         theme.fg(failed ? "error" : "success", "■") +
         " " +
-        theme.fg(
-          "accent",
-          theme.bold(
-            `${details.definition ?? FEATURE_PIPELINE_ID} ${details.runId ?? "?"}`,
-          ),
-        ) +
+        theme.fg("accent", theme.bold(details.runId ?? "?")) +
         theme.fg("muted", ` · ${details.status ?? "unknown"}`);
       const content =
         typeof message.content === "string" ? message.content : "";

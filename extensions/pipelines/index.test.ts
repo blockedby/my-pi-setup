@@ -3,7 +3,10 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import { Check } from "typebox/value";
-import { assertPipelineGitCommitSupported } from "./domain.ts";
+import {
+  assertPipelineGitCommitSupported,
+  assertPipelineName,
+} from "./domain.ts";
 import pipelinesExtension, {
   PIPELINE_CANCEL_PARAMETERS,
   PIPELINE_RUN_PARAMETERS,
@@ -56,14 +59,73 @@ test("registered pipeline_cancel schema rejects malformed host payloads", () => 
   }
 });
 
-test("pipeline_run accepts a task with an optional working directory", () => {
+test("pipeline_run requires a valid human-readable pipeline name", () => {
   assert.equal(
-    Check(PIPELINE_RUN_PARAMETERS, { task: "Build a feature" }),
+    Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "build-safe-feature",
+      task: "Build a feature",
+    }),
     true,
   );
+  for (const pipeline_name of [
+    "",
+    "one",
+    "one-two",
+    "one-two-three-four-five-six",
+    "One-two-three",
+    "one two three",
+    "one-two/three",
+    "one--two-three",
+    "one-two-three!",
+    "one-two-three-four-five-six-seven",
+    " one-two-three",
+  ]) {
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, {
+        pipeline_name,
+        task: "Build a feature",
+      }),
+      false,
+    );
+  }
+  const maxLengthName = `a-${"b".repeat(15)}-${"c".repeat(15)}-${"d".repeat(15)}-${"e".repeat(14)}`;
+  assert.equal(maxLengthName.length, 64);
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: maxLengthName,
+      task: "Build a feature",
+    }),
+    true,
+  );
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: `${maxLengthName}a`,
+      task: "Build a feature",
+    }),
+    false,
+  );
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, { task: "Build a feature" }),
+    false,
+  );
+  assert.throws(() => assertPipelineName(" build-safe-feature"), /no trimming/);
+  for (const pipeline_name of [
+    "one-two-three",
+    "one-two-three-four",
+    "one-two-three-four-five",
+  ]) {
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, {
+        pipeline_name,
+        task: "Build a feature",
+      }),
+      true,
+    );
+  }
   for (const git_commit of [true, false]) {
     assert.equal(
       Check(PIPELINE_RUN_PARAMETERS, {
+        pipeline_name: "implement-feature-now",
         pipeline: "feature-pipeline",
         task: "Implement a feature",
         working_dir: "/repo/current-branch",
@@ -74,6 +136,7 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   }
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "implement-bounded-feature",
       pipeline: "small-feature-pipeline",
       task: "Implement a bounded feature",
       working_dir: ".worktrees/small-feature",
@@ -83,6 +146,7 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "plan-a-feature-now",
       pipeline: "plan-pipeline",
       task: "Plan a feature",
       working_dir: ".worktrees/feature",
@@ -92,6 +156,7 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "audit-bounded-change",
       pipeline: "audit-pipeline",
       task: "Audit the bounded change",
       working_dir: ".worktrees/audit",
@@ -104,6 +169,7 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "verify-prior-blockers",
       pipeline: "audit-pipeline",
       task: "Verify prior blockers",
       audit: {
@@ -119,6 +185,7 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "incomplete-closure-audit",
       pipeline: "audit-pipeline",
       task: "Incomplete closure audit",
       audit: {
@@ -134,6 +201,7 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "unsafe-audit-input",
       pipeline: "audit-pipeline",
       task: "Unsafe audit",
       audit: { mode: "closure", base_ref: "main", command: "git diff" },
@@ -142,6 +210,7 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "build-safe-feature",
       pipeline: "unknown-pipeline",
       task: "Build a feature",
     }),

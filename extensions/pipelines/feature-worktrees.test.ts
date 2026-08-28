@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   cleanupOwnedFeatureWorktreePaths,
   defaultFeatureGitOperations,
+  featureNamespaceAvailable,
   validateDedicatedFeatureWorktree,
 } from "./feature-worktrees.ts";
 import type {
@@ -147,7 +148,7 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
     const caller = defaultFeatureGitOperations.preflight(repo.caller);
     const lifecycle = defaultFeatureGitOperations.createLifecycle(
       caller,
-      "run-integration",
+      "replace-heavy-plan-pipeline-f82091ba",
     );
     assert.equal(
       path.dirname(lifecycle.temporaryRoot),
@@ -169,6 +170,14 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
       branchRef,
       headCommit,
     }));
+    assert.deepEqual(
+      candidateRefs.map(({ branchRef }) => branchRef),
+      [
+        "pipi-feature/replace-heavy-plan-pipeline-f82091ba/candidate-minimal",
+        "pipi-feature/replace-heavy-plan-pipeline-f82091ba/candidate-robust",
+        "pipi-feature/replace-heavy-plan-pipeline-f82091ba/candidate-architectural",
+      ],
+    );
 
     const selectionDirectory = lifecycle.prepareSelectionDirectory();
     assert.deepEqual(fs.readdirSync(selectionDirectory), []);
@@ -223,6 +232,78 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
       git(repo.caller, ["rev-parse", synthesis.branchRef]),
       finalCommit,
     );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("feature namespace admission protects retained refs and registered branches", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const occupied = "namespace-collision-test-a1b2c3d4";
+    git(repo.caller, [
+      "branch",
+      `pipi-feature/${occupied}/candidate-minimal`,
+      "HEAD",
+    ]);
+    assert.equal(featureNamespaceAvailable(caller, occupied), false);
+    const registered = "namespace-registered-test-c3d4e5f6";
+    const registeredPath = path.join(repo.root, "registered");
+    git(repo.primary, [
+      "worktree",
+      "add",
+      "-qb",
+      `pipi-feature/${registered}/candidate-robust`,
+      registeredPath,
+      "HEAD",
+    ]);
+    assert.equal(featureNamespaceAvailable(caller, registered), false);
+    git(repo.primary, ["worktree", "remove", "--force", registeredPath]);
+    const free = "namespace-free-test-e5f6a7b8";
+    assert.equal(featureNamespaceAvailable(caller, free), true);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("feature commits reject generated dependency symlinks before commit", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "artifact-safe-feature-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(path.join(minimal.path, "implementation.txt"), "ok\n");
+    fs.symlinkSync("/tmp", path.join(minimal.path, "node_modules"));
+    assert.throws(
+      () => lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path),
+      /generated or host-controlled paths/,
+    );
+    assert.equal(git(minimal.path, ["diff", "--cached", "--name-only"]), "");
+    fs.rmSync(path.join(minimal.path, "node_modules"));
+    const head = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+    );
+    assert.equal(
+      git(minimal.path, ["ls-tree", "--name-only", head, "--", "node_modules"]),
+      "",
+    );
+    assert.equal(
+      git(minimal.path, [
+        "ls-tree",
+        "--name-only",
+        head,
+        "--",
+        "implementation.txt",
+      ]),
+      "implementation.txt",
+    );
+    lifecycle.cleanup();
   } finally {
     repo.cleanup();
   }
