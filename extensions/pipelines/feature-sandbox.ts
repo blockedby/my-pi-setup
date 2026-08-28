@@ -19,6 +19,7 @@ export type FeatureSandboxMode = "candidate" | "selection" | "augmentation";
 
 export interface FeatureToolBoundary {
   readonly tools: ReadonlyArray<ToolDefinition>;
+  readonly availableToolNames: ReadonlyArray<string>;
   readonly initialActiveTools: ReadonlyArray<string>;
   enableAugmentation(): void;
 }
@@ -223,6 +224,13 @@ export function createFeatureToolBoundary(options: {
   ];
   return {
     tools,
+    availableToolNames: [
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "pipeline_feature_commit",
+    ],
     initialActiveTools:
       options.mode === "selection"
         ? ["read", "bash"]

@@ -37,13 +37,14 @@ test("candidate tools cannot read or mutate sibling worktrees and bash sees only
       cwd: candidateA,
       mode: "candidate",
     });
-    assert.deepEqual(boundary.initialActiveTools, [
+    assert.deepEqual(boundary.availableToolNames, [
       "read",
       "bash",
       "edit",
       "write",
       "pipeline_feature_commit",
     ]);
+    assert.deepEqual(boundary.initialActiveTools, boundary.availableToolNames);
     await assert.rejects(
       execute(tool(boundary, "read"), {
         path: path.join(candidateB, "secret.txt"),
@@ -78,7 +79,18 @@ test("selection tools are read-only across candidates until the controller enabl
       cwd: synthesis,
       mode: "selection",
     });
+    assert.deepEqual(boundary.availableToolNames, [
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "pipeline_feature_commit",
+    ]);
     assert.deepEqual(boundary.initialActiveTools, ["read", "bash"]);
+    assert.equal(
+      boundary.availableToolNames.includes("pipeline_feature_commit"),
+      true,
+    );
     const readResult = await execute(tool(boundary, "read"), {
       path: path.join(candidate, "candidate.txt"),
     });
