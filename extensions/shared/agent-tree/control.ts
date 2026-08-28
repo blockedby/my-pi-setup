@@ -41,6 +41,8 @@ interface Entry {
   node: MutableNode;
   session?: AgentTreeSession;
   unsubscribe?: () => void;
+  cancellation?: Promise<AgentNodeSnapshot>;
+  sessionDisposed?: boolean;
 }
 
 export interface AgentTreeControllerOptions {
@@ -97,6 +99,12 @@ export class AgentTreeController {
         void this.cancel(id).catch(() => {});
       },
     };
+  }
+
+  private async disposeSession(entry: Entry) {
+    if (!entry.session || entry.sessionDisposed) return;
+    entry.sessionDisposed = true;
+    await entry.session.dispose();
   }
 
   private notify(id?: string) {
@@ -237,7 +245,7 @@ export class AgentTreeController {
         node.status = "cancelled";
         node.settledAt = Date.now();
         node.error = "Run was cancelled before the agent started";
-        await session.dispose();
+        await this.disposeSession(entry);
         this.notify(id);
         return node as AgentNodeSnapshot;
       }
@@ -387,27 +395,54 @@ export class AgentTreeController {
     return unique.map((id) => this.entries.get(id)!.node);
   }
 
+  private async cancelEntry(entry: Entry) {
+    let failure: unknown;
+    if (entry.node.status !== "idle") {
+      try {
+        await entry.session!.interrupt();
+      } catch (error) {
+        failure = error;
+      }
+    }
+    entry.unsubscribe?.();
+    entry.unsubscribe = undefined;
+    try {
+      await this.disposeSession(entry);
+    } catch (error) {
+      failure ??= error;
+    }
+    if (
+      entry.node.status === "idle" ||
+      entry.node.status === "starting" ||
+      entry.node.status === "running"
+    ) {
+      this.settle(entry, {
+        type: "settled",
+        outcome: { type: "cancelled", finalText: entry.node.finalText },
+      });
+    }
+    if (failure) throw failure;
+    return entry.node as AgentNodeSnapshot;
+  }
+
   async cancel(id: string) {
     const entry = this.entries.get(id);
     if (!entry?.session) throw new Error(`Unknown agent id "${id}".`);
-    if (entry.node.status === "idle") {
-      this.settle(entry, {
-        type: "settled",
-        outcome: { type: "cancelled", finalText: entry.node.finalText },
-      });
+    if (entry.cancellation) return entry.cancellation;
+    if (
+      entry.node.status !== "idle" &&
+      entry.node.status !== "starting" &&
+      entry.node.status !== "running"
+    ) {
       return entry.node as AgentNodeSnapshot;
     }
-    if (entry.node.status !== "starting" && entry.node.status !== "running") {
-      return entry.node as AgentNodeSnapshot;
+    const cancellation = this.cancelEntry(entry);
+    entry.cancellation = cancellation;
+    try {
+      return await cancellation;
+    } finally {
+      entry.cancellation = undefined;
     }
-    await entry.session.interrupt();
-    if (entry.node.status === "starting" || entry.node.status === "running") {
-      this.settle(entry, {
-        type: "settled",
-        outcome: { type: "cancelled", finalText: entry.node.finalText },
-      });
-    }
-    return entry.node as AgentNodeSnapshot;
   }
 
   async dispose() {
@@ -423,7 +458,7 @@ export class AgentTreeController {
         ) {
           await entry.session.interrupt().catch(() => {});
         }
-        await entry.session?.dispose();
+        await this.disposeSession(entry);
       }),
     );
     this.notify();

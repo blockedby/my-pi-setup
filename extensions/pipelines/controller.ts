@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
   defineTool,
+  truncateHead,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -170,6 +171,21 @@ function featureAuditVerificationSummary(reportedCheckCount: number) {
   ];
 }
 
+function deferredSignal() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function boundedPipelineError(error: unknown) {
+  return truncateHead(error instanceof Error ? error.message : String(error), {
+    maxBytes: 16 * 1024,
+    maxLines: 200,
+  }).content;
+}
+
 interface MutableRun {
   id: string;
   definition: PipelineDefinitionId;
@@ -181,6 +197,9 @@ interface MutableRun {
   finishedAt?: number;
   error?: string;
   rootId?: string;
+  rootReady: Promise<void>;
+  resolveRootReady: () => void;
+  cancellation?: Promise<PipelineRunSnapshot>;
   featureDiscoveryBootstrapped: boolean;
   featureDiscoveryReports: Map<
     FeaturePipelineDiscoveryRole,
@@ -602,6 +621,7 @@ export class PipelineController {
     const featureLifecycle = featureCaller
       ? this.featureGit.createLifecycle(featureCaller, id)
       : undefined;
+    const rootReady = deferredSignal();
     const run: MutableRun = {
       id,
       definition,
@@ -614,6 +634,8 @@ export class PipelineController {
       stage: initialStageForDefinition(definition),
       status: "starting",
       startedAt: Date.now(),
+      rootReady: rootReady.promise,
+      resolveRootReady: rootReady.resolve,
       featureDiscoveryBootstrapped: false,
       featureDiscoveryReports: new Map(),
       ...(featureCaller ? { featureCaller } : {}),
@@ -650,6 +672,7 @@ export class PipelineController {
         shouldStart: () => run.status === "starting",
       });
       run.rootId = root.id;
+      run.resolveRootReady();
       if (run.status !== "starting") {
         this.notify();
         return;
@@ -678,6 +701,7 @@ export class PipelineController {
         }
       }
     } catch (error) {
+      run.resolveRootReady();
       this.failRun(
         run,
         error instanceof Error ? error.message : String(error),
@@ -705,6 +729,7 @@ export class PipelineController {
       shouldStart: () => run.status === "starting",
     });
     run.rootId = discoverySynthesisAgent.id;
+    run.resolveRootReady();
     if (run.status !== "starting") return;
     run.status = "running";
     this.notify();
@@ -2321,19 +2346,33 @@ export class PipelineController {
     await Promise.allSettled(active.map((agent) => this.tree.cancel(agent.id)));
   }
 
-  async cancelRun(runId: string) {
-    const run = this.requireRun(runId);
-    if (run.status !== "starting" && run.status !== "running")
-      return this.snapshot(run);
+  private async cancelRunOnce(run: MutableRun) {
     this.clearDiscoveryRunState(run.id);
     run.status = "cancelled";
     run.finishedAt = Date.now();
     this.notify();
+    await run.rootReady;
     await this.cancelActiveChildren(run);
-    if (run.rootId) await this.tree.cancel(run.rootId);
-    this.cleanupFeatureLifecycle(run);
-    this.deliver(run);
+    try {
+      if (run.rootId) await this.tree.cancel(run.rootId);
+    } catch (error) {
+      run.error = `Pipeline root cancellation failed: ${boundedPipelineError(error)}`;
+      throw error;
+    } finally {
+      this.cleanupFeatureLifecycle(run);
+      this.deliver(run);
+    }
     return this.snapshot(run);
+  }
+
+  async cancelRun(runId: string) {
+    const run = this.requireRun(runId);
+    if (run.cancellation) return run.cancellation;
+    if (run.status !== "starting" && run.status !== "running")
+      return this.snapshot(run);
+    const cancellation = this.cancelRunOnce(run);
+    run.cancellation = cancellation;
+    return cancellation;
   }
 
   private requireRun(runId: string) {

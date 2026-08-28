@@ -8,6 +8,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+  createPipelineCancellationTool,
+  PIPELINE_CANCEL_PARAMETERS,
+} from "./cancellation.ts";
 import { PipelineController } from "./controller.ts";
 import { showPipelineDashboard } from "./dashboard.ts";
 import {
@@ -25,7 +29,11 @@ import {
   PIPELINE_LIST_PARAMETERS,
 } from "./inspection.ts";
 
-export { PIPELINE_CHECK_PARAMETERS, PIPELINE_LIST_PARAMETERS };
+export {
+  PIPELINE_CANCEL_PARAMETERS,
+  PIPELINE_CHECK_PARAMETERS,
+  PIPELINE_LIST_PARAMETERS,
+};
 
 const AUDIT_INITIAL_PARAMETERS = Type.Object(
   {
@@ -308,6 +316,8 @@ export default function pipelines(pi: ExtensionAPI) {
       };
     },
   });
+
+  pi.registerTool(createPipelineCancellationTool(getController));
 
   for (const tool of createPipelineInspectionTools(getController)) {
     pi.registerTool(tool);

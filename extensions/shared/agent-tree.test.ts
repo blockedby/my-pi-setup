@@ -17,6 +17,7 @@ class FakeSession implements AgentTreeSession {
   isStreaming = false;
   interrupted = 0;
   disposed = 0;
+  interruptError: Error | undefined;
 
   subscribe(listener: (event: AgentTreeSessionEvent) => void) {
     this.listeners.add(listener);
@@ -44,6 +45,7 @@ class FakeSession implements AgentTreeSession {
 
   async interrupt() {
     this.interrupted++;
+    if (this.interruptError) throw this.interruptError;
     this.emit({ type: "settled", outcome: { type: "cancelled" } });
   }
 
@@ -223,6 +225,39 @@ test("persistent roots become idle and accept additional remediation turns", asy
   await tree.cancel(root.id);
   assert.equal(tree.view.get(root.id)?.status, "cancelled");
   assert.equal(session.interrupted, 0);
+  assert.equal(session.disposed, 1);
 
   await tree.dispose();
+  assert.equal(session.disposed, 1);
+});
+
+test("concurrent rejecting cancellation disposes and settles one session once", async () => {
+  const fake = fakeFactory();
+  const tree = new AgentTreeController({ factory: fake.factory });
+  const root = await tree.spawn({
+    role: "pipeline-root",
+    attempt: 1,
+    title: "root",
+    model: "test-model",
+    cwd: "/tmp",
+    prompt: "run",
+    persistent: true,
+  });
+  const session = fake.created[0]!.session;
+  session.interruptError = new Error("interrupt rejected");
+
+  const results = await Promise.allSettled([
+    tree.cancel(root.id),
+    tree.cancel(root.id),
+  ]);
+
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ["rejected", "rejected"],
+  );
+  assert.equal(session.interrupted, 1);
+  assert.equal(session.disposed, 1);
+  assert.equal(tree.view.get(root.id)?.status, "cancelled");
+  await tree.dispose();
+  assert.equal(session.disposed, 1);
 });

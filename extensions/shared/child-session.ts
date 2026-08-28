@@ -20,6 +20,7 @@ export const PIPELINE_ROOT_EXCLUDED_TOOL_NAMES = [
   "workflow",
   "ask_user",
   "pipeline_run",
+  "pipeline_cancel",
   "pipeline_check",
   "pipeline_list",
 ] as const;
