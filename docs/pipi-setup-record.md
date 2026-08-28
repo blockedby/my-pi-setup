@@ -1362,3 +1362,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/discovery-report.ts`, `extensions/pipelines/discovery-report.test.ts`, `docs/pipelines-v1-design.md`, and this record. Ordinary-field and collection limits, installed runtime state, credentials, model overrides, submodule pins, and external state are unchanged.
 - **Verification:** Focused discovery-report tests passed 8/8; `npm run check`, `npm run format:check`, and `git diff --check` passed. The focused tests assert the exact 30 KiB report and 150 KiB fan-in limits.
 - **Pending:** Reload or reinstall Pipi to apply the source change to newly created feature-pipeline sessions; no runtime rollout was requested.
+
+## Operation entry: roll out the 30 KiB feature discovery limit
+
+- **Request:** Commit and push the increased `feature-discovery-v2` report limit, then reinstall Pipi.
+- **Action:** Published source commit `515fc79` to `origin/main` and reinstalled Pipi from that synchronized checkout with repository dependency installation skipped. Newly created feature-pipeline discovery sessions now use the 30 KiB per-report and derived 150 KiB five-report fan-in limits.
+- **Affected paths or values:** Managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, and this record. Pipi remains at 0.84.3; credentials, authentication isolation, model overrides, MCP version, submodule pins, and external services are unchanged.
+- **Verification:** `npm run check:pipi-install` verified installed Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration. The delivered source passed focused discovery-report tests 8/8, TypeScript, formatting, and `git diff --check` before rollout.
+- **Pending:** Reload or restart sessions created before this reinstall so they load the increased discovery limit.
