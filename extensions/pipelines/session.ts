@@ -66,6 +66,9 @@ interface PipelineSessionFactoryOptions {
   readonly modelRegistry: Pick<ModelRegistry, "find">;
   readonly parentCwd: string;
   readonly parentTrusted: boolean;
+  readonly agentDir?: string;
+  readonly sessionManager?: (cwd: string) => SessionManager;
+  readonly sessionCreated?: (session: AgentSession) => void;
   readonly rootTools: (runId: string) => ReadonlyArray<ToolDefinition>;
   readonly definitionForRun: (runId: string) => PipelineDefinitionId;
   readonly auditSubmit?: (
@@ -405,6 +408,7 @@ export function createPipelineSessionFactory(
           childCwd: spec.cwd,
           parentTrusted: options.parentTrusted,
         }),
+        ...(options.agentDir ? { agentDir: options.agentDir } : {}),
       });
       const isRoot = !spec.parentId;
       const definition = options.definitionForRun(spec.scopeId ?? "");
@@ -527,7 +531,8 @@ export function createPipelineSessionFactory(
         cwd: spec.cwd,
         model,
         thinkingLevel: pipelineThinkingLevel(spec.model, spec.thinkingLevel),
-        sessionManager: SessionManager.create(spec.cwd),
+        sessionManager:
+          options.sessionManager?.(spec.cwd) ?? SessionManager.create(spec.cwd),
         settingsManager: resources.settingsManager,
         resourceLoader: resources.loader,
         ...(sessionTools.length > 0 ? { customTools: sessionTools } : {}),
@@ -537,6 +542,7 @@ export function createPipelineSessionFactory(
         ...pipelineSessionToolPolicy(definition, isRoot, spec.role),
       });
       try {
+        options.sessionCreated?.(session);
         await bindChildSessionExtensions(session);
         if (featureBoundary) {
           session.setActiveToolsByName([...featureBoundary.initialActiveTools]);
