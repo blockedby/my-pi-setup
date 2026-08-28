@@ -198,7 +198,8 @@ test("host measures the 2 KiB ordinary-field bound in UTF-8 bytes", () => {
   );
 });
 
-test("host rejects reports over the 20 KiB UTF-8 report bound", () => {
+test("host rejects reports over the 30 KiB UTF-8 report bound", () => {
+  assert.equal(FEATURE_DISCOVERY_REPORT_MAX_BYTES, 30 * 1024);
   const report = clone(validReport("discover-problem"));
   report.coverage = report.coverage.map((item) => ({
     ...item,
@@ -221,7 +222,8 @@ test("host rejects reports over the 20 KiB UTF-8 report bound", () => {
   );
 });
 
-test("host enforces the 100 KiB serialized five-report fan-in bound", () => {
+test("host enforces the 150 KiB serialized five-report fan-in bound", () => {
+  assert.equal(FEATURE_DISCOVERY_FAN_IN_MAX_BYTES, 150 * 1024);
   assert.deepEqual(
     validateFeatureDiscoveryFanIn({ payload: "x".repeat(1024) }),
     [],

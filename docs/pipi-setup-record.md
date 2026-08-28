@@ -1354,3 +1354,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, and this record. Pipi remains at 0.84.3; credentials, authentication isolation, model overrides, MCP version, submodule pins, and external services are unchanged.
 - **Verification:** `npm run check:pipi-install` verified installed Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration. Repository `npm run check` passed on the synchronized merge commit.
 - **Pending:** Reload or restart sessions created before this rollout so they load the Best-of-3 feature pipeline. No live provider-backed smoke was run.
+
+## Operation entry: increase feature discovery V2 report limit
+
+- **Request:** Increase the per-report `feature-discovery-v2` UTF-8 size limit from 20 KiB (20,480 bytes) to 30 KiB.
+- **Action:** Raised the report limit to 30 KiB (30,720 bytes). The derived five-report fan-in limit increases from 100 KiB to 150 KiB, and the model-facing submission instruction continues to use the shared limit constant. Updated focused boundary tests and pipeline design documentation.
+- **Affected paths or values:** `extensions/pipelines/discovery-report.ts`, `extensions/pipelines/discovery-report.test.ts`, `docs/pipelines-v1-design.md`, and this record. Ordinary-field and collection limits, installed runtime state, credentials, model overrides, submodule pins, and external state are unchanged.
+- **Verification:** Focused discovery-report tests passed 8/8; `npm run check`, `npm run format:check`, and `git diff --check` passed. The focused tests assert the exact 30 KiB report and 150 KiB fan-in limits.
+- **Pending:** Reload or reinstall Pipi to apply the source change to newly created feature-pipeline sessions; no runtime rollout was requested.
