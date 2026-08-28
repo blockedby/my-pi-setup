@@ -25,40 +25,6 @@ test("pipeline extension registers run plus main-agent check/list without status
   assert.equal(tools.includes("pipeline_wait"), false);
 });
 
-test("pipeline_run tool guidance assigns implementation preparation to the caller", () => {
-  const tools: Array<{
-    name: string;
-    description?: string;
-    promptGuidelines?: ReadonlyArray<string>;
-  }> = [];
-  const api = {
-    on: () => {},
-    registerTool: (tool: (typeof tools)[number]) => tools.push(tool),
-    registerMessageRenderer: () => {},
-    registerCommand: () => {},
-  } as unknown as ExtensionAPI;
-
-  pipelinesExtension(api);
-  const runTool = tools.find((tool) => tool.name === "pipeline_run");
-  assert.ok(runTool);
-  const guidance = `${runTool.description ?? ""}\n${runTool.promptGuidelines?.join("\n") ?? ""}`;
-  assert.match(guidance, /dedicated linked Git worktree on its own branch/);
-  assert.match(
-    guidance,
-    /repository-declared dependency\/bootstrap\/build preparation/,
-  );
-  assert.match(guidance, /controller.*does not run preparation/i);
-  assert.match(guidance, /do not guess a command/i);
-  assert.match(
-    guidance,
-    /verifies Git topology, not whether self-reported preparation commands ran/i,
-  );
-  assert.match(
-    guidance,
-    /Plan-pipeline and audit-pipeline do not require a linked worktree/i,
-  );
-});
-
 test("pipeline_run accepts a task with an optional working directory", () => {
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, { task: "Build a feature" }),
@@ -152,39 +118,29 @@ test("pipeline_run accepts a task with an optional working directory", () => {
   assert.equal(Check(PIPELINE_RUN_PARAMETERS, {}), false);
 });
 
-test("pipeline_run public schema describes implementation preflight and commit boundaries", () => {
-  const workingDirDescription = Reflect.get(
-    PIPELINE_RUN_PARAMETERS.properties.working_dir,
-    "description",
-  );
-  assert.equal(typeof workingDirDescription, "string");
-  assert.match(workingDirDescription, /exact root/);
-  assert.match(workingDirDescription, /dedicated linked Git worktree/);
-  assert.match(
-    workingDirDescription,
-    /dependency\/bootstrap\/build preparation/,
-  );
-  assert.match(workingDirDescription, /Plan and audit retain/);
-
-  const commitDescription = Reflect.get(
+test("git_commit public schema describes the definition and role boundary", () => {
+  const description = Reflect.get(
     PIPELINE_RUN_PARAMETERS.properties.git_commit,
     "description",
   );
-  assert.equal(typeof commitDescription, "string");
-  assert.match(commitDescription, /persistent feature-pipeline Sol root/);
-  assert.match(commitDescription, /persistent small-feature implementer/);
-  assert.match(commitDescription, /Plan\/audit reject true/);
-  assert.match(
-    commitDescription,
-    /mandatory implementation-worktree preflight/,
-  );
-  assert.match(commitDescription, /never permits push/);
+  assert.equal(typeof description, "string");
+  assert.match(description, /feature-pipeline hard-requires explicit true/);
+  assert.match(description, /dedicated clean attached linked worktree/);
+  assert.match(description, /persistent implementer/);
+  assert.match(description, /Plan\/audit reject true/);
+  assert.match(description, /Never permits push/);
 });
 
-test("git_commit validation accepts implementation roots and rejects plan/audit", () => {
+test("git_commit validation requires feature true and rejects plan/audit true", () => {
   assert.doesNotThrow(() =>
     assertPipelineGitCommitSupported("feature-pipeline", true),
   );
+  for (const requested of [false]) {
+    assert.throws(
+      () => assertPipelineGitCommitSupported("feature-pipeline", requested),
+      /requires explicit git_commit: true/,
+    );
+  }
   assert.doesNotThrow(() =>
     assertPipelineGitCommitSupported("small-feature-pipeline", true),
   );

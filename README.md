@@ -33,7 +33,19 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 
 Run `/pipelines` to inspect progress. Press `Enter` to expand a run or open the agent responsible for a stage. Status colors make running, completed, and failed work easy to scan.
 
-Implementation agents work in dedicated Git worktrees, keeping feature changes isolated from the main checkout while pipelines handle implementation, review, and verification.
+Example:
+
+```json
+{
+  "pipeline": "small-feature-pipeline",
+  "task": "Add CSV export with tests",
+  "working_dir": "/repo"
+}
+```
+
+`pipeline_run` defaults to `feature-pipeline` when `pipeline` is omitted. Feature runs require Linux bubblewrap, explicit `git_commit: true`, and a clean, attached, dedicated linked Git worktree (not the primary checkout). Five discovery tracks and one discovery synthesis prepare a shared package for three parallel isolated Luna/xHIGH candidates—Minimal, Robust, and Architectural—from the same base. One Luna/xHIGH synthesis agent compares committed candidates, selects exactly one primary before writing, optionally makes bounded primary-based improvements, verifies and commits the result, promotes that exact state to the caller worktree, and cleans only its temporary worktrees. Existing independent audit/remediation then evaluates the promoted result without candidate provenance. Controller-owned candidate/synthesis refs remain inspectable; pipelines never push, rewrite history, deploy, or mutate external delivery state.
+
+Final audits in standalone, feature, and plan contexts use the executor's repository-declared verification contract: standalone/feature executors run the noninteractive repository-wide full test suite after useful focused checks, while targeted tests never substitute for it. If a safe full suite is unavailable or cannot run, the executor records exact evidence and an unproven check. Plan final audits retain their planning-only prohibition on product implementation tests. Only feature `discover-problem` and plan `discover-goal-outcomes` receive ordinary bash for read-only `gh` lookup of referenced GitHub context; all other discovery and audit roles retain their shell boundaries.
 
 ### Everyday tools
 
@@ -71,7 +83,7 @@ See [SETUP.md](SETUP.md) for installation, updates, authentication, MCP configur
 
 ## Notes
 
-Pipeline runs are session-scoped and are not resumed after shutdown or reload.
+Pipeline runs are session-scoped and are not resumed after shutdown or reload. `feature-pipeline` enforces its dedicated linked-worktree preflight and controller-owned temporary isolation; callers remain responsible for workspace policy for the other pipeline definitions.
 
 For implementation details, contracts, and limits, see [Hardcoded pipelines design](docs/pipelines-v1-design.md).
 

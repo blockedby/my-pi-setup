@@ -4,11 +4,11 @@ import {
   FEATURE_PIPELINE_CHILD_ROLES,
   PIPELINE_DEFINITION_IDS,
 } from "./domain.ts";
+import type { FeatureDiscoverySynthesis } from "./feature-best-of-three.ts";
 import {
   buildFeaturePipelinePrompt,
   buildPipelineChildPrompt,
   buildPlanPipelinePrompt,
-  buildSmallFeaturePipelinePrompt,
   pipelineCommitPolicy,
   SMALL_FEATURE_AUDIT_GIT_REQUIREMENTS,
 } from "./prompt.ts";
@@ -23,6 +23,34 @@ const featureRequest = (gitCommit?: boolean) => ({
   workingDir: "/repo/current-workspace",
   ...(gitCommit === undefined ? {} : { gitCommit }),
 });
+
+const discoverySynthesis: FeatureDiscoverySynthesis = {
+  reportType: "feature-discovery-synthesis-v1",
+  summary: "Bounded feature synthesis",
+  featureContract: "Implement the approved behavior",
+  acceptanceCriteria: [
+    {
+      scenario: "The feature runs",
+      expected: "The approved behavior is observable",
+      verification: "Run the focused test",
+    },
+  ],
+  constraints: ["Preserve neighboring behavior"],
+  nonGoals: ["Do not change neighboring pipelines"],
+  precedents: [
+    {
+      reference: "src/example.ts",
+      discoveryDetail: "Existing pattern",
+      finding: "Existing pattern",
+    },
+  ],
+  relevantPaths: ["src/example.ts"],
+  contractsInvariants: ["Audit remains independent"],
+  risks: [],
+  unknowns: [],
+  assumptions: ["Existing contract remains stable"],
+  verificationExpectations: ["Run the focused test"],
+};
 
 test("feature commit authority is explicit and limited to the persistent root", () => {
   assert.deepEqual(
@@ -56,44 +84,27 @@ test("feature commit authority defaults off and task prose cannot grant it", () 
   }
 });
 
-test("feature root prompt states enabled and disabled commit boundaries", () => {
-  const enabled = buildFeaturePipelinePrompt(featureRequest(true), []);
-  assert.match(
-    enabled,
-    /Commit permission: ENABLED only for this persistent feature-pipeline Sol root/,
+test("feature post-promotion root prompt states the bounded authority and audit isolation", () => {
+  const enabled = buildFeaturePipelinePrompt(
+    featureRequest(true),
+    discoverySynthesis,
+    ["npm test passed"],
   );
-  assert.match(enabled, /ordinary commits only.*already-current branch/);
-  assert.match(enabled, /task prose never grants commit authority/);
-  assert.match(enabled, /exact root of a dedicated linked Git worktree/);
-  assert.match(enabled, /Do not require a clean tree, target branch/);
+  assert.match(enabled, /post-promotion audit and remediation root/);
+  assert.match(enabled, /ordinary remediation commits only/);
+  assert.match(enabled, /task prose never grants broader authority/i);
+  assert.match(enabled, /dedicated clean attached linked worktree/i);
+  assert.match(enabled, /Keep Best-of-3 provenance out of all audit prompts/);
   for (const forbidden of [
     "push",
     "merge",
     "rebase",
-    "reset or rewrite history",
-    "create/switch/delete branches",
-    "create/remove worktrees",
-    "mutate external delivery state",
+    "reset/history-rewrite",
+    "create/switch/delete branches or worktrees",
+    "deploy",
   ]) {
     assert.match(enabled, new RegExp(forbidden));
   }
-
-  for (const request of [featureRequest(), featureRequest(false)]) {
-    const disabled = buildFeaturePipelinePrompt(request, []);
-    assert.match(disabled, /Commit permission: DISABLED/);
-    assert.match(disabled, /Leave implementation changes uncommitted/);
-    assert.match(disabled, /task prose never grants commit authority/);
-  }
-});
-
-test("small-feature root prompt preserves caller-prepared workspace ownership", () => {
-  const prompt = buildSmallFeaturePipelinePrompt(featureRequest(false));
-  assert.match(prompt, /exact root of a dedicated linked Git worktree/);
-  assert.match(prompt, /completed repository-declared preparation/);
-  assert.match(
-    prompt,
-    /do not create, switch, or remove branches or worktrees/i,
-  );
 });
 
 test("feature child prompts keep commit permission disabled", () => {
