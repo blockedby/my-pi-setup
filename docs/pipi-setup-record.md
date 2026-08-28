@@ -1270,10 +1270,10 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 ## Operation entry: correct audit synthesis dashboard ordering and activity glyph
 
 - **Request:** Show `audit-synthesis` after the final audit contributors and avoid presenting its idle wait state as successful while the final-audit stage is still running.
-- **Action:** Ordered final-audit dashboard children with the synthesis session last while preserving contributor order. An idle synthesis row now uses the running/warning glyph only while its owning final-audit stage is active; its textual session status remains `idle`, and completed-stage rendering is unchanged. Added regression coverage for both the row order and active idle-synthesis glyph.
-- **Affected paths or values:** `extensions/pipelines/dashboard.ts`, `extensions/pipelines/dashboard.test.ts`, and this record. Pipeline graph/lifecycle behavior, model sessions, installed Pipi state, credentials, model overrides, submodules, and external state are unchanged.
-- **Verification:** Focused dashboard tests passed 14/14; the full deterministic extension suite passed 270/270; repository TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
-- **Pending:** Reload or reinstall Pipi after delivery so newly opened sessions use the corrected dashboard rendering.
+- **Action:** Ordered final-audit dashboard children with the synthesis session last while preserving contributor order. An idle synthesis row now uses the running/warning glyph only while its owning final-audit stage is active; its textual session status remains `idle`, and completed-stage rendering is unchanged. Added regression coverage for both the row order and active idle-synthesis glyph. After publishing source commit `49c5a23`, reinstalled Pipi from the synchronized primary checkout with repository dependency installation skipped.
+- **Affected paths or values:** `extensions/pipelines/dashboard.ts`, `extensions/pipelines/dashboard.test.ts`, managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, and this record. Pipeline graph/lifecycle behavior, model sessions, credentials, model overrides, submodules, and external state are unchanged.
+- **Verification:** Focused dashboard tests passed 14/14; the full deterministic extension suite passed 270/270; repository TypeScript, formatting, exact-submodule validation, and `git diff --check` passed. Post-install `npm run check:pipi-install` verified installed Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install-script policy, model overrides, and Herdr integration.
+- **Pending:** Reload or restart sessions created before this rollout so they load the corrected dashboard rendering.
 
 ## Operation entry: roll out final-audit and discovery policy changes
 
