@@ -3106,6 +3106,61 @@ test("plan-pipeline uses six Luna discoveries and one xhigh synthesis for termin
   fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
+test("plan-pipeline freezes accepted typed discovery sessions while whole-run cancellation remains available", async () => {
+  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-freeze-"));
+  const run = harness({ autoCompletePlan: false });
+  const runId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "plan-pipeline",
+    gitCommit: false,
+    planPath: null,
+  });
+  await settleInitialization();
+
+  const acceptedSession = run.sessions.find(
+    (session) => session.spec.role === PLAN_PIPELINE_DISCOVERY_ROLES[0],
+  );
+  assert.ok(acceptedSession?.discoverySubmit);
+  acceptedSession.discoverySubmit(
+    JSON.parse(planReportForRole(PLAN_PIPELINE_DISCOVERY_ROLES[0])),
+  );
+  acceptedSession.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "" },
+  });
+  await settleInitialization();
+
+  const acceptedNode = run.controller
+    .get(runId)
+    ?.agents.find((agent) => agent.role === acceptedSession.spec.role);
+  assert.ok(acceptedNode);
+  assert.equal(run.controller.get(runId)?.stage, "discover");
+  await assert.rejects(
+    run.controller.sendChild(
+      runId,
+      acceptedNode.id,
+      "Continue after acceptance",
+    ),
+    /already submitted an accepted report/,
+  );
+
+  const sendsBefore = acceptedSession.sends.length;
+  const interruptsBefore = acceptedSession.interrupted;
+  run.controller.agentView.requestSend(
+    acceptedNode.id,
+    "Restart accepted discovery",
+  );
+  run.controller.agentView.requestCancel(acceptedNode.id);
+  await settleInitialization();
+  assert.equal(acceptedSession.sends.length, sendsBefore);
+  assert.equal(acceptedSession.interrupted, interruptsBefore);
+
+  const cancelled = await run.controller.cancelRun(runId);
+  assert.equal(cancelled.status, "cancelled");
+  await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
+});
+
 test("plan-pipeline corrects malformed discovery and synthesis turns in place", async () => {
   const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-correct-"));
   const run = harness({ autoCompletePlan: false });

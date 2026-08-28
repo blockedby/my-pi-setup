@@ -809,6 +809,7 @@ export class PipelineController {
           report,
         });
         this.clearDiscoverySessionTokens(sessionId);
+        this.tree.disableViewMutations(sessionId);
         return;
       } catch (error) {
         const count = (this.discoveryCorrections.get(sessionId) ?? 0) + 1;
@@ -2392,6 +2393,19 @@ export class PipelineController {
       );
       if (!role) {
         throw new Error(`plan-pipeline child "${id}" cannot be retried.`);
+      }
+      if (run.stage !== "discover") {
+        throw new Error(
+          "plan-pipeline discovery sessions cannot continue after discovery.",
+        );
+      }
+      if (
+        run.planDiscoveryReports.has(role) ||
+        this.discoverySubmissions.has(id)
+      ) {
+        throw new Error(
+          `plan-pipeline discovery ${role} already submitted an accepted report.`,
+        );
       }
       if ((this.childContinuations.get(id) ?? 0) >= 1) {
         throw new Error(`plan-pipeline child "${id}" already used its retry.`);
