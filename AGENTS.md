@@ -1,6 +1,7 @@
 - run check/format/lint commands when your done making a change. if they don't exist, suggest making them for the project you're in
 - avoid explicit return types unless absolutely needed
 - `as any` should be an absolute last resort. always use real type safety. lean on type inference instead of manually writing new types over and over again
+- do not test prompt correctness by asserting literal words, phrases, or regex matches against prompt text; verify behavior through schemas, controller/tool contracts, state transitions, or executed outcomes instead
 - apply Sol/Terra/Luna concurrency quotas only to direct subagents; pipeline graphs predeclare their roots and children, so pipelines must not enforce, inherit, queue on, or otherwise account for direct-subagent capacity limits
 - before invoking `feature-pipeline` or `small-feature-pipeline`, the main agent must create a dedicated linked Git worktree on its own branch, run the target repository's declared dependency/bootstrap/build preparation there, and pass the exact worktree root; preparation is repository-specific and caller-owned, so never expect the pipeline controller to create the workspace, install dependencies, run builds, or guess commands
 - keep `README.md` focused on user-facing features, benefits, and concise usage; list what Pipi can do without exposing internal contracts, schemas, lifecycle mechanics, permission matrices, or other implementation details, and link dedicated design documentation when deeper technical material is needed
