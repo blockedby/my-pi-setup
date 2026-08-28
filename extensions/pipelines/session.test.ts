@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import * as path from "node:path";
 import test from "node:test";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   SessionManager,
   type AgentSession,
@@ -19,19 +19,6 @@ const FEATURE_TOOL_NAMES = [
   "write",
   "pipeline_feature_commit",
 ];
-const testModel = {
-  id: "gpt-5.6-luna",
-  name: "Pipeline Lifecycle Test",
-  api: "pipeline-lifecycle-test",
-  provider: "openai-codex",
-  baseUrl: "http://127.0.0.1:1",
-  reasoning: true,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 32_000,
-  maxTokens: 4_000,
-} satisfies Model<Api>;
-
 async function createFixture() {
   const root = await mkdtemp(
     path.join(process.cwd(), ".pipi-pipeline-session-"),
@@ -59,13 +46,36 @@ test("implementation synthesis keeps the registered commit tool across selection
       >
     | undefined;
 
+  let fauxProvider: ReturnType<typeof registerFauxProvider> | undefined;
+
   try {
+    const registeredFauxProvider = registerFauxProvider({
+      api: "pipeline-lifecycle-test-api",
+      provider: "pipeline-lifecycle-test-provider",
+      models: [
+        {
+          id: "gpt-5.6-luna",
+          name: "Pipeline Lifecycle Test",
+          reasoning: true,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 32_000,
+          maxTokens: 4_000,
+        },
+      ],
+    });
+    fauxProvider = registeredFauxProvider;
+    const assertNoModelTraffic = () => {
+      assert.equal(registeredFauxProvider.state.callCount, 0);
+      assert.equal(registeredFauxProvider.state.deferredFetchCount, 0);
+    };
+
     const factory = createPipelineSessionFactory({
       modelRegistry: {
         find(provider, id) {
           assert.equal(provider, "openai-codex");
           assert.equal(id, "gpt-5.6-luna");
-          return testModel;
+          return registeredFauxProvider.getModel();
         },
       },
       parentCwd: fixture.root,
@@ -103,15 +113,18 @@ test("implementation synthesis keeps the registered commit tool across selection
     });
 
     assert.ok(sdkSession);
+    assertNoModelTraffic();
     assert.deepEqual(creationToolNames, FEATURE_TOOL_NAMES);
     assert.ok(creationCommitTool);
     assert.deepEqual(session.activeTools, ["read", "bash"]);
     assert.deepEqual(sdkSession.getActiveToolNames(), ["read", "bash"]);
     assert.equal(session.isStreaming, false);
+    assertNoModelTraffic();
 
     const persistentSession = session;
     const persistentSdkSession = sdkSession;
     session.enableMutation();
+    assertNoModelTraffic();
 
     assert.strictEqual(session, persistentSession);
     assert.strictEqual(sdkSession, persistentSdkSession);
@@ -121,6 +134,7 @@ test("implementation synthesis keeps the registered commit tool across selection
     const commitTool = sdkSession.getToolDefinition("pipeline_feature_commit");
     assert.ok(commitTool);
     assert.strictEqual(commitTool, creationCommitTool);
+    assertNoModelTraffic();
     const result = await commitTool.execute(
       "pipeline-lifecycle-commit-call",
       {},
@@ -140,8 +154,10 @@ test("implementation synthesis keeps the registered commit tool across selection
       },
     ]);
     assert.equal(session.isStreaming, false);
+    assertNoModelTraffic();
   } finally {
     await session?.dispose();
+    fauxProvider?.unregister();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
