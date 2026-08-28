@@ -1491,3 +1491,19 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/feature-sandbox.ts`, `extensions/pipelines/session.ts`, `extensions/pipelines/feature-sandbox.test.ts`, and this record. Installed Pipi state, credentials, model overrides, submodules, project repositories, and external services are unchanged.
 - **Verification:** The focused feature-sandbox tests passed 2/2; TypeScript `check`, repository `format:check`, and `git diff --check` passed in the dedicated `fix/feature-synthesis-commit-tool` worktree.
 - **Pending:** Reinstall or reload Pipi only when separately requested; existing and newly created sessions in the currently installed runtime do not receive this source fix yet.
+
+## Operation entry: roll out the Bun runtime and package-manager migration
+
+- **Request:** Reinstall Pipi from merged `main` so the managed installation uses Bun.
+- **Action:** Reinstalled Pipi from source commit `0b564d6` with repository dependency preparation skipped. The isolated Pi 0.84.3, MCP adapter 2.15.0, and pinned browser runtime were freshly installed from `config/pipi-runtime/bun.lock` using Bun 1.4.0 at `/usr/bin/bun`; the managed launcher now executes Pipi through that recorded Bun runtime. Existing isolated settings, sessions, authentication policy, model overrides, browser configuration, and Herdr integration were preserved or refreshed through the managed installer without copying credentials.
+- **Affected paths or values:** Managed runtime and cache under `~/.pipi/agent`, browser skill and MCP configuration under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, Herdr Pi integration, and this record. Regular Pi state, vendor pins, source lockfiles, model override source, and authentication bytes are unchanged.
+- **Verification:** `bun run install:pipi -- --skip-repository-dependencies` completed with Bun 1.4.0 and installed 233 isolated packages. `bun run check:pipi-install` verified Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, lifecycle policy, model overrides, and Herdr integration. `/home/kcnc/.local/bin/pipi --version` returned 0.84.3.
+- **Pending:** Reload or restart existing Pipi sessions so they use the newly installed Bun-backed runtime and merged extensions.
+
+## Operation entry: align pipeline preparation guidance with Bun
+
+- **Request:** Fix the stale npm preparation command in `AGENTS.md` and commit the correction directly to `main`.
+- **Action:** Replaced the repository-specific implementation-pipeline preparation sequence with `bun run install:dependencies`, `bun run check`, and `bun run format:check`, matching the authoritative Bun runtime and package-manager contract.
+- **Affected paths or values:** `AGENTS.md` and this record. Installed runtime state, dependencies, lockfiles, credentials, model overrides, submodules, and external services are unchanged.
+- **Verification:** TypeScript checking, repository formatting validation, and `git diff --check` passed under Bun 1.4.0.
+- **Pending:** None.
