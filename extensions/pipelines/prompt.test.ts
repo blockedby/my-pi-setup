@@ -8,6 +8,7 @@ import {
   buildFeaturePipelinePrompt,
   buildPipelineChildPrompt,
   buildPlanPipelinePrompt,
+  buildSmallFeaturePipelinePrompt,
   pipelineCommitPolicy,
   SMALL_FEATURE_AUDIT_GIT_REQUIREMENTS,
 } from "./prompt.ts";
@@ -63,7 +64,8 @@ test("feature root prompt states enabled and disabled commit boundaries", () => 
   );
   assert.match(enabled, /ordinary commits only.*already-current branch/);
   assert.match(enabled, /task prose never grants commit authority/);
-  assert.match(enabled, /do not require a worktree, clean tree, target branch/);
+  assert.match(enabled, /exact root of a dedicated linked Git worktree/);
+  assert.match(enabled, /Do not require a clean tree, target branch/);
   for (const forbidden of [
     "push",
     "merge",
@@ -82,6 +84,16 @@ test("feature root prompt states enabled and disabled commit boundaries", () => 
     assert.match(disabled, /Leave implementation changes uncommitted/);
     assert.match(disabled, /task prose never grants commit authority/);
   }
+});
+
+test("small-feature root prompt preserves caller-prepared workspace ownership", () => {
+  const prompt = buildSmallFeaturePipelinePrompt(featureRequest(false));
+  assert.match(prompt, /exact root of a dedicated linked Git worktree/);
+  assert.match(prompt, /completed repository-declared preparation/);
+  assert.match(
+    prompt,
+    /do not create, switch, or remove branches or worktrees/i,
+  );
 });
 
 test("feature child prompts keep commit permission disabled", () => {

@@ -38,6 +38,59 @@ import {
 } from "./domain.ts";
 import { FEATURE_DISCOVERY_COVERAGE } from "./discovery-report.ts";
 
+interface LinkedWorktreeFixture {
+  root: string;
+  primary: string;
+  linked: string;
+}
+
+function createLinkedWorktreeFixture(
+  prefix: string,
+  files: Readonly<Record<string, string>> = { "baseline.txt": "baseline\n" },
+) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const primary = path.join(root, "primary");
+  const linked = path.join(root, "linked");
+  fs.mkdirSync(primary);
+  execFileSync("git", ["init", "-q"], { cwd: primary });
+  execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/main"], {
+    cwd: primary,
+  });
+  execFileSync("git", ["config", "user.email", "test@example.com"], {
+    cwd: primary,
+  });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: primary });
+  for (const [relativePath, contents] of Object.entries(files)) {
+    const target = path.join(primary, relativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contents);
+  }
+  execFileSync("git", ["add", "."], { cwd: primary });
+  execFileSync("git", ["commit", "-qm", "baseline"], { cwd: primary });
+  execFileSync("git", ["worktree", "add", "-q", "-b", "feature/test", linked], {
+    cwd: primary,
+  });
+  return { root, primary, linked };
+}
+
+let sharedImplementationFixture: LinkedWorktreeFixture | undefined;
+
+function implementationWorkingDir() {
+  sharedImplementationFixture ??= createLinkedWorktreeFixture(
+    "pipeline-implementation-",
+  );
+  return sharedImplementationFixture.linked;
+}
+
+test.after(() => {
+  if (sharedImplementationFixture) {
+    fs.rmSync(sharedImplementationFixture.root, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
 class FakePipelineSession implements AgentTreeSession {
   readonly listeners = new Set<(event: AgentTreeSessionEvent) => void>();
   readonly prompts: string[] = [];
@@ -212,13 +265,14 @@ function harness(
   };
 }
 
-const request = (workingDir = "/tmp/work") => ({
+const request = (workingDir = implementationWorkingDir()) => ({
   task: "Implement the approved feature",
   workingDir,
 });
 
-test("git_commit accepts feature true and false without workspace gates", async () => {
-  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "feature-commit-"));
+test("git_commit accepts feature true and false without cleanliness gates", async () => {
+  const fixture = createLinkedWorktreeFixture("feature-commit-");
+  const workingDir = fixture.linked;
   fs.writeFileSync(path.join(workingDir, "preexisting.txt"), "dirty\n");
   const run = harness();
   const enabledId = run.controller.start({
@@ -249,7 +303,7 @@ test("git_commit accepts feature true and false without workspace gates", async 
   assert.match(rootPrompt(omittedId), /Commit permission: DISABLED/);
 
   await run.controller.dispose();
-  fs.rmSync(workingDir, { recursive: true, force: true });
+  fs.rmSync(fixture.root, { recursive: true, force: true });
 });
 
 test("git_commit keeps plan/audit rejection and small-feature acceptance", async () => {
@@ -270,6 +324,77 @@ test("git_commit keeps plan/audit rejection and small-feature acceptance", async
   await settleInitialization();
   assert.equal(run.controller.get(smallFeatureId)?.status, "running");
   await run.controller.dispose();
+});
+
+test("implementation startup accepts linked branch worktrees and rejects invalid topology before state or sessions", async () => {
+  const fixture = createLinkedWorktreeFixture("pipeline-preflight-");
+  const nonGit = path.join(fixture.root, "non-git");
+  const nested = path.join(fixture.linked, "nested");
+  const detached = path.join(fixture.root, "detached");
+  const bare = path.join(fixture.root, "bare.git");
+  fs.mkdirSync(nonGit);
+  fs.mkdirSync(nested);
+  execFileSync("git", ["worktree", "add", "-q", "--detach", detached], {
+    cwd: fixture.primary,
+  });
+  execFileSync("git", ["clone", "-q", "--bare", fixture.primary, bare]);
+
+  for (const pipeline of [
+    "feature-pipeline",
+    "small-feature-pipeline",
+  ] as const) {
+    const rejected = harness();
+    for (const workingDir of [
+      fixture.primary,
+      fixture.root,
+      nonGit,
+      bare,
+      detached,
+      nested,
+    ]) {
+      assert.throws(
+        () => rejected.controller.start({ ...request(workingDir), pipeline }),
+        new RegExp(`${pipeline} requires working_dir`),
+      );
+      assert.deepEqual(rejected.controller.list(), []);
+      assert.equal(rejected.sessions.length, 0);
+    }
+    await rejected.controller.dispose();
+
+    const accepted = harness();
+    const runId = accepted.controller.start({
+      ...request(fixture.linked),
+      pipeline,
+    });
+    await settleInitialization();
+    assert.equal(accepted.controller.get(runId)?.status, "running");
+    assert.ok(accepted.sessions.length > 0);
+    await accepted.controller.dispose();
+  }
+
+  fs.rmSync(fixture.root, { recursive: true, force: true });
+});
+
+test("plan and audit startup retain their non-worktree workspace policy", async () => {
+  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "pipeline-policy-"));
+  const run = harness();
+  const planId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "plan-pipeline",
+  });
+  const auditId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "audit-pipeline",
+  });
+  await settleInitialization();
+
+  assert.equal(run.controller.get(planId)?.status, "running");
+  assert.equal(run.controller.get(auditId)?.status, "running");
+  assert.ok(run.sessions.some((session) => session.spec.scopeId === planId));
+  assert.ok(run.sessions.some((session) => session.spec.scopeId === auditId));
+
+  await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
 async function settleInitialization() {
@@ -587,7 +712,10 @@ test("start is fire-and-forget and multiple same-cwd runs are admitted", async (
   assert.equal(firstId, "run-1");
   assert.equal(secondId, "run-2");
   assert.equal(gated.controller.get(firstId)?.status, "starting");
-  assert.equal(gated.controller.get(secondId)?.workingDir, "/tmp/work");
+  assert.equal(
+    gated.controller.get(secondId)?.workingDir,
+    implementationWorkingDir(),
+  );
   releaseRoot();
   await settleInitialization();
   assert.equal(gated.controller.get(firstId)?.status, "running");
@@ -1345,7 +1473,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     git: ["working tree inspected"],
     reports: ["Luna implementation", "Four Luna audits", "Luna remediation"],
     unresolvedItems: [],
-    workingDir: "/tmp/work",
+    workingDir: implementationWorkingDir(),
   };
   run.controller.complete(runId, facts);
   const finalFacts = run.controller.get(runId)?.completion;
@@ -1369,20 +1497,10 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
 });
 
 test("feature audits and the embedded Luna segment receive captured fresh Git evidence", async () => {
-  const workingDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "feature-audit-evidence-"),
-  );
-  execFileSync("git", ["init", "-q"], { cwd: workingDir });
-  execFileSync("git", ["config", "user.email", "test@example.com"], {
-    cwd: workingDir,
+  const fixture = createLinkedWorktreeFixture("feature-audit-evidence-", {
+    "src/feature.ts": "before\n",
   });
-  execFileSync("git", ["config", "user.name", "Test"], {
-    cwd: workingDir,
-  });
-  fs.mkdirSync(path.join(workingDir, "src"));
-  fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "before\n");
-  execFileSync("git", ["add", "."], { cwd: workingDir });
-  execFileSync("git", ["commit", "-qm", "baseline"], { cwd: workingDir });
+  const workingDir = fixture.linked;
   const baseSha = execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: workingDir,
     encoding: "utf8",
@@ -1432,24 +1550,14 @@ test("feature audits and the embedded Luna segment receive captured fresh Git ev
   );
 
   await run.controller.dispose();
-  fs.rmSync(workingDir, { recursive: true, force: true });
+  fs.rmSync(fixture.root, { recursive: true, force: true });
 });
 
 test("small-feature Luna audits receive the captured base, implementation report, and actual diff", async () => {
-  const workingDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "small-feature-audit-"),
-  );
-  execFileSync("git", ["init", "-q"], { cwd: workingDir });
-  execFileSync("git", ["config", "user.email", "test@example.com"], {
-    cwd: workingDir,
+  const fixture = createLinkedWorktreeFixture("small-feature-audit-", {
+    "src/feature.ts": "before\n",
   });
-  execFileSync("git", ["config", "user.name", "Test"], {
-    cwd: workingDir,
-  });
-  fs.mkdirSync(path.join(workingDir, "src"));
-  fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "before\n");
-  execFileSync("git", ["add", "."], { cwd: workingDir });
-  execFileSync("git", ["commit", "-qm", "baseline"], { cwd: workingDir });
+  const workingDir = fixture.linked;
   const baseSha = execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: workingDir,
     encoding: "utf8",
@@ -1513,7 +1621,7 @@ test("small-feature Luna audits receive the captured base, implementation report
   }
 
   await run.controller.dispose();
-  fs.rmSync(workingDir, { recursive: true, force: true });
+  fs.rmSync(fixture.root, { recursive: true, force: true });
 });
 
 test("small-feature-pipeline fails closed on a malformed implementation report", async () => {
@@ -1841,7 +1949,7 @@ test("completion is rejected while a child is still active", async () => {
     git: [],
     reports: [],
     unresolvedItems: [],
-    workingDir: "/tmp/work",
+    workingDir: implementationWorkingDir(),
   };
 
   assert.throws(
@@ -1887,19 +1995,10 @@ test("dashboard cancellation of an idle root cancels the run and active children
 });
 
 test("feature completion appends committed and dirty Git facts without readiness status", async () => {
-  const workingDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "feature-completion-git-"),
-  );
-  execFileSync("git", ["init", "-q"], { cwd: workingDir });
-  execFileSync("git", ["config", "user.email", "test@example.com"], {
-    cwd: workingDir,
+  const fixture = createLinkedWorktreeFixture("feature-completion-git-", {
+    "feature.txt": "base\n",
   });
-  execFileSync("git", ["config", "user.name", "Test"], {
-    cwd: workingDir,
-  });
-  fs.writeFileSync(path.join(workingDir, "feature.txt"), "base\n");
-  execFileSync("git", ["add", "."], { cwd: workingDir });
-  execFileSync("git", ["commit", "-qm", "baseline"], { cwd: workingDir });
+  const workingDir = fixture.linked;
 
   const run = harness();
   const runId = run.controller.start(request(workingDir));
@@ -1970,7 +2069,7 @@ test("feature completion appends committed and dirty Git facts without readiness
   );
 
   await run.controller.dispose();
-  fs.rmSync(workingDir, { recursive: true, force: true });
+  fs.rmSync(fixture.root, { recursive: true, force: true });
 });
 
 test("plan completion requires and validates a repository-local plan artifact", async () => {
@@ -2053,7 +2152,7 @@ test("pipeline inspection does not mutate lifecycle state or consume the automat
     git: [],
     reports: [],
     unresolvedItems: [],
-    workingDir: "/tmp/work",
+    workingDir: implementationWorkingDir(),
   };
   await finishEmbeddedAudit(run, runId);
   run.controller.complete(runId, facts);

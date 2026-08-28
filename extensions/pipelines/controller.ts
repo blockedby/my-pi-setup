@@ -66,6 +66,7 @@ import {
   type AuditGitIdentity,
   type AuditSegmentContext,
 } from "./audit-segment.ts";
+import { assertImplementationPipelineWorkspace } from "./worktree-preflight.ts";
 
 export function pipelineDiscoverySubmissionAllowed(
   definition: PipelineDefinitionId,
@@ -428,6 +429,7 @@ export class PipelineController {
         "Closure audit requires prior blockers, closure conditions, a remediation diff, and at least one directly touched invariant.",
       );
     }
+    assertImplementationPipelineWorkspace(definition, request.workingDir);
     const normalizedRequest =
       definition === AUDIT_PIPELINE_ID ? { ...request, audit } : request;
     const id = this.makeRunId();

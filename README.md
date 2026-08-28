@@ -39,11 +39,13 @@ Example:
 {
   "pipeline": "small-feature-pipeline",
   "task": "Add CSV export with tests",
-  "working_dir": "/repo"
+  "working_dir": "/repo/.worktrees/csv-export"
 }
 ```
 
-`pipeline_run` defaults to `feature-pipeline` when `pipeline` is omitted. Set `git_commit: true` only when the persistent implementation agent should be allowed to create ordinary commits on the current branch. Pipelines never receive permission to push, merge, rewrite history, manage branches or worktrees, or deploy.
+`pipeline_run` defaults to `feature-pipeline` when `pipeline` is omitted. Before starting `feature-pipeline` or `small-feature-pipeline`, the calling main agent must create a dedicated linked Git worktree on its own branch, run that repository's declared dependency/bootstrap/build preparation in the worktree, and pass the exact worktree root as `working_dir`. Preparation commands are repository-specific; Pipi does not guess or run them, and it verifies Git topology rather than claiming to prove which preparation commands ran. `plan-pipeline` and `audit-pipeline` retain their existing workspace policy.
+
+Set `git_commit: true` only when the persistent implementation agent should be allowed to create ordinary commits on the current branch. Pipelines never receive permission to push, merge, rewrite history, manage branches or worktrees, or deploy.
 
 Final audits in standalone, feature, and plan contexts use the executor's repository-declared verification contract: standalone/feature executors run the noninteractive repository-wide full test suite after useful focused checks, while targeted tests never substitute for it. If a safe full suite is unavailable or cannot run, the executor records exact evidence and an unproven check. Plan final audits retain their planning-only prohibition on product implementation tests. Only feature `discover-problem` and plan `discover-goal-outcomes` receive ordinary bash for read-only `gh` lookup of referenced GitHub context; all other discovery and audit roles retain their shell boundaries.
 
@@ -83,7 +85,7 @@ See [SETUP.md](SETUP.md) for installation, updates, authentication, MCP configur
 
 ## Notes
 
-Pipeline runs are session-scoped and are not resumed after shutdown or reload. Pipi does not enforce worktree isolation, so the caller remains responsible for choosing an appropriate workspace and branch.
+Pipeline runs are session-scoped and are not resumed after shutdown or reload. Implementation pipelines enforce the caller-prepared linked-worktree topology described above before creating run state or model sessions. The caller remains responsible for worktree creation, repository-specific preparation, branch selection, and conflict isolation; planning and audit pipelines do not require linked worktrees.
 
 For implementation details, contracts, and limits, see [Hardcoded pipelines design](docs/pipelines-v1-design.md).
 
