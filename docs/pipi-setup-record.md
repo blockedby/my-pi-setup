@@ -1557,6 +1557,14 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Verification:** Focused controller/dashboard tests passed 64/64. The full deterministic extension suite passed 311/311. TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
 - **Pending:** Local runtime rollout/reload was not requested; existing sessions keep their currently loaded extension until restart or reinstall.
 
+## Operation entry: file plan-pipeline simplification issue
+
+- **Request:** Publish the current seven-stage `plan-pipeline` graph and its five discovery plus four plan-audit roles as a GitHub issue, then return to designing a planning-specific Luna pipeline analogous to feature discovery.
+- **Action:** Created GitHub issue [#75](https://github.com/blockedby/my-pi-setup/issues/75) proposing an explicit shorter plan stage list, Luna-only planning preparation roles, one Luna synthesis step, reuse of existing plan artifact validation and pipeline infrastructure, and removal of the redundant plan-audit plus final-audit sequence. The previously running live `plan-pipeline` had been cancelled by the user and was not restarted.
+- **Affected paths or values:** GitHub issue `blockedby/my-pi-setup#75` and this record. Pipeline source, installed runtime state, credentials, model overrides, submodule pins, and Git history are unchanged. The cancelled run's untracked `docs/plans/pipeline-stage-wallclock-limits.md` artifact remains untouched.
+- **Verification:** `gh issue create` returned the issue URL in the requested origin repository; the issue body records the current graph, relevant files, desired direction, and acceptance criteria.
+- **Pending:** Design the bounded planning-specific Luna preparation roles and synthesis contract before implementation; decide separately whether to keep or remove the cancelled run's untracked plan artifact.
+
 ## Operation entry: fix final-audit wait handoff race
 
 - **Request:** Fix the feature-pipeline bug that reported controller-owned audit submissions as invalid non-JSON and missed a validated final synthesis during `pipeline_child_wait`; add regression coverage, open and merge a PR, then update the local Pipi installation.
@@ -1603,3 +1611,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/controller.ts`, `extensions/pipelines/controller.test.ts`, and this record. Optional plan-output race handling, synthesis visibility, GitHub bash policy, pipeline graphs, installed runtime, credentials, model overrides, submodule pins, and external state are unchanged.
 - **Verification:** Focused controller tests pass 47/47. Fresh `env -u BROWSER_CHROME_NODE bun run test` passed 64 installer/script tests, 311 extension tests, and 22 file-search tests; `bun run check`, `bun run format:check`, `bun run check:submodules`, and `git diff --check` passed. No additional audit was requested.
 - **Pending:** Commit, publish, merge, synchronize `main`, and reinstall Pipi.
+
+## Operation entry: roll out Luna-only plan-pipeline
+
+- **Request:** Commit, push, merge, and install the accepted Luna-only plan-pipeline redesign after the scoped discovery-session lifecycle remediation, without another review.
+- **Action:** Delivered the implementation through PR [#83](https://github.com/blockedby/my-pi-setup/pull/83), synchronized canonical `main` to squash commit `a3c46ca`, cleaned the dedicated feature worktree/local branch while retaining the remote feature branch, and reinstalled Pipi from canonical source with repository dependency preparation skipped. Newly created sessions receive the six-Luna discovery, Luna/xHIGH free-form synthesis, optional caller-selected plan output, effective inspection reasoning metadata, and frozen accepted discovery sessions.
+- **Affected paths or values:** Canonical `main`, managed runtime/settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, browser/MCP assets, Herdr integration, GitHub PR #83, and this record. Pipi remains 0.84.3; credentials, model overrides, submodule pins, regular Pi state, and the cancelled wallclock plan artifact are unchanged.
+- **Verification:** Fresh post-rebase verification passed 64 installer/script tests, 314 extension tests, and 22 file-search tests plus TypeScript, formatting, exact submodules, and `git diff --check`. `bun run install:pipi -- --skip-repository-dependencies` installed 233 isolated packages through Bun 1.4.0; `bun run check:pipi-install` verified Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install policy, model overrides, and Herdr integration; `/home/kcnc/.local/bin/pipi --version` returned `0.84.3`.
+- **Pending:** Reload or restart sessions created before this reinstall so they load the new plan-pipeline graph and tool registry.
