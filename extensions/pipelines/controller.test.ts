@@ -2383,10 +2383,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
 
   const initial = run.controller.get(runId);
   assert.equal(initial?.stage, "build");
-  assert.equal(
-    initial?.agents[0]?.title,
-    "Small feature pipeline Luna · approved-feature-run-00000001",
-  );
+  assert.equal(initial?.agents[0]?.title, "approved-feature-run-00000001");
   assert.equal(initial?.agents[0]?.model, LUNA_MODEL);
   assert.equal(
     pipelineThinkingLevel(initial?.agents[0]?.model ?? ""),

@@ -357,29 +357,44 @@ function readStagedPaths(cwd: string) {
   return value ? value.split("\n").filter(Boolean) : [];
 }
 
-function pathExistsInCommit(cwd: string, commit: string, filePath: string) {
-  try {
-    execFileSync("git", ["cat-file", "-e", `${commit}:${filePath}`], {
-      cwd,
-      stdio: "ignore",
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function pathIsInsideWorktree(cwd: string, filePath: string) {
+function pathHasExternalSymlink(cwd: string, filePath: string) {
   const worktreeRoot = path.resolve(cwd);
-  const target = fs.readlinkSync(path.join(cwd, filePath));
-  const targetPath = path.resolve(
-    path.dirname(path.join(cwd, filePath)),
-    target,
-  );
-  return (
-    targetPath === worktreeRoot ||
-    targetPath.startsWith(`${worktreeRoot}${path.sep}`)
-  );
+  const absolutePath = path.resolve(cwd, filePath);
+  const relativePath = path.relative(worktreeRoot, absolutePath);
+  if (
+    path.isAbsolute(relativePath) ||
+    relativePath.startsWith(`..${path.sep}`)
+  ) {
+    return true;
+  }
+
+  let currentPath = worktreeRoot;
+  for (const part of relativePath.split(path.sep).filter(Boolean)) {
+    currentPath = path.join(currentPath, part);
+    const seen = new Set<string>();
+    while (true) {
+      if (
+        currentPath !== worktreeRoot &&
+        !currentPath.startsWith(`${worktreeRoot}${path.sep}`)
+      ) {
+        return true;
+      }
+      let stats: fs.Stats;
+      try {
+        stats = fs.lstatSync(currentPath);
+      } catch {
+        break;
+      }
+      if (!stats.isSymbolicLink()) break;
+      if (seen.has(currentPath)) return true;
+      seen.add(currentPath);
+      currentPath = path.resolve(
+        path.dirname(currentPath),
+        fs.readlinkSync(currentPath),
+      );
+    }
+  }
+  return false;
 }
 
 const generatedDirectoryNames = new Set([
@@ -403,18 +418,6 @@ function isGeneratedArtifactPath(filePath: string) {
     parts.some((part) => generatedDirectoryNames.has(part)) ||
     (parts.length > 0 && generatedRootDirectoryNames.has(parts[0]!))
   );
-}
-
-function readStagedSymlinks(cwd: string) {
-  const value = requireGit(
-    cwd,
-    ["ls-files", "--stage", "--"],
-    "Unable to inspect staged file types",
-  );
-  return value
-    .split("\n")
-    .filter((line) => line.startsWith("120000 "))
-    .map((line) => line.slice(line.indexOf("\t") + 1));
 }
 
 function readIgnoredStagedPaths(
@@ -868,24 +871,14 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       "Unable to stage feature implementation",
     );
     const stagedPaths = readStagedPaths(resolved);
-    const stagedSymlinks = new Set(readStagedSymlinks(resolved));
-    const baseCommit = candidateRole
-      ? this.caller.baseCommit
-      : this.synthesis?.primaryCommit;
-    if (!baseCommit) {
-      throw new Error("Unable to determine the assigned worktree base commit.");
-    }
-    const introducedPaths = stagedPaths.filter(
-      (item) => !pathExistsInCommit(resolved, baseCommit, item),
-    );
     const ignoredStagedPaths = new Set(
-      readIgnoredStagedPaths(resolved, introducedPaths),
+      readIgnoredStagedPaths(resolved, stagedPaths),
     );
-    const generated = introducedPaths.filter(
+    const generated = stagedPaths.filter(
       (item) =>
         ignoredStagedPaths.has(item) ||
         isGeneratedArtifactPath(item) ||
-        (stagedSymlinks.has(item) && !pathIsInsideWorktree(resolved, item)),
+        pathHasExternalSymlink(resolved, item),
     );
     if (generated.length > 0) {
       requireGit(

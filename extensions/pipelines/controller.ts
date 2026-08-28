@@ -766,10 +766,7 @@ export class PipelineController {
               ? PLAN_PIPELINE_SYNTHESIS_ROLE
               : "pipeline-root",
         attempt: 1,
-        title: scopedSessionTitle(
-          run.id,
-          definitionFor(run.definition).rootTitle,
-        ),
+        title: run.id,
         model: definitionFor(run.definition).rootModel,
         thinkingLevel:
           run.definition === PLAN_PIPELINE_ID ? "xhigh" : undefined,
@@ -1027,7 +1024,7 @@ export class PipelineController {
       scopeId: run.id,
       role: FEATURE_DISCOVERY_SYNTHESIS_ROLE,
       attempt: 1,
-      title: scopedSessionTitle(run.id, "Feature discovery synthesis"),
+      title: run.id,
       model: LUNA_MODEL,
       thinkingLevel: "medium",
       cwd: run.request.workingDir,
@@ -1219,10 +1216,7 @@ export class PipelineController {
       scopeId: run.id,
       role: "pipeline-root",
       attempt: 1,
-      title: scopedSessionTitle(
-        run.id,
-        definitionFor(run.definition).rootTitle,
-      ),
+      title: run.id,
       model: LUNA_MODEL,
       thinkingLevel: "xhigh",
       cwd: run.request.workingDir,

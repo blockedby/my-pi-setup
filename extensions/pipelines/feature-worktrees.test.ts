@@ -25,7 +25,10 @@ function git(cwd: string, args: ReadonlyArray<string>) {
   }).trim();
 }
 
-function fixture() {
+function fixture({
+  trackedGeneratedPath = false,
+  trackedSymlink = false,
+}: { trackedGeneratedPath?: boolean; trackedSymlink?: boolean } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-best-three-git-"));
   const primary = path.join(root, "primary");
   const caller = path.join(root, "caller");
@@ -34,6 +37,13 @@ function fixture() {
   git(primary, ["config", "user.email", "test@example.com"]);
   git(primary, ["config", "user.name", "Test"]);
   fs.writeFileSync(path.join(primary, "base.txt"), "base\n");
+  if (trackedGeneratedPath) {
+    fs.mkdirSync(path.join(primary, "node_modules"));
+    fs.writeFileSync(path.join(primary, "node_modules", "lock.json"), "{}\n");
+  }
+  if (trackedSymlink) {
+    fs.symlinkSync("base.txt", path.join(primary, "tracked-link"));
+  }
   git(primary, ["add", "."]);
   git(primary, ["commit", "-qm", "baseline"]);
   git(primary, ["worktree", "add", "-qb", "feat/caller", caller, "HEAD"]);
@@ -343,6 +353,34 @@ test("feature commits permit legitimate nested paths and in-repository symlinks"
       git(minimal.path, ["ls-tree", "-r", "--name-only", head]),
       "base.txt\ndocs/tmp/example.md\nimplementation.txt\nsrc/bin/tool.ts\nsrc/link.txt",
     );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("feature commits reject tracked generated paths and retargeted symlinks", () => {
+  const repo = fixture({ trackedGeneratedPath: true, trackedSymlink: true });
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "tracked-artifact-safety-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(
+      path.join(minimal.path, "node_modules", "lock.json"),
+      "changed\n",
+    );
+    fs.rmSync(path.join(minimal.path, "tracked-link"));
+    fs.symlinkSync("/tmp", path.join(minimal.path, "tracked-link"));
+
+    assert.throws(
+      () => lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path),
+      /generated or host-controlled paths/,
+    );
+    assert.equal(git(minimal.path, ["diff", "--cached", "--name-only"]), "");
     lifecycle.cleanup();
   } finally {
     repo.cleanup();
