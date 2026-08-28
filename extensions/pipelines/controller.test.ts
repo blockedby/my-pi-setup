@@ -353,6 +353,7 @@ function featureGitHarness(
 function harness(
   options: {
     rootGate?: Promise<void>;
+    sessionGate?: (spec: AgentNodeSpec) => Promise<void> | undefined;
     autoCompleteFeatureDiscovery?: boolean;
     autoCompleteDiscoverySynthesis?: boolean;
     autoCompleteCandidates?: boolean;
@@ -391,6 +392,7 @@ function harness(
       return {
         async create(spec) {
           if (!spec.parentId && options.rootGate) await options.rootGate;
+          await options.sessionGate?.(spec);
           const isImplementationRoot =
             !spec.parentId && spec.role === "pipeline-root";
           const configuredRootTools = isImplementationRoot
@@ -432,7 +434,6 @@ function harness(
                     ? reportForRole(spec.role)
                     : undefined;
           const discoveryAllowed =
-            Boolean(spec.parentId) &&
             Boolean(discoverySubmit) &&
             Boolean(discoveryToolAllowed?.(spec.scopeId ?? "", spec.role));
           const discoveryToken = discoveryAllowed
@@ -453,7 +454,13 @@ function harness(
                   "rg",
                   "web_search_codex",
                   "web_fetch_codex",
-                  ...(discoveryAllowed ? ["pipeline_discovery_submit"] : []),
+                  ...(discoveryAllowed
+                    ? [
+                        spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE
+                          ? "pipeline_discovery_synthesis_submit"
+                          : "pipeline_discovery_submit",
+                      ]
+                    : []),
                 ]
               : ["read", "bash", "edit", "write", ...orchestration],
             spec,
@@ -1069,10 +1076,20 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
     run.sessions.some((session) => candidateRoleFromSpec(session.spec.role)),
     false,
   );
+  assert.ok(synthesis.discoverySubmit);
+  assert.throws(
+    () => synthesis.discoverySubmit?.(discoverySynthesisResult()),
+    /submission is not active/,
+  );
 
-  for (const role of [...FEATURE_PIPELINE_DISCOVERY_ROLES].reverse()) {
-    settleRole(run, role);
-  }
+  const reversedRoles = [...FEATURE_PIPELINE_DISCOVERY_ROLES].reverse();
+  settleRole(run, reversedRoles[0]!);
+  await settleInitialization();
+  assert.throws(
+    () => synthesis.discoverySubmit?.(discoverySynthesisResult()),
+    /submission is not active/,
+  );
+  for (const role of reversedRoles.slice(1)) settleRole(run, role);
   await settleInitialization();
   assert.equal(synthesis.sends.length, 1);
   let priorIndex = -1;
@@ -1082,12 +1099,19 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
     priorIndex = index;
   }
 
+  assert.deepEqual(synthesis.activeTools, [
+    "read",
+    "fd",
+    "rg",
+    "web_search_codex",
+    "web_fetch_codex",
+    "pipeline_discovery_synthesis_submit",
+  ]);
+  assert.ok(synthesis.discoverySubmit);
+  synthesis.discoverySubmit(discoverySynthesisResult());
   synthesis.emit({
     type: "settled",
-    outcome: {
-      type: "completed",
-      finalText: JSON.stringify(discoverySynthesisResult()),
-    },
+    outcome: { type: "completed", finalText: "" },
   });
   await settleInitialization();
 
@@ -1125,6 +1149,9 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
   assert.equal(run.controller.get(runId)?.stage, "build");
   assert.equal(run.lifecycles[0]?.promoted, 1);
   assert.equal(run.lifecycles[0]?.cleaned, 1);
+  const acceptedTokens = Reflect.get(run.controller, "discoverySessionTokens");
+  assert.ok(acceptedTokens instanceof Map);
+  assert.equal(acceptedTokens.size, 0);
 
   const implementationSynthesis = run.sessions.filter(
     (session) => session.spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
@@ -1162,6 +1189,178 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
     assert.equal(candidate.interrupted, interruptsBefore);
   }
 
+  await run.controller.dispose();
+});
+
+test("discovery synthesis final-text fallback progresses without a tool payload", async () => {
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteDiscoverySynthesis: false,
+  });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) settleRole(run, role);
+  await settleInitialization();
+
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis);
+  synthesis.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: JSON.stringify(discoverySynthesisResult()),
+    },
+  });
+  await settleInitialization();
+  assert.equal(run.controller.get(runId)?.stage, "build");
+  assert.equal(run.lifecycles[0]?.promoted, 1);
+  await run.controller.dispose();
+});
+
+test("discovery synthesis tool reports exact schema paths and accepts a corrected same-session submission", async () => {
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteDiscoverySynthesis: false,
+  });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) settleRole(run, role);
+  await settleInitialization();
+
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis?.discoverySubmit);
+  const valid = discoverySynthesisResult();
+  const { acceptanceCriteria: _acceptanceCriteria, ...withoutAcceptance } =
+    valid;
+  synthesis.discoverySubmit({
+    ...withoutAcceptance,
+    featureContract: { scope: "wrong type" },
+    observableAcceptanceCriteria: valid.acceptanceCriteria,
+  });
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "ignored fallback" },
+  });
+  await settleInitialization();
+
+  assert.equal(run.controller.get(runId)?.status, "running");
+  assert.equal(synthesis.sends.length, 2);
+  assert.match(synthesis.sends[1] ?? "", /\/featureContract must be string/);
+  assert.match(
+    synthesis.sends[1] ?? "",
+    /additional properties: observableAcceptanceCriteria/,
+  );
+  assert.match(synthesis.sends[1] ?? "", /\/acceptanceCriteria/);
+
+  synthesis.discoverySubmit(valid);
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "" },
+  });
+  await settleInitialization();
+  assert.equal(run.controller.get(runId)?.stage, "build");
+  assert.equal(run.lifecycles[0]?.promoted, 1);
+  await run.controller.dispose();
+});
+
+test("discovery synthesis submissions are discarded on provider failure and cancellation", async () => {
+  for (const outcome of [
+    { type: "failed" as const, error: "provider failure" },
+    { type: "cancelled" as const },
+  ]) {
+    const run = harness({
+      autoCompleteFeatureDiscovery: false,
+      autoCompleteDiscoverySynthesis: false,
+    });
+    const runId = run.controller.start(request());
+    await settleInitialization();
+    for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) settleRole(run, role);
+    await settleInitialization();
+
+    const synthesis = run.sessions.find(
+      (session) => session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+    );
+    assert.ok(synthesis?.discoverySubmit);
+    synthesis.discoverySubmit(discoverySynthesisResult());
+    synthesis.emit({ type: "settled", outcome });
+
+    const expectedStatus =
+      outcome.type === "cancelled" ? "cancelled" : "failed";
+    assert.equal(run.controller.get(runId)?.status, expectedStatus);
+    const submissions = Reflect.get(run.controller, "discoverySubmissions");
+    const tokens = Reflect.get(run.controller, "discoverySessionTokens");
+    assert.ok(submissions instanceof Map);
+    assert.ok(tokens instanceof Map);
+    assert.equal(submissions.size, 0);
+    assert.equal(tokens.size, 0);
+
+    await settleInitialization();
+    assert.equal(run.controller.get(runId)?.status, expectedStatus);
+    await run.controller.dispose();
+  }
+});
+
+test("delayed discovery session creation cannot restore terminal run authority or affect a concurrent run", async () => {
+  let releaseDelayedSession!: () => void;
+  const delayedSession = new Promise<void>((resolve) => {
+    releaseDelayedSession = resolve;
+  });
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteDiscoverySynthesis: false,
+    sessionGate: (spec) =>
+      spec.scopeId === "run-1" && spec.role === "discover-problem"
+        ? delayedSession
+        : undefined,
+  });
+  const failedRunId = run.controller.start(request());
+  const survivingRunId = run.controller.start(request());
+  await settleInitialization();
+
+  const failedRoot = run.sessions.find(
+    (session) =>
+      session.spec.scopeId === failedRunId &&
+      session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  );
+  assert.ok(failedRoot);
+  failedRoot.emit({
+    type: "settled",
+    outcome: { type: "failed", error: "root failed during child creation" },
+  });
+  assert.equal(run.controller.get(failedRunId)?.status, "failed");
+
+  releaseDelayedSession();
+  await settleInitialization();
+  const submissions = Reflect.get(run.controller, "discoverySubmissions");
+  const tokens = Reflect.get(run.controller, "discoverySessionTokens");
+  assert.ok(submissions instanceof Map);
+  assert.ok(tokens instanceof Map);
+  assert.equal(submissions.size, 0);
+  for (const sessionId of tokens.values()) {
+    assert.equal(
+      run.controller.agentView.get(sessionId)?.scopeId,
+      survivingRunId,
+    );
+  }
+  assert.ok(tokens.size > 0);
+  const delayedFailedSession = run.sessions.find(
+    (session) =>
+      session.spec.scopeId === failedRunId &&
+      session.spec.role === "discover-problem",
+  );
+  assert.ok(delayedFailedSession);
+  assert.equal(
+    delayedFailedSession.activeTools.includes("pipeline_discovery_submit"),
+    false,
+  );
+  assert.equal(run.controller.get(survivingRunId)?.status, "running");
+
+  await run.controller.cancelRun(survivingRunId);
+  assert.equal(tokens.size, 0);
   await run.controller.dispose();
 });
 
@@ -1337,6 +1536,15 @@ test("feature cancellation cleans only the run lifecycle without promotion", asy
   await settleInitialization();
   await run.controller.cancelRun(runId);
   assert.equal(run.controller.get(runId)?.status, "cancelled");
+  const cancelledSubmissions = Reflect.get(
+    run.controller,
+    "discoverySubmissions",
+  );
+  const cancelledTokens = Reflect.get(run.controller, "discoverySessionTokens");
+  assert.ok(cancelledSubmissions instanceof Map);
+  assert.ok(cancelledTokens instanceof Map);
+  assert.equal(cancelledSubmissions.size, 0);
+  assert.equal(cancelledTokens.size, 0);
   assert.equal(run.lifecycles[0]?.promoted, 0);
   assert.ok((run.lifecycles[0]?.cleaned ?? 0) >= 1);
   await run.controller.dispose();
@@ -1431,6 +1639,24 @@ test("feature discovery submission scope is fixed to active feature discovery ro
       true,
     ),
     false,
+  );
+  assert.equal(
+    pipelineDiscoverySubmissionAllowed(
+      "feature-pipeline",
+      FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+      "discover",
+      false,
+    ),
+    false,
+  );
+  assert.equal(
+    pipelineDiscoverySubmissionAllowed(
+      "feature-pipeline",
+      FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+      "discover",
+      true,
+    ),
+    true,
   );
 });
 

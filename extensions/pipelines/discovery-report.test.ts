@@ -17,7 +17,10 @@ import {
   type FeatureDiscoveryCoverageStatus,
   type FeatureDiscoveryUnknown,
 } from "./discovery-report.ts";
-import { createPipelineDiscoverySubmitTool } from "./session.ts";
+import {
+  createPipelineDiscoverySubmitTool,
+  createPipelineDiscoverySynthesisSubmitTool,
+} from "./session.ts";
 
 function validReport(role: FeaturePipelineDiscoveryRole) {
   const evidence = [
@@ -233,6 +236,58 @@ test("host enforces the 150 KiB serialized five-report fan-in bound", () => {
       payload: "x".repeat(FEATURE_DISCOVERY_FAN_IN_MAX_BYTES),
     }).some((issue) => issue.includes("fan-in exceeds")),
   );
+});
+
+test("pipeline_discovery_synthesis_submit reuses terminating typed submission", async () => {
+  const accepted: unknown[] = [];
+  const tool = createPipelineDiscoverySynthesisSubmitTool((value) =>
+    accepted.push(value),
+  );
+  const synthesis = {
+    reportType: "feature-discovery-synthesis-v1",
+    summary: "Summary",
+    featureContract: "Contract",
+    acceptanceCriteria: [
+      {
+        scenario: "Scenario",
+        expected: "Expected",
+        verification: "Verification",
+      },
+    ],
+    constraints: ["Constraint"],
+    nonGoals: [],
+    precedents: [
+      {
+        reference: "path.ts",
+        discoveryDetail: "Exact detail",
+        finding: "Finding",
+      },
+    ],
+    relevantPaths: ["path.ts"],
+    contractsInvariants: ["Invariant"],
+    risks: [],
+    unknowns: [],
+    assumptions: [],
+    verificationExpectations: ["Run checks"],
+  };
+  assert.equal(tool.name, "pipeline_discovery_synthesis_submit");
+  assert.equal(Value.Check(tool.parameters, synthesis), true);
+  assert.equal(
+    Value.Check(tool.parameters, {
+      ...synthesis,
+      featureContract: { scope: "invalid" },
+    }),
+    false,
+  );
+  const result = await tool.execute(
+    "discovery-synthesis-submit",
+    synthesis,
+    undefined,
+    undefined,
+    {} as ExtensionContext,
+  );
+  assert.equal(result.terminate, true);
+  assert.deepEqual(accepted, [synthesis]);
 });
 
 test("pipeline_discovery_submit uses the concrete role schema and terminates acceptance", async () => {

@@ -6,6 +6,7 @@ import {
   buildFeatureCandidatePrompt,
   buildFeatureSelectionPrompt,
   parseFeatureCandidateHandoff,
+  parseFeatureDiscoverySynthesisValue,
   parseFeatureSelection,
   parseFeatureSynthesisProvenance,
   preparedDiscoveryPackage,
@@ -133,7 +134,7 @@ test("strict handoff, selection, and synthesis contracts reject incomplete or un
           comparisons: selection.comparisons.slice(0, 2),
         }),
       ),
-    /strict bounded Best-of-3 contract/,
+    /feature-implementation-selection-v1 schema validation failed/,
   );
   assert.throws(
     () =>
@@ -170,6 +171,64 @@ test("strict handoff, selection, and synthesis contracts reject incomplete or un
       }),
     ).finalCommit,
     sha("e"),
+  );
+});
+
+test("discovery synthesis schema failures identify exact invalid fields", () => {
+  const { acceptanceCriteria: _acceptanceCriteria, ...withoutAcceptance } =
+    synthesis;
+  assert.throws(
+    () =>
+      parseFeatureDiscoverySynthesisValue(
+        {
+          ...withoutAcceptance,
+          featureContract: { scope: "wrong type" },
+          observableAcceptanceCriteria: synthesis.acceptanceCriteria,
+        },
+        [],
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /feature-discovery-synthesis-v1/);
+      assert.match(error.message, /\/featureContract must be string/);
+      assert.match(
+        error.message,
+        /additional properties: observableAcceptanceCriteria/,
+      );
+      assert.match(error.message, /\/acceptanceCriteria/);
+      return true;
+    },
+  );
+});
+
+test("discovery synthesis evidence diagnostics identify pointers without echoing values", () => {
+  const submittedValue = "SECRET_PATH_SHOULD_NOT_BE_ECHOED";
+  assert.throws(
+    () =>
+      parseFeatureDiscoverySynthesisValue(
+        {
+          ...synthesis,
+          precedents: [
+            {
+              reference: submittedValue,
+              discoveryDetail: submittedValue,
+              finding: "Unsupported precedent",
+            },
+          ],
+        },
+        [],
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(
+        error.message,
+        /feature-discovery-synthesis-v1 semantic validation failed/,
+      );
+      assert.match(error.message, /\/precedents\/0\/reference/);
+      assert.match(error.message, /\/precedents\/0\/discoveryDetail/);
+      assert.doesNotMatch(error.message, new RegExp(submittedValue));
+      return true;
+    },
   );
 });
 

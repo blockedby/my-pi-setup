@@ -72,6 +72,7 @@ import {
   buildFeatureSelectionPrompt,
   parseFeatureCandidateHandoff,
   parseFeatureDiscoverySynthesis,
+  parseFeatureDiscoverySynthesisValue,
   parseFeatureSelection,
   parseFeatureSynthesisProvenance,
   preparedDiscoveryPackage,
@@ -96,20 +97,34 @@ import {
 } from "./audit-segment.ts";
 import { assertImplementationPipelineWorkspace } from "./worktree-preflight.ts";
 
+export function pipelineDiscoveryToolAllowed(
+  definition: PipelineDefinitionId,
+  role: string,
+  stage: PipelineStage,
+  bootstrapped: boolean,
+) {
+  if (definition !== FEATURE_PIPELINE_ID || stage !== "discover") return false;
+  if (role === FEATURE_DISCOVERY_SYNTHESIS_ROLE) return true;
+  return (
+    !bootstrapped &&
+    FEATURE_PIPELINE_DISCOVERY_ROLES.some(
+      (discoveryRole) => discoveryRole === role,
+    )
+  );
+}
+
 export function pipelineDiscoverySubmissionAllowed(
   definition: PipelineDefinitionId,
   role: string,
   stage: PipelineStage,
   bootstrapped: boolean,
 ) {
-  return (
-    definition === FEATURE_PIPELINE_ID &&
-    stage === "discover" &&
-    !bootstrapped &&
-    FEATURE_PIPELINE_DISCOVERY_ROLES.some(
-      (discoveryRole) => discoveryRole === role,
-    )
-  );
+  if (!pipelineDiscoveryToolAllowed(definition, role, stage, bootstrapped)) {
+    return false;
+  }
+  return role === FEATURE_DISCOVERY_SYNTHESIS_ROLE
+    ? bootstrapped
+    : !bootstrapped;
 }
 
 export function pipelineAuditSubmissionAllowed(
@@ -367,7 +382,10 @@ export class PipelineController {
           this.registerDiscoverySessionToken(runId, role, token),
         (runId, role) => {
           const run = this.requireRun(runId);
-          return pipelineDiscoverySubmissionAllowed(
+          if (run.status !== "starting" && run.status !== "running") {
+            return false;
+          }
+          return pipelineDiscoveryToolAllowed(
             run.definition,
             role,
             run.stage,
@@ -400,7 +418,8 @@ export class PipelineController {
   ) {
     const run = this.requireRun(runId);
     if (
-      !pipelineDiscoverySubmissionAllowed(
+      (run.status !== "starting" && run.status !== "running") ||
+      !pipelineDiscoveryToolAllowed(
         run.definition,
         role,
         run.stage,
@@ -413,6 +432,22 @@ export class PipelineController {
       .filter((agent) => agent.role === role && agent.status === "starting")
       .at(-1);
     if (node) this.discoverySessionTokens.set(token, node.id);
+  }
+
+  private clearDiscoverySessionTokens(sessionId: string) {
+    for (const [token, registeredSessionId] of this.discoverySessionTokens) {
+      if (registeredSessionId === sessionId) {
+        this.discoverySessionTokens.delete(token);
+      }
+    }
+  }
+
+  private clearDiscoveryRunState(runId: string) {
+    const sessionIds = new Set(this.agentsFor(runId).map((agent) => agent.id));
+    for (const sessionId of sessionIds) {
+      this.discoverySubmissions.delete(sessionId);
+      this.clearDiscoverySessionTokens(sessionId);
+    }
   }
 
   private submitDiscoveryReport(
@@ -689,7 +724,8 @@ export class PipelineController {
       discoverySynthesisAgent.id,
       "Feature discovery synthesis",
       (text) => parseFeatureDiscoverySynthesis(text, discoveryReports),
-      "Return one complete strict feature-discovery-synthesis-v1 JSON object. Do not repeat discovery or choose an implementation model/candidate.",
+      "Call pipeline_discovery_synthesis_submit with one complete strict feature-discovery-synthesis-v1 object. If the tool is unavailable, return the same object as compact final-text JSON. Do not repeat discovery or choose an implementation model/candidate.",
+      (value) => parseFeatureDiscoverySynthesisValue(value, discoveryReports),
     );
     run.featureDiscoverySynthesis = discoverySynthesis;
     if (run.status !== "running") return;
@@ -876,18 +912,28 @@ export class PipelineController {
     label: string,
     parse: (text: string) => T,
     correctionInstruction: string,
+    parseSubmission?: (value: unknown) => T,
   ) {
     while (run.status === "running") {
       const [settled] = await this.tree.wait([sessionId]);
       if (!settled)
         throw new Error(`${label} session ${sessionId} disappeared.`);
+      const hasSubmission = this.discoverySubmissions.has(sessionId);
+      const submitted = this.discoverySubmissions.get(sessionId);
+      this.discoverySubmissions.delete(sessionId);
       if (settled.status === "error" || settled.status === "cancelled") {
+        this.clearDiscoverySessionTokens(sessionId);
         throw new Error(
           `${label} session ${settled.status}: ${settled.error ?? "provider failure or cancellation"}.`,
         );
       }
       try {
-        return parse(settled.finalText);
+        const result =
+          hasSubmission && parseSubmission
+            ? parseSubmission(submitted)
+            : parse(settled.finalText);
+        this.clearDiscoverySessionTokens(sessionId);
+        return result;
       } catch (error) {
         const count =
           (this.featureSynthesisCorrections.get(sessionId) ?? 0) + 1;
@@ -977,6 +1023,7 @@ export class PipelineController {
       }
       try {
         this.acceptFeatureDiscoveryTurn(run, role, settled);
+        this.clearDiscoverySessionTokens(sessionId);
         return;
       } catch (error) {
         const count = (this.discoveryCorrections.get(sessionId) ?? 0) + 1;
@@ -1504,6 +1551,7 @@ export class PipelineController {
       const root = run.rootId ? this.tree.view.get(run.rootId) : undefined;
       if (!root) continue;
       if (root.status === "cancelled") {
+        this.clearDiscoveryRunState(run.id);
         run.status = "cancelled";
         run.finishedAt = Date.now();
         run.error = root.error;
@@ -1512,6 +1560,7 @@ export class PipelineController {
           this.deliver(run);
         });
       } else if (root.status === "error") {
+        this.clearDiscoveryRunState(run.id);
         this.failRun(run, root.error ?? "Pipeline root failed.");
       }
       if (run.status === "starting" || run.status === "running") {
@@ -1523,6 +1572,7 @@ export class PipelineController {
 
   private failRun(run: MutableRun, error: string, cancelRoot = false) {
     if (run.status !== "starting" && run.status !== "running") return;
+    this.clearDiscoveryRunState(run.id);
     run.status = "failed";
     run.finishedAt = Date.now();
     run.error = error.slice(0, 16 * 1024);
@@ -2252,6 +2302,7 @@ export class PipelineController {
         auditReport: run.auditSegment.finalReport,
       };
     }
+    this.clearDiscoveryRunState(run.id);
     run.stage = "complete";
     run.status = "completed";
     run.finishedAt = Date.now();
@@ -2274,6 +2325,7 @@ export class PipelineController {
     const run = this.requireRun(runId);
     if (run.status !== "starting" && run.status !== "running")
       return this.snapshot(run);
+    this.clearDiscoveryRunState(run.id);
     run.status = "cancelled";
     run.finishedAt = Date.now();
     this.notify();

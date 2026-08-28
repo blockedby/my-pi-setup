@@ -9,7 +9,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type TSchema } from "typebox";
 import {
   AUDIT_SYNTHESIS_REPORT_SCHEMA,
   auditTrackReportSchema,
@@ -50,6 +50,7 @@ import { featureDiscoveryReportSchema } from "./discovery-report.ts";
 import {
   FEATURE_CANDIDATE_ROLES,
   FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  FEATURE_DISCOVERY_SYNTHESIS_SCHEMA,
   FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
 } from "./feature-best-of-three.ts";
 import { createFeatureToolBoundary } from "./feature-sandbox.ts";
@@ -179,25 +180,23 @@ function auditSubmissionRole(role: string) {
   return AUDIT_SEGMENT_LUNA_ROLES.find((candidate) => candidate === role);
 }
 
-export function createPipelineDiscoverySubmitTool(
-  role: FeaturePipelineDiscoveryRole,
-  submit: (value: unknown) => void,
-) {
+function createTerminatingSubmissionTool(options: {
+  readonly name: string;
+  readonly label: string;
+  readonly description: string;
+  readonly parameters: TSchema;
+  readonly acceptedText: string;
+  readonly submit: (value: unknown) => void;
+}) {
   return defineTool({
-    name: "pipeline_discovery_submit",
-    label: "Submit Discovery Report",
-    description:
-      "Submit this role's complete feature discovery V2 report to the host and stop this turn.",
-    parameters: featureDiscoveryReportSchema(role),
+    name: options.name,
+    label: options.label,
+    description: options.description,
+    parameters: options.parameters,
     async execute(_toolCallId, params) {
-      submit(params);
+      options.submit(params);
       return {
-        content: [
-          {
-            type: "text",
-            text: "Discovery report recorded. Stop this turn.",
-          },
-        ],
+        content: [{ type: "text", text: options.acceptedText }],
         details: params,
         terminate: true,
       };
@@ -205,11 +204,40 @@ export function createPipelineDiscoverySubmitTool(
   });
 }
 
+export function createPipelineDiscoverySubmitTool(
+  role: FeaturePipelineDiscoveryRole,
+  submit: (value: unknown) => void,
+) {
+  return createTerminatingSubmissionTool({
+    name: "pipeline_discovery_submit",
+    label: "Submit Discovery Report",
+    description:
+      "Submit this role's complete feature discovery V2 report to the host and stop this turn.",
+    parameters: featureDiscoveryReportSchema(role),
+    acceptedText: "Discovery report recorded. Stop this turn.",
+    submit,
+  });
+}
+
+export function createPipelineDiscoverySynthesisSubmitTool(
+  submit: (value: unknown) => void,
+) {
+  return createTerminatingSubmissionTool({
+    name: "pipeline_discovery_synthesis_submit",
+    label: "Submit Discovery Synthesis",
+    description:
+      "Submit the complete feature discovery synthesis report to the host and stop this turn.",
+    parameters: FEATURE_DISCOVERY_SYNTHESIS_SCHEMA,
+    acceptedText: "Discovery synthesis recorded. Stop this turn.",
+    submit,
+  });
+}
+
 export function createPipelineAuditSubmitTool(
   role: typeof AUDIT_SYNTHESIS_ROLE | PipelineLunaAuditRole,
   submit: (value: unknown) => void,
 ) {
-  return defineTool({
+  return createTerminatingSubmissionTool({
     name: "pipeline_audit_submit",
     label: "Submit Audit Report",
     description:
@@ -218,19 +246,8 @@ export function createPipelineAuditSubmitTool(
       role === AUDIT_SYNTHESIS_ROLE
         ? AUDIT_SYNTHESIS_REPORT_SCHEMA
         : auditTrackReportSchema(role),
-    async execute(_toolCallId, params) {
-      submit(params);
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Audit report recorded. Stop this turn.",
-          },
-        ],
-        details: params,
-        terminate: true,
-      };
-    },
+    acceptedText: "Audit report recorded. Stop this turn.",
+    submit,
   });
 }
 
@@ -406,10 +423,11 @@ export function createPipelineSessionFactory(
       const discoveryRole = FEATURE_PIPELINE_DISCOVERY_ROLES.find(
         (candidate) => candidate === spec.role,
       );
+      const isDiscoverySynthesis =
+        spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE;
       const discoveryToolAllowed =
-        !isRoot &&
         definition === FEATURE_PIPELINE_ID &&
-        discoveryRole &&
+        (discoveryRole || isDiscoverySynthesis) &&
         options.discoverySubmit &&
         options.discoveryToolAllowed?.(spec.scopeId ?? "", spec.role);
       const discoverySessionToken = discoveryToolAllowed
@@ -421,17 +439,25 @@ export function createPipelineSessionFactory(
           spec.role,
           discoverySessionToken,
         );
-      const discoveryTool =
-        discoveryToolAllowed && discoverySessionToken && discoveryRole
-          ? createPipelineDiscoverySubmitTool(discoveryRole, (value) =>
+      const submitDiscoveryValue =
+        discoveryToolAllowed && discoverySessionToken
+          ? (value: unknown) =>
               options.discoverySubmit!(
                 spec.scopeId ?? "",
                 spec.role,
                 discoverySessionToken,
                 value,
-              ),
-            )
+              )
           : undefined;
+      const discoveryTool =
+        submitDiscoveryValue && discoveryRole
+          ? createPipelineDiscoverySubmitTool(
+              discoveryRole,
+              submitDiscoveryValue,
+            )
+          : submitDiscoveryValue && isDiscoverySynthesis
+            ? createPipelineDiscoverySynthesisSubmitTool(submitDiscoveryValue)
+            : undefined;
       const auditToolAllowed =
         submissionRole &&
         options.auditSubmit &&
