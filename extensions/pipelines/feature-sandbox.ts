@@ -88,7 +88,7 @@ function commonGitDir(tempRoot: string, cwd: string) {
 }
 
 function visibleRoots(mode: FeatureSandboxMode, tempRoot: string, cwd: string) {
-  if (mode !== "selection") return [cwd];
+  if (mode === "candidate") return [cwd];
   return [
     cwd,
     ...fs
@@ -123,7 +123,8 @@ function sandboxCommand(
   ];
   for (const root of roots) {
     args.push("--dir", root);
-    args.push(mode === "selection" ? "--ro-bind" : "--bind", root, root);
+    const readOnly = mode === "selection" || root !== cwd;
+    args.push(readOnly ? "--ro-bind" : "--bind", root, root);
   }
   const gitDir = commonGitDir(tempRoot, cwd);
   if (gitDir) args.push("--tmpfs", gitDir);
@@ -134,6 +135,7 @@ function sandboxCommand(
 export function createFeatureToolBoundary(options: {
   readonly cwd: string;
   readonly mode: "candidate" | "selection";
+  readonly onBashResult?: (command: string, exitCode: number | null) => void;
 }) {
   const cwd = comparableExistingPath(options.cwd);
   const tempRoot = comparableExistingPath(path.dirname(cwd));
@@ -146,6 +148,7 @@ export function createFeatureToolBoundary(options: {
         "/",
         execution,
       );
+      options.onBashResult?.(command, result.exitCode);
       return result;
     },
   };

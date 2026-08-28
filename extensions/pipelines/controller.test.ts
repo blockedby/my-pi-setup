@@ -201,7 +201,8 @@ const CANDIDATE_COMMITS: Readonly<Record<FeatureCandidateRole, string>> = {
   Robust: "c".repeat(40),
   Architectural: "d".repeat(40),
 };
-const FINAL_SYNTHESIS_COMMIT = "e".repeat(40);
+const AUGMENTATION_SYNTHESIS_COMMIT = "e".repeat(40);
+const FINAL_SYNTHESIS_COMMIT = "f".repeat(40);
 
 class FakeFeatureLifecycle implements FeatureWorktreeLifecycle {
   readonly temporaryRoot: string;
@@ -296,10 +297,16 @@ class FakeFeatureLifecycle implements FeatureWorktreeLifecycle {
     assert.equal(provenance.primaryCandidate, worktree.primaryRole);
     assert.equal(provenance.primaryCommit, worktree.primaryCommit);
     assert.equal(provenance.finalCommit, FINAL_SYNTHESIS_COMMIT);
+    assert.equal(provenance.augmentationCommit, AUGMENTATION_SYNTHESIS_COMMIT);
     return {
       ...worktree,
       finalCommit: FINAL_SYNTHESIS_COMMIT,
-      changedPaths: provenance.changedPaths,
+      changedPaths: [
+        ...new Set([
+          ...provenance.augmentationChangedPaths,
+          ...provenance.completionChangedPaths,
+        ]),
+      ],
     };
   }
 
@@ -378,6 +385,14 @@ function harness(
         value: unknown,
       ) => void)
     | undefined;
+  let featureBashResultCallback:
+    | ((
+        runId: string,
+        role: string,
+        command: string,
+        exitCode: number | null,
+      ) => void)
+    | undefined;
   const controller = new PipelineController({
     makeRunId: () => `run-${++runSequence}`,
     makeAgentId: () => `node-${++agentSequence}`,
@@ -390,8 +405,11 @@ function harness(
       discoverySubmit,
       discoverySessionCreated,
       discoveryToolAllowed,
+      _featureCommit,
+      featureBashResult,
     ) => {
       discoverySubmitCallback = discoverySubmit;
+      featureBashResultCallback = featureBashResult;
       return {
         async create(spec) {
           if (!spec.parentId && options.rootGate) await options.rootGate;
@@ -423,12 +441,24 @@ function harness(
                   )
                 : spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE &&
                     options.autoCompleteSelectionAndSynthesis !== false
-                  ? (turn: number) =>
-                      JSON.stringify(
+                  ? (turn: number) => {
+                      const report =
                         turn === 0
                           ? selectionResult()
-                          : implementationSynthesisResult(),
-                      )
+                          : implementationSynthesisResult();
+                      if (turn > 0) {
+                        for (const command of implementationSynthesisResult()
+                          .checks) {
+                          featureBashResult?.(
+                            spec.scopeId ?? "",
+                            spec.role,
+                            command,
+                            0,
+                          );
+                        }
+                      }
+                      return JSON.stringify(report);
+                    }
                   : options.autoCompleteFeatureDiscovery !== false &&
                       spec.parentId &&
                       definitionForRun(spec.scopeId ?? "") ===
@@ -505,6 +535,15 @@ function harness(
     submitUnauthorized(role: string, value: unknown) {
       assert.ok(discoverySubmitCallback);
       discoverySubmitCallback("run-1", role, "unauthorized-token", value);
+    },
+    recordFeatureBash(
+      runId: string,
+      role: string,
+      command: string,
+      exitCode: number | null,
+    ) {
+      assert.ok(featureBashResultCallback);
+      featureBashResultCallback(runId, role, command, exitCode);
     },
   };
 }
@@ -606,14 +645,15 @@ function candidateHandoff(
 ) {
   const changedPath = `src/${role.toLowerCase()}.ts`;
   return {
-    reportType: "feature-implementation-candidate-v1" as const,
+    reportType: "feature-implementation-candidate-v2" as const,
     role,
-    approachSummary: `${role} complete implementation`,
+    approachSummary: `${role} implementation checkpoint`,
     changedPaths: [changedPath],
+    provenBehavior: "The main path and critical integration are exercised",
     checks: ["focused test passed"],
+    remainingWork: ["Complete secondary acceptance behavior"],
     assumptions: [],
     tradeoffs: ["Role objective was applied without sacrificing correctness"],
-    unresolvedIssues: [],
     worktreePath: spec.cwd,
     branchRef: `pipi-feature/test/candidate-${role.toLowerCase()}`,
     baseCommit,
@@ -634,31 +674,33 @@ function comparison(role: FeatureCandidateRole) {
       maintainability: "Maintainable within scope",
       verificationQuality: "Focused check passed",
     },
-    usableBase: true,
+    viableCheckpoint: true,
   };
 }
 
 function selectionResult() {
   return {
-    reportType: "feature-implementation-selection-v1" as const,
+    reportType: "feature-implementation-selection-v2" as const,
     selectionOnlyAcknowledgement:
       "No code was written before primary selection." as const,
     comparisons: FEATURE_CANDIDATE_ROLES.map(comparison),
     primaryCandidate: "Minimal" as const,
     rationale:
-      "Minimal is the simplest candidate that fully and reliably solves the task.",
+      "Minimal is the simplest viable foundation with bounded completion risk.",
     augmentationCandidates: [],
   };
 }
 
 function implementationSynthesisResult() {
   return {
-    reportType: "feature-implementation-synthesis-v1" as const,
+    reportType: "feature-implementation-synthesis-v2" as const,
     primaryCandidate: "Minimal" as const,
     primaryCommit: CANDIDATE_COMMITS.Minimal,
     acceptedAugmentations: [],
     rejectedAugmentations: [],
-    changedPaths: [],
+    augmentationChangedPaths: [],
+    augmentationCommit: AUGMENTATION_SYNTHESIS_COMMIT,
+    completionChangedPaths: [],
     checks: [
       `npm test passed; WINNER_MARKER Minimal borrowed idea ${FINAL_SYNTHESIS_COMMIT}`,
     ],
@@ -1495,7 +1537,7 @@ test("Best-of-3 provenance is retained internally but excluded from pre-final an
   await run.controller.dispose();
 });
 
-test("selection is read-only before the same Luna agent receives primary-based augmentation", async () => {
+test("selection remains read-only before the same Luna agent receives synthesis mutation authority", async () => {
   const run = harness({ autoCompleteSelectionAndSynthesis: false });
   const runId = run.controller.start(request());
   await settleInitialization();
@@ -1507,11 +1549,6 @@ test("selection is read-only before the same Luna agent receives primary-based a
   assert.equal(run.controller.get(runId)?.stage, "build");
   assert.equal(run.lifecycles[0]?.selectionReadOnlyChecks, 0);
   assert.equal(run.lifecycles[0]?.synthesisCreated, 0);
-  assert.match(synthesis.prompts[0] ?? "", /selection-only and read-only/i);
-  assert.match(
-    synthesis.prompts[0] ?? "",
-    /correctness, acceptance coverage, regression risk, repository fit, simplicity, maintainability, verification quality/,
-  );
 
   synthesis.emit({
     type: "settled",
@@ -1525,15 +1562,15 @@ test("selection is read-only before the same Luna agent receives primary-based a
   assert.equal(run.lifecycles[0]?.synthesisCreated, 1);
   assert.equal(synthesis.sends.length, 1);
   assert.equal(synthesis.mutationEnabled, 1);
-  assert.match(
-    synthesis.sends[0] ?? "",
-    /starting from that immutable primary commit/,
-  );
-  assert.match(
-    synthesis.sends[0] ?? "",
-    /do not silently write a fourth implementation/i,
-  );
 
+  for (const command of implementationSynthesisResult().checks) {
+    run.recordFeatureBash(
+      runId,
+      FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+      command,
+      0,
+    );
+  }
   synthesis.emit({
     type: "settled",
     outcome: {
@@ -1550,6 +1587,96 @@ test("selection is read-only before the same Luna agent receives primary-based a
     1,
   );
   assert.equal(run.lifecycles[0]?.promoted, 1);
+  await run.controller.dispose();
+});
+
+test("synthesis promotion rejects unobserved, failed, and interrupted verification commands", async () => {
+  const run = harness({ autoCompleteSelectionAndSynthesis: false });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis);
+
+  synthesis.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: JSON.stringify(selectionResult()),
+    },
+  });
+  await settleInitialization();
+  for (const command of implementationSynthesisResult().checks) {
+    run.recordFeatureBash(
+      runId,
+      FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+      command,
+      1,
+    );
+    run.recordFeatureBash(
+      runId,
+      FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+      command,
+      null,
+    );
+  }
+  synthesis.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: JSON.stringify(implementationSynthesisResult()),
+    },
+  });
+  await settleInitialization();
+  assert.equal(run.lifecycles[0]?.promoted, 0);
+  assert.equal(synthesis.sends.length, 2);
+
+  for (const command of implementationSynthesisResult().checks) {
+    run.recordFeatureBash(
+      runId,
+      FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+      command,
+      0,
+    );
+  }
+  synthesis.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: JSON.stringify(implementationSynthesisResult()),
+    },
+  });
+  await settleInitialization();
+  assert.equal(run.lifecycles[0]?.promoted, 1);
+  await run.controller.dispose();
+});
+
+test("cancellation during synthesis completion cleans without promotion", async () => {
+  const run = harness({ autoCompleteSelectionAndSynthesis: false });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis);
+
+  synthesis.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: JSON.stringify(selectionResult()),
+    },
+  });
+  await settleInitialization();
+  assert.equal(synthesis.mutationEnabled, 1);
+  assert.equal(run.lifecycles[0]?.synthesisCreated, 1);
+
+  await run.controller.cancelRun(runId);
+  assert.equal(run.controller.get(runId)?.status, "cancelled");
+  assert.equal(run.lifecycles[0]?.promoted, 0);
+  assert.ok((run.lifecycles[0]?.cleaned ?? 0) >= 1);
+  assert.ok(synthesis.interrupted >= 1);
   await run.controller.dispose();
 });
 

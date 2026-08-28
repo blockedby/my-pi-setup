@@ -215,6 +215,8 @@ interface MutableRun {
   featureSelection?: FeatureSelection;
   featureSynthesisProvenance?: FeatureSynthesisProvenance;
   featureSynthesisChecks: ReadonlyArray<string>;
+  featureSynthesisWriteEnabled: boolean;
+  featureSynthesisSuccessfulCommands: string[];
   auditSegment?: AuditSegment;
   auditSegmentStarting?: Promise<ReadonlyArray<AgentNodeSnapshot>>;
   finalAuditReportDelivered: boolean;
@@ -301,6 +303,12 @@ export interface PipelineControllerOptions {
     ) => void,
     discoveryToolAllowed?: (runId: string, role: string) => boolean,
     featureCommit?: (runId: string, role: string, workingDir: string) => string,
+    featureBashResult?: (
+      runId: string,
+      role: string,
+      command: string,
+      exitCode: number | null,
+    ) => void,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
   readonly makeRunId?: () => string;
@@ -413,6 +421,8 @@ export class PipelineController {
         },
         (runId, role, workingDir) =>
           this.commitFeatureWorktree(runId, role, workingDir),
+        (runId, role, command, exitCode) =>
+          this.recordFeatureBashResult(runId, role, command, exitCode),
       ),
       // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
       // intentionally do not apply to pipeline roots or children.
@@ -641,6 +651,8 @@ export class PipelineController {
       ...(featureCaller ? { featureCaller } : {}),
       ...(featureLifecycle ? { featureLifecycle } : {}),
       featureSynthesisChecks: [],
+      featureSynthesisWriteEnabled: false,
+      featureSynthesisSuccessfulCommands: [],
       finalAuditReportDelivered: false,
       planArtifactsWritten: new Map(),
     };
@@ -802,7 +814,7 @@ export class PipelineController {
             this.tree.disableViewMutations(agent.id);
             return { candidate, handoff };
           },
-          `Return one complete strict ${worktree.role} candidate handoff after committing and verifying the complete implementation in your assigned worktree.`,
+          `Return one strict ${worktree.role} candidate handoff after committing a viable Shape/Prove/Checkpoint implementation checkpoint with focused verification in your assigned worktree. Do not continue solely for production completeness.`,
         );
       }),
     );
@@ -863,6 +875,7 @@ export class PipelineController {
       primary.candidate,
     );
     this.tree.enableMutation(synthesisAgent.id);
+    run.featureSynthesisWriteEnabled = true;
     await this.tree.send(
       synthesisAgent.id,
       buildFeatureAugmentationPrompt({
@@ -878,6 +891,7 @@ export class PipelineController {
       "Primary-based bounded synthesis",
       (text) => {
         const provenance = parseFeatureSynthesisProvenance(text);
+        this.validateFeatureSynthesisChecks(run, provenance.checks);
         return {
           provenance,
           validated: lifecycle.validateSynthesis(
@@ -888,7 +902,7 @@ export class PipelineController {
           ),
         };
       },
-      "Return one strict synthesis provenance JSON object after bounded primary-based augmentation, repository verification, a clean worktree, and a distinct final commit. Do not rewrite from scratch.",
+      "Return one strict synthesis provenance JSON object after a distinct bounded augmentation checkpoint, production completion from the selected primary, full relevant repository verification, a clean worktree, and a distinct final commit. Do not rewrite from scratch.",
     );
     run.featureSynthesisProvenance = synthesized.provenance;
     run.featureSynthesisChecks = featureAuditVerificationSummary(
@@ -2186,6 +2200,41 @@ export class PipelineController {
       throw new Error("Plan artifacts can only be validated by plan-pipeline.");
     }
     return resolvePlanArtifact(run.request.workingDir, planPath);
+  }
+
+  private recordFeatureBashResult(
+    runId: string,
+    role: string,
+    command: string,
+    exitCode: number | null,
+  ) {
+    const run = this.requireRun(runId);
+    if (
+      run.status !== "running" ||
+      role !== FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE ||
+      !run.featureSynthesisWriteEnabled ||
+      exitCode !== 0
+    ) {
+      return;
+    }
+    if (run.featureSynthesisSuccessfulCommands.length >= 256) return;
+    run.featureSynthesisSuccessfulCommands.push(command);
+  }
+
+  private validateFeatureSynthesisChecks(
+    run: MutableRun,
+    checks: ReadonlyArray<string>,
+  ) {
+    if (
+      new Set(checks).size !== checks.length ||
+      checks.some(
+        (command) => !run.featureSynthesisSuccessfulCommands.includes(command),
+      )
+    ) {
+      throw new Error(
+        "Synthesis checks must be unique exact commands that the controller observed passing in the synthesis sandbox after primary selection.",
+      );
+    }
   }
 
   private commitFeatureWorktree(
