@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { assertPipelineGitCommitSupported } from "./domain.ts";
 import pipelinesExtension, {
+  PIPELINE_CANCEL_PARAMETERS,
   PIPELINE_RUN_PARAMETERS,
   resolvePipelineDefinition,
   resolvePipelineWorkingDir,
 } from "./index.ts";
 
-test("pipeline extension registers run plus main-agent check/list without status/wait aliases", () => {
+test("pipeline extension registers run/cancel/check/list without status/wait aliases", () => {
   const tools: string[] = [];
   const api = {
     on: () => {},
@@ -20,9 +22,38 @@ test("pipeline extension registers run plus main-agent check/list without status
 
   pipelinesExtension(api);
 
-  assert.deepEqual(tools, ["pipeline_run", "pipeline_check", "pipeline_list"]);
+  assert.deepEqual(tools, [
+    "pipeline_run",
+    "pipeline_cancel",
+    "pipeline_check",
+    "pipeline_list",
+  ]);
   assert.equal(tools.includes("pipeline_status"), false);
   assert.equal(tools.includes("pipeline_wait"), false);
+});
+
+test("registered pipeline_cancel schema rejects malformed host payloads", () => {
+  const tools: Array<{ name: string; parameters: TSchema }> = [];
+  const api = {
+    on: () => {},
+    registerTool: (tool: { name: string; parameters: TSchema }) =>
+      tools.push(tool),
+    registerMessageRenderer: () => {},
+    registerCommand: () => {},
+  } as unknown as ExtensionAPI;
+
+  pipelinesExtension(api);
+  const cancellation = tools.find((tool) => tool.name === "pipeline_cancel");
+  assert.ok(cancellation);
+  assert.deepEqual(cancellation.parameters, PIPELINE_CANCEL_PARAMETERS);
+  for (const malformed of [
+    { ids: [] },
+    { ids: ["pipeline-1", "pipeline-1"] },
+    { ids: ["x".repeat(257)] },
+    { ids: ["pipeline-1"], child_id: "agent-1" },
+  ]) {
+    assert.equal(Check(cancellation.parameters, malformed), false);
+  }
 });
 
 test("pipeline_run accepts a task with an optional working directory", () => {

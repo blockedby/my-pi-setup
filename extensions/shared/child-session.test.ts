@@ -113,6 +113,7 @@ test("child denylist keeps extension and workflow structured tools available", a
         "workflow",
         "ask_user",
         "pipeline_run",
+        "pipeline_cancel",
         "pipeline_check",
         "pipeline_list",
         "pipeline_stage",
@@ -175,6 +176,7 @@ test("pipeline root policy denies outer orchestration but keeps run-scoped tools
             "subagent_spawn",
             "workflow",
             "pipeline_run",
+            "pipeline_cancel",
             "pipeline_check",
             "pipeline_list",
           ]) {
@@ -220,9 +222,64 @@ test("pipeline root policy denies outer orchestration but keeps run-scoped tools
     assert.equal(active.has("subagent_spawn"), false);
     assert.equal(active.has("workflow"), false);
     assert.equal(active.has("pipeline_run"), false);
+    assert.equal(active.has("pipeline_cancel"), false);
     assert.equal(active.has("pipeline_check"), false);
     assert.equal(active.has("pipeline_list"), false);
     await shutdownAndDisposeChildSession(session);
+  });
+});
+
+test("every pipeline role policy removes cancellation during host resource loading", async () => {
+  await withTempDir(async (directory) => {
+    const settingsManager = SettingsManager.inMemory(undefined, {
+      projectTrusted: false,
+    });
+    const loader = new DefaultResourceLoader({
+      cwd: directory,
+      agentDir: path.join(directory, "agent"),
+      settingsManager,
+      extensionFactories: [
+        (pi) => {
+          pi.registerTool({
+            name: "pipeline_cancel",
+            label: "pipeline_cancel",
+            description: "pipeline_cancel",
+            parameters: Type.Object({}),
+            async execute() {
+              return {
+                content: [{ type: "text", text: "ok" }],
+                details: {},
+              };
+            },
+          });
+        },
+      ],
+    });
+    await loader.reload();
+
+    const policies = [
+      pipelineRootToolPolicy(),
+      childToolPolicy(),
+      readOnlyPipelineRootToolPolicy(),
+      readOnlyPipelineChildToolPolicy(),
+      smallFeatureImplementerToolPolicy(),
+      planPipelineRootToolPolicy(),
+      planPipelineChildToolPolicy(),
+    ];
+    for (const policy of policies) {
+      const { session } = await createAgentSession({
+        cwd: directory,
+        resourceLoader: loader,
+        settingsManager,
+        sessionManager: SessionManager.inMemory(directory),
+        ...policy,
+      });
+      assert.equal(
+        session.getActiveToolNames().includes("pipeline_cancel"),
+        false,
+      );
+      await shutdownAndDisposeChildSession(session);
+    }
   });
 });
 
@@ -254,7 +311,11 @@ test("small-feature policies isolate read-only roles and keep Luna workspace too
   }
   assert.equal(rootDenied.has("pipeline_child_spawn"), false);
   assert.equal(auditorDenied.has("pipeline_child_spawn"), true);
-  for (const mainOnlyTool of ["pipeline_check", "pipeline_list"]) {
+  for (const mainOnlyTool of [
+    "pipeline_cancel",
+    "pipeline_check",
+    "pipeline_list",
+  ]) {
     assert.equal(rootDenied.has(mainOnlyTool), true);
     assert.equal(auditorDenied.has(mainOnlyTool), true);
     assert.equal(implementerDenied.has(mainOnlyTool), true);
@@ -283,7 +344,11 @@ test("plan pipeline policies deny mutators and keep bounded root plan tools", ()
   assert.equal(rootDenied.has("pipeline_plan_write"), false);
   assert.equal(childDenied.has("pipeline_plan_write"), true);
   assert.equal(childDenied.has("pipeline_child_spawn"), true);
-  for (const mainOnlyTool of ["pipeline_check", "pipeline_list"]) {
+  for (const mainOnlyTool of [
+    "pipeline_cancel",
+    "pipeline_check",
+    "pipeline_list",
+  ]) {
     assert.equal(rootDenied.has(mainOnlyTool), true);
     assert.equal(childDenied.has(mainOnlyTool), true);
   }

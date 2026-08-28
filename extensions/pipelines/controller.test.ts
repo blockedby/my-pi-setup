@@ -121,6 +121,7 @@ class FakePipelineSession implements AgentTreeSession {
   interrupted = 0;
   disposed = 0;
   mutationEnabled = 0;
+  interruptError: Error | undefined;
 
   readonly activeTools: ReadonlyArray<string>;
   readonly spec: AgentNodeSpec;
@@ -185,6 +186,7 @@ class FakePipelineSession implements AgentTreeSession {
 
   async interrupt() {
     this.interrupted++;
+    if (this.interruptError) throw this.interruptError;
     this.emit({ type: "settled", outcome: { type: "cancelled" } });
   }
 
@@ -358,6 +360,7 @@ function harness(
     autoCompleteDiscoverySynthesis?: boolean;
     autoCompleteCandidates?: boolean;
     autoCompleteSelectionAndSynthesis?: boolean;
+    rejectRootCancellation?: boolean;
   } = {},
 ) {
   const sessions: FakePipelineSession[] = [];
@@ -475,6 +478,9 @@ function harness(
                   )
               : undefined,
           );
+          if (!spec.parentId && options.rejectRootCancellation) {
+            session.interruptError = new Error("root cancellation rejected");
+          }
           sessions.push(session);
           return session;
         },
@@ -1550,6 +1556,79 @@ test("feature cancellation cleans only the run lifecycle without promotion", asy
   await run.controller.dispose();
 });
 
+test("concurrent feature cancellation is coalesced and isolates another run", async () => {
+  const run = harness({ autoCompleteFeatureDiscovery: false });
+  const runId = run.controller.start(request());
+  const unrelatedId = run.controller.start(request());
+  await settleInitialization();
+  const unrelatedBefore = run.controller
+    .get(unrelatedId)!
+    .agents.map(({ id, status }) => ({ id, status }));
+
+  const results = await Promise.all([
+    run.controller.cancelRun(runId),
+    run.controller.cancelRun(runId),
+  ]);
+
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ["cancelled", "cancelled"],
+  );
+  const rootSession = run.sessions.find(
+    (session) => session.spec.scopeId === runId && !session.spec.parentId,
+  );
+  assert.equal(rootSession?.interrupted, 0);
+  assert.equal(rootSession?.disposed, 1);
+  assert.equal(run.lifecycles[0]?.cleaned, 1);
+  assert.equal(run.handoffs.length, 1);
+  assert.equal(run.controller.get(unrelatedId)?.status, "running");
+  assert.deepEqual(
+    run.controller
+      .get(unrelatedId)!
+      .agents.map(({ id, status }) => ({ id, status })),
+    unrelatedBefore,
+  );
+  await run.controller.dispose();
+});
+
+test("root cancellation rejection still cleans and hands off exactly once", async () => {
+  const run = harness({
+    autoCompleteDiscoverySynthesis: false,
+    rejectRootCancellation: true,
+  });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+
+  await assert.rejects(
+    run.controller.cancelRun(runId),
+    /root cancellation rejected/,
+  );
+
+  assert.equal(run.controller.get(runId)?.status, "cancelled");
+  const rootSession = run.sessions.find(
+    (session) => session.spec.scopeId === runId && !session.spec.parentId,
+  );
+  assert.equal(rootSession?.interrupted, 1);
+  assert.equal(rootSession?.disposed, 1);
+  assert.equal(
+    run.controller
+      .get(runId)
+      ?.agents.some(
+        (agent) => agent.status === "starting" || agent.status === "running",
+      ),
+    false,
+  );
+  assert.equal(run.lifecycles[0]?.cleaned, 1);
+  assert.equal(run.handoffs.length, 1);
+  assert.equal(
+    run.handoffs[0]?.error,
+    "Pipeline root cancellation failed: root cancellation rejected",
+  );
+  assert.deepEqual(run.handoffs[0]?.facts.unresolvedItems, [
+    "Pipeline root cancellation failed: root cancellation rejected",
+  ]);
+});
+
 test("feature discovery tool payload is bound to its session and consumed only after settlement", async () => {
   const run = harness({ autoCompleteFeatureDiscovery: false });
   const runId = run.controller.start(request());
@@ -1775,11 +1854,12 @@ test("dashboard cancellation of a starting run prevents its root prompt", async 
   );
   assert.ok(runRow);
 
-  await cancelPipelineRow(run.controller, runRow);
+  const cancellation = cancelPipelineRow(run.controller, runRow);
   assert.equal(run.controller.get(runId)?.status, "cancelled");
-  assert.equal(run.handoffs.length, 1);
+  assert.equal(run.handoffs.length, 0);
 
   releaseRoot();
+  await cancellation;
   await settleInitialization();
 
   assert.equal(run.sessions.length, 1);
@@ -1841,6 +1921,7 @@ test("root tools are run-scoped and feature discovery children are read-only", a
   }
   for (const forbidden of [
     "pipeline_run",
+    "pipeline_cancel",
     "pipeline_check",
     "pipeline_list",
     "pipeline_child_spawn",
@@ -2018,7 +2099,11 @@ test("small-feature Luna root and audit Lunas are read-only while the implemente
   assert.equal(rootDenied.has("pipeline_child_spawn"), false);
   assert.equal(implementerDenied.has("pipeline_child_spawn"), true);
   assert.equal(auditorDenied.has("pipeline_child_spawn"), true);
-  for (const mainOnlyTool of ["pipeline_check", "pipeline_list"]) {
+  for (const mainOnlyTool of [
+    "pipeline_cancel",
+    "pipeline_check",
+    "pipeline_list",
+  ]) {
     assert.equal(rootDenied.has(mainOnlyTool), true);
     assert.equal(implementerDenied.has(mainOnlyTool), true);
     assert.equal(auditorDenied.has(mainOnlyTool), true);
