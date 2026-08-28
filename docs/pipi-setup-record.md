@@ -1555,3 +1555,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/dashboard.ts`, `extensions/pipelines/{dashboard,controller}.test.ts`, and this record. Pipeline execution contracts, installed runtime state, credentials, model overrides, submodules, and external services are unchanged.
 - **Verification:** Focused controller/dashboard tests passed 64/64. The full deterministic extension suite passed 311/311. TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
 - **Pending:** Local runtime rollout/reload was not requested; existing sessions keep their currently loaded extension until restart or reinstall.
+
+## Operation entry: fix final-audit wait handoff race
+
+- **Request:** Fix the feature-pipeline bug that reported controller-owned audit submissions as invalid non-JSON and missed a validated final synthesis during `pipeline_child_wait`; add regression coverage, open and merge a PR, then update the local Pipi installation.
+- **Action:** Made audit pumping joinable so child fan-in waits for the active structured-report reduction before rendering its result, and excluded controller-owned audit tracks from legacy `finalText` JSON validation because they submit through `pipeline_audit_submit`. Added deterministic regressions for the concurrent final-synthesis handoff and false audit-track contract warning.
+- **Affected paths or values:** `extensions/pipelines/controller.ts`, `extensions/pipelines/controller.test.ts`, this record, and—after merge—the managed Pipi runtime and settings under `~/.pipi/agent` plus launcher `/home/kcnc/.local/bin/pipi`. Credentials, model overrides, submodule pins, and external services are unchanged.
+- **Verification:** Focused controller tests passed 49/49. The full deterministic suite passed 64 installer, 313 extension, and 22 file-search tests; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed. The installer suite was run with the ambient `BROWSER_CHROME_NODE` unset so its isolated runtime fixture remained authoritative.
+- **Pending:** Publish and merge the PR, synchronize `main`, reinstall Pipi, and verify the installed runtime. Existing sessions must be restarted or reloaded after installation to pick up the corrected extension.

@@ -360,7 +360,7 @@ export class PipelineController {
   private readonly listeners = new Set<() => void>();
   private readonly handoffs = new Set<string>();
   private readonly childContinuations = new Map<string, number>();
-  private readonly auditPumps = new Set<string>();
+  private readonly auditPumps = new Map<string, Promise<void>>();
   private readonly auditCorrections = new Map<string, number>();
   private readonly auditSessionTokens = new Map<string, string>();
   private readonly discoveryCorrections = new Map<string, number>();
@@ -1415,16 +1415,43 @@ export class PipelineController {
     );
   }
 
-  private async pumpAuditSegment(run: MutableRun) {
-    const segment = run.auditSegment;
+  private pumpAuditSegment(run: MutableRun) {
+    const active = this.auditPumps.get(run.id);
+    if (active) return active;
     if (
-      !segment ||
-      this.auditPumps.has(run.id) ||
+      !run.auditSegment ||
       (run.status !== "starting" && run.status !== "running")
     ) {
-      return;
+      return Promise.resolve();
     }
-    this.auditPumps.add(run.id);
+
+    const pump = Promise.resolve().then(() => this.runAuditSegmentPump(run));
+    this.auditPumps.set(run.id, pump);
+    void pump.finally(() => {
+      if (this.auditPumps.get(run.id) === pump) {
+        this.auditPumps.delete(run.id);
+      }
+      const segment = run.auditSegment;
+      this.notify();
+      const synthesisId = segment?.synthesizerId;
+      const synthesizer = synthesisId
+        ? this.tree.view.get(synthesisId)
+        : undefined;
+      if (
+        segment &&
+        (run.status === "starting" || run.status === "running") &&
+        segment.progress().reducerStatus === "busy" &&
+        synthesizer?.status === "idle"
+      ) {
+        void this.pumpAuditSegment(run);
+      }
+    });
+    return pump;
+  }
+
+  private async runAuditSegmentPump(run: MutableRun) {
+    const segment = run.auditSegment;
+    if (!segment) return;
     try {
       for (const [role, id] of segment.tracks) {
         const child = this.tree.view.get(id);
@@ -1505,20 +1532,6 @@ export class PipelineController {
         error instanceof Error ? error.message : String(error),
         true,
       );
-    } finally {
-      this.auditPumps.delete(run.id);
-      this.notify();
-      const synthesisId = segment.synthesizerId;
-      const synthesizer = synthesisId
-        ? this.tree.view.get(synthesisId)
-        : undefined;
-      if (
-        (run.status === "starting" || run.status === "running") &&
-        segment.progress().reducerStatus === "busy" &&
-        synthesizer?.status === "idle"
-      ) {
-        void this.pumpAuditSegment(run);
-      }
     }
   }
 
@@ -2013,6 +2026,7 @@ export class PipelineController {
     }
     const children = await this.tree.wait(ids, signal);
     const run = this.requireRun(runId);
+    await this.pumpAuditSegment(run);
     if (
       run.definition === SMALL_FEATURE_PIPELINE_ID &&
       (run.status === "starting" || run.status === "running")
@@ -2489,7 +2503,8 @@ export class PipelineController {
             throw new Error(`Agent "${params.id}" is the pipeline root.`);
           const issues =
             child.role === AUDIT_SYNTHESIS_ROLE ||
-            isFeatureInternalImplementationRole(child.role)
+            isFeatureInternalImplementationRole(child.role) ||
+            [...(run.auditSegment?.tracks.values() ?? [])].includes(child.id)
               ? []
               : validatePipelineReport(
                   run.definition,
@@ -2549,7 +2564,10 @@ export class PipelineController {
             .map((child) => {
               const issues =
                 child.role === AUDIT_SYNTHESIS_ROLE ||
-                isFeatureInternalImplementationRole(child.role)
+                isFeatureInternalImplementationRole(child.role) ||
+                [...(run.auditSegment?.tracks.values() ?? [])].includes(
+                  child.id,
+                )
                   ? []
                   : validatePipelineReport(
                       run.definition,
