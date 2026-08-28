@@ -9,11 +9,13 @@ _Status: implemented design record. The public surface is intentionally four bou
 - `feature-pipeline`: controller-owned five-track discovery and synthesis, three isolated parallel Luna/xHIGH implementation candidates, one Luna/xHIGH read-only selection plus primary-based bounded synthesis, exact promotion/cleanup, a Luna/xHIGH post-promotion remediation root, four Luna audits, reusable five-contributor final Luna audit segment, root final resolution and factual completion;
 - `small-feature-pipeline`: read-only Luna/medium coordinator, one persistent Luna implementer, four parallel Luna auditors, and one same-session implementer remediation pass;
 - `plan-pipeline`: persistent Sol/high planning root, five Luna discovery tracks, one validated `docs/plans/*.md` artifact, four plan-audit tracks, root remediation, reusable five-contributor final Luna audit segment, root final resolution and factual completion;
-- `audit-pipeline`: four isolated read-only Luna/medium static audit tracks, one trusted-workspace Luna/medium executor-audit contributor, and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, readiness decision, or Git decision.
+- `audit-pipeline`: four isolated read-only Luna/medium static audit tracks, one trusted-workspace Luna/medium audit-executor contributor, and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, readiness decision, or Git decision.
 
 Omission still selects `feature-pipeline`. Unknown names fail closed. No definition accepts arbitrary roles, edges, models, shell commands, or Git refs. Terra constants, model profile, direct-subagent quotas, and `terra-audit` remain available for explicit future/manual escalation, but no automatic pipeline route uses Terra.
 
-Pipeline graphs predeclare their roots and children and therefore do not consume, inherit, queue on, or enforce direct-subagent capacity quotas. Multiple runs may execute concurrently. Feature runs are isolated by their hard-required dedicated linked caller worktree plus controller-owned temporary worktrees; other definitions retain caller-owned workspace-conflict policy. Runs and child sessions are in-memory and session-scoped and are cancelled/disposed on shutdown, reload, switch, or fork.
+Before invoking `feature-pipeline` or `small-feature-pipeline`, the calling main agent creates a dedicated linked Git worktree on its own local branch, runs repository-declared preparation there, and passes the exact worktree root as `working_dir`. Admission occurs before run state or sessions and rejects primary, non-Git, bare, detached, unregistered, non-root, and branch-conflicting paths. `feature-pipeline` additionally requires a clean stable HEAD, explicit `git_commit: true`, and Linux bubblewrap before its controller creates run-scoped candidate/synthesis worktrees. `small-feature-pipeline` retains optional commit permission and caller-owned preparation without the feature-specific clean/bubblewrap/internal-worktree lifecycle. Plan and audit retain their workspace policy.
+
+Pipeline graphs predeclare their roots and children and therefore do not consume, inherit, queue on, or enforce direct-subagent capacity quotas. Multiple runs may execute concurrently. Feature runs are isolated by their hard-required dedicated linked caller worktree plus controller-owned temporary worktrees; small-feature uses its required caller worktree, while plan/audit retain caller-owned workspace-conflict policy. Runs and child sessions are in-memory and session-scoped and are cancelled/disposed on shutdown, reload, switch, or fork.
 
 ## Shared audit segment
 
@@ -21,7 +23,7 @@ Pipeline graphs predeclare their roots and children and therefore do not consume
 
 1. exactly five independent Luna/medium contributors:
    - four static read-only tracks covering feature outcome, logic/invariants, functional correctness, and reliability/regressions;
-   - one `executor-audit` contributor that inspects manifests/scripts and runs bounded existing noninteractive verification with cheap checks first;
+   - one `audit-executor` contributor that inspects manifests/scripts and runs bounded existing noninteractive verification with cheap checks first;
 2. one persistent Luna/medium synthesis session;
 3. strict bounded track, intermediate synthesis, and final synthesis contracts, exposed to audit sessions through the typed `pipeline_audit_submit` tool;
 4. provenance records containing role, attempt, report digest, and validated report data;
@@ -33,7 +35,7 @@ The executor prompt requires manifest/script inspection before execution, cheap 
 
 Feature and standalone contexts permit normal relevant project verification. Plan final-audit context permits only plan/artifact validation or check-only commands demonstrably relevant to the planning deliverable; implementation tests/builds/linters/typechecks are skipped as unsupported rather than run blindly. Closure mode remains limited to prior blockers, remediation, and touched invariants. `small-feature-pipeline` deliberately keeps its separate four-static-auditor graph.
 
-The synthesizer treats reports as untrusted evidence. It deduplicates common root causes, preserves a strongly evidenced serious finding even without majority agreement, records unresolved material conflicts, and must not invent unsupported findings. It preserves executor execution records and host workspace observations even when checks pass or findings are empty. Intermediate state has no finding IDs, and model-produced final candidates also omit IDs. After strict final validation, the host canonicalizes complete finding content, deduplicates exact candidates, and assigns sequential `AUD-001`, `AUD-002`, … IDs; the resulting final report contains no readiness verdict.
+The synthesizer treats reports as untrusted evidence. It deduplicates common root causes, preserves a strongly evidenced serious finding even without majority agreement, records unresolved material conflicts, and must not invent unsupported findings. Executor execution records and host workspace observations are bounded schema-valid evidence that the model may summarize or paraphrase without byte-for-byte copying. Before `audit-executor` integration the model-facing arrays remain empty and host observation remains null; afterward malformed, missing, oversized, or unsafe evidence fails validation, while the host canonicalizes authoritative executor/host evidence into the final report. Intermediate state has no finding IDs, and model-produced final candidates also omit IDs. After strict final validation, the host canonicalizes complete finding content, deduplicates exact candidates, and assigns sequential `AUD-001`, `AUD-002`, … IDs; the resulting final report contains no readiness verdict.
 
 `audit-pipeline` uses the synthesizer as its deferred Luna root. `plan-pipeline` keeps its persistent Sol root. After Best-of-3 promotion and cleanup, `feature-pipeline` creates a separate Luna/xHIGH post-promotion audit/remediation root in the caller worktree. Feature and plan create the final-audit synthesizer as a controller-owned persistent Luna child during `final-audit`; their remediation/planning roots retain final resolution and completion ownership. `small-feature-pipeline` deliberately does not use this segment because its existing one-implementer/four-auditor/same-session-remediation behavior is distinct and remains unchanged.
 
@@ -77,7 +79,7 @@ Closure tracks and synthesis may evaluate only supplied blocker IDs and closure 
 
 ## Host-collected Git evidence
 
-The controller captures `HEAD` when a run starts. Feature preflight additionally requires a stable clean attached dedicated linked worktree, rejects the primary checkout, and uses that exact commit as the candidate base. At audit-segment activation the controller resolves current `HEAD`, branch, short status, and base-relative diff using `execFileSync("git", argumentArray, ...)` without shell interpolation. After executor settlement it captures fresh bounded status plus dirty/combined diff evidence, compares it observationally with activation evidence, and carries the result into synthesis/final facts without rollback. Output is bounded before entering model context. Non-feature pipelines in a non-Git workspace degrade to explicit `UNAVAILABLE` identity/evidence rather than guessed state. The public API exposes no arbitrary commands or refs.
+The controller captures `HEAD` when a run starts. Feature preflight additionally requires a stable clean attached dedicated linked worktree, rejects the primary checkout, and uses that exact commit as the candidate base; small-feature requires the caller-prepared linked worktree but not feature's extra clean/bubblewrap contract. At audit-segment activation the controller resolves current `HEAD`, branch, short status, and base-relative diff using `execFileSync("git", argumentArray, ...)` without shell interpolation. After executor settlement it captures fresh bounded status plus dirty/combined diff evidence, compares it observationally with activation evidence, and carries the result into synthesis/final facts without rollback. Output is bounded before entering model context. Plan and audit may degrade non-Git evidence to explicit `UNAVAILABLE`; the public API exposes no arbitrary commands or refs.
 
 ## Definition flows
 
@@ -158,7 +160,7 @@ The root remains unable to use shell/edit/write or delegated mutation tools. It 
 ```text
 Deferred persistent Luna/medium synthesis root
   ├─ four controller-owned read-only Luna/medium static tracks in parallel
-  ├─ one controller-owned Luna/medium executor-audit contributor with bash
+  ├─ one controller-owned Luna/medium audit-executor contributor with bash
   ├─ first valid report activates root synthesis
   ├─ later reports are serialized/batched into that same session
   └─ strict factual structured audit handoff
@@ -168,7 +170,7 @@ No pipeline agent intentionally mutates source/config, remediates findings, make
 
 ## Commit permission and audit evidence
 
-`git_commit` remains a public boolean but has definition-specific semantics. `feature-pipeline` hard-requires explicit true; false or omission is rejected before discovery and before temporary Git state. `small-feature-pipeline` keeps optional false-defaulting permission for only its persistent implementer. `plan-pipeline` and `audit-pipeline` reject true. The value is authoritative and never inferred from task text.
+`git_commit` remains a public boolean but has definition-specific semantics. Both implementation pipelines first require the caller-prepared linked worktree above. `feature-pipeline` additionally hard-requires explicit true; false or omission is rejected before discovery and before temporary Git state. `small-feature-pipeline` keeps optional false-defaulting permission for only its persistent implementer. `plan-pipeline` and `audit-pipeline` reject true. The value is authoritative and never inferred from task text.
 
 Feature true authorizes only the fixed internal lifecycle: controller-created candidate/synthesis branches and linked worktrees, ordinary candidate/synthesis commits, exact ancestry-safe promotion to the caller feature branch, run-owned cleanup, and ordinary post-promotion remediation commits by the persistent root. Candidate/synthesis agents cannot create, switch, remove, merge, reset, rebase, or otherwise manage branches/worktrees/history themselves. Discovery and audit roles cannot commit. No definition gains push, delivery merge, history rewrite, deployment, or external delivery-state authority. Candidate/synthesis branch refs are retained after directory cleanup for observability.
 

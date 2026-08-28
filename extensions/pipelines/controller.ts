@@ -556,7 +556,9 @@ export class PipelineController {
         "Closure audit requires prior blockers, closure conditions, a remediation diff, and at least one directly touched invariant.",
       );
     }
-    assertImplementationPipelineWorkspace(definition, request.workingDir);
+    if (definition === SMALL_FEATURE_PIPELINE_ID) {
+      assertImplementationPipelineWorkspace(definition, request.workingDir);
+    }
     const normalizedRequest =
       definition === AUDIT_PIPELINE_ID
         ? { ...effectiveRequest, audit }
