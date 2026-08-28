@@ -245,7 +245,13 @@ test("all run and agent statuses project with deterministic root-first creation 
   const agents = [
     agent({ id: "done", parentId: "root", status: "done", createdAt: 4 }),
     agent({ id: "running", parentId: "root", status: "running", createdAt: 2 }),
-    agent({ id: "root", role: "pipeline-root", status: "idle", createdAt: 9 }),
+    agent({
+      id: "root",
+      role: "pipeline-root",
+      model: "openai-codex/gpt-5.6-sol",
+      status: "idle",
+      createdAt: 9,
+    }),
     agent({
       id: "starting",
       parentId: "root",
@@ -277,6 +283,16 @@ test("all run and agent statuses project with deterministic root-first creation 
     error: 1,
     cancelled: 1,
   });
+  assert.equal(details.agents[0]?.thinkingLevel, "high");
+  assert.equal(details.agents[1]?.thinkingLevel, "medium");
+  assert.match(
+    formatPipelineCheck(details),
+    /openai-codex\/gpt-5\.6-sol · high · idle/,
+  );
+  assert.match(
+    formatPipelineCheck(details),
+    /openai-codex\/gpt-5\.6-luna · medium · starting/,
+  );
   assert.equal(
     projectPipelineCheck(snapshot({ rootId: undefined, agents: [] }), now)
       .rootStatus,
@@ -365,6 +381,7 @@ test("active previews prefer live text, fall back to finalized assistant text, a
     role: "discover-problem",
     attempt: 1,
     model: "openai-codex/gpt-5.6-luna",
+    thinkingLevel: "medium",
     status: "running",
     preview: "live assistant preview",
     openTool: "read",
