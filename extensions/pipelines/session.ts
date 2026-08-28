@@ -36,7 +36,7 @@ import {
   EXECUTOR_AUDIT_ROLE,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
-  LUNA_MODEL,
+  pipelineThinkingLevel,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
@@ -154,9 +154,7 @@ function lastAssistant(session: AgentSession) {
   return undefined;
 }
 
-export function pipelineThinkingLevel(model: string) {
-  return model === LUNA_MODEL ? "medium" : "high";
-}
+export { pipelineThinkingLevel } from "./domain.ts";
 
 function auditSubmissionRole(role: string) {
   if (role === AUDIT_SYNTHESIS_ROLE) return role;

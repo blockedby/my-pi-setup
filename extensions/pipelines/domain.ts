@@ -16,6 +16,10 @@ export const SOL_MODEL = "openai-codex/gpt-5.6-sol";
 export const LUNA_MODEL = "openai-codex/gpt-5.6-luna";
 export const TERRA_MODEL = "openai-codex/gpt-5.6-terra";
 
+export function pipelineThinkingLevel(model: string) {
+  return model === LUNA_MODEL ? "medium" : "high";
+}
+
 export const PIPELINE_STAGES = [
   "discover",
   "build",

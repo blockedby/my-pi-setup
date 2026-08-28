@@ -196,9 +196,43 @@ test("nested UI model is definition to run to root, stages, and child attempts",
       [
         "agent",
         3,
-        "discover-problem · attempt 2 · openai-codex/gpt-5.6-luna · running",
+        "discover-problem · attempt 2 · openai-codex/gpt-5.6-luna · medium · running",
       ],
     ],
+  );
+});
+
+test("agent rows show configured thinking and omit the first attempt marker", () => {
+  const root = agent("root-1");
+  const firstAttempt = agent("child-1", {
+    parentId: root.id,
+    role: "discover-goal-outcomes",
+    model: "openai-codex/gpt-5.6-luna",
+    attempt: 1,
+  });
+  const retry = agent("child-2", {
+    parentId: root.id,
+    role: "discover-frontend-scope",
+    model: "openai-codex/gpt-5.6-sol",
+    attempt: 2,
+  });
+  const rows = buildPipelineRows(
+    [pipelineRun("run-1", [root, firstAttempt, retry])],
+    new Set(["run-1"]),
+  );
+
+  assert.equal(
+    rows.find((row) => row.kind === "agent" && row.agentId === firstAttempt.id)
+      ?.label,
+    "discover-goal-outcomes · openai-codex/gpt-5.6-luna · medium · running",
+  );
+  assert.equal(
+    rows.find((row) => row.kind === "agent" && row.agentId === retry.id)?.label,
+    "discover-frontend-scope · attempt 2 · openai-codex/gpt-5.6-sol · high · running",
+  );
+  assert.equal(
+    rows.find((row) => row.kind === "agent" && row.agentId === root.id)?.label,
+    "root-1 · running",
   );
 });
 

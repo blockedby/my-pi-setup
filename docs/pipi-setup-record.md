@@ -1290,3 +1290,19 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/audit-segment.ts`, `extensions/pipelines/audit-pipeline.test.ts`, `docs/pipelines-v1-design.md`, this record, local extension dependency trees, and pinned submodule worktrees. No vendor files were edited; credentials, model overrides, Pipi runtime version, or Git delivery state changed.
 - **Verification:** Initial focused audit tests passed 28/28, while repository-wide checks were initially blocked by missing dependencies and the uninitialized reviewer submodule. The remediation reran the focused audit tests (28/28), `npm run test:extensions` (272/272), `npm run check`, `npm run format:check`, `npm run check:submodules`, and `git diff --check`; all passed after `npm run install:dependencies` and `git submodule update --init --recursive`. No commit or push was performed.
 - **Pending:** Pipi rollout/reinstall is intentionally pending; reload sessions after the source change is delivered.
+
+## Operation entry: add pipeline dashboard agent thinking metadata
+
+- **Request:** Update only the `/pipelines` TUI agent rows to show configured thinking levels and hide the first-attempt marker while retaining retry metadata.
+- **Action:** Reused the shared `pipelineThinkingLevel` policy used by pipeline session creation, rendering Luna as `medium` and non-Luna models as `high`; child rows now omit `attempt 1` and show `attempt N` only for retries. Root agent rows intentionally remain title-and-status only, preserving their existing presentation.
+- **Affected paths or values:** `extensions/pipelines/domain.ts`, `extensions/pipelines/session.ts`, `extensions/pipelines/dashboard.ts`, `extensions/pipelines/dashboard.test.ts`, and this record. Pipeline text/tool contracts, lifecycle behavior, installed runtime state, credentials, model overrides, submodule pins, and Git history are unchanged.
+- **Verification:** Focused dashboard tests passed 15/15. `npm run format:check` and `git diff --check` passed after formatting. `npm run test:extensions` could not complete because this worktree lacks installed `effect` and other extension dependencies; `npm run check` likewise reports those pre-existing missing dependency errors; `npm run check:submodules` could not run because `gpt5.6-reviewer` is uninitialized.
+- **Pending:** Changes remain uncommitted as required; reload the TUI session to see the updated rows.
+
+## Operation entry: verify pipeline dashboard remediation
+
+- **Request:** Resolve the audit-reported verification gaps without changing the implementation or performing Git delivery actions.
+- **Action:** Initialized the pinned repository submodules recursively and installed the repository and extension dependencies required for deterministic checks. No source, model override, credential, or submodule pin changed.
+- **Affected paths or values:** Local ignored dependency trees, initialized `vendor/gpt5.6-reviewer`, `vendor/plan-gh-backlog`, and `vendor/pi-codex` worktrees, and this record.
+- **Verification:** Focused dashboard tests passed 15/15; `npm run test:extensions` passed 271/271; `npm run check`, `npm run format:check`, `npm run check:submodules`, and `git diff --check` passed. Git status confirms only the five reported tracked files are modified and no commit was created.
+- **Pending:** None.
