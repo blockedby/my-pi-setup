@@ -3,10 +3,11 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import { Check } from "typebox/value";
+import { assertPipelineGitCommitSupported } from "./domain.ts";
 import {
-  assertPipelineGitCommitSupported,
   assertPipelineName,
-} from "./domain.ts";
+  canonicalPipelineId,
+} from "./pipeline-identity.ts";
 import pipelinesExtension, {
   PIPELINE_CANCEL_PARAMETERS,
   PIPELINE_RUN_PARAMETERS,
@@ -51,81 +52,28 @@ test("registered pipeline_cancel schema rejects malformed host payloads", () => 
   assert.deepEqual(cancellation.parameters, PIPELINE_CANCEL_PARAMETERS);
   for (const malformed of [
     { ids: [] },
-    { ids: ["pipeline-1", "pipeline-1"] },
+    {
+      ids: ["cancel-me-now-00000001", "cancel-me-now-00000001"],
+    },
     { ids: ["x".repeat(257)] },
-    { ids: ["pipeline-1"], child_id: "agent-1" },
+    { ids: ["cancel-me-now-00000001"], child_id: "agent-1" },
   ]) {
     assert.equal(Check(cancellation.parameters, malformed), false);
   }
 });
 
-test("pipeline_run requires a valid human-readable pipeline name", () => {
+test("pipeline_run requires a strict human-readable pipeline name", () => {
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
-      pipeline_name: "build-safe-feature",
+      pipeline_name: "build-approved-feature",
       task: "Build a feature",
     }),
     true,
   );
-  for (const pipeline_name of [
-    "",
-    "one",
-    "one-two",
-    "one-two-three-four-five-six",
-    "One-two-three",
-    "one two three",
-    "one-two/three",
-    "one--two-three",
-    "one-two-three!",
-    "one-two-three-four-five-six-seven",
-    " one-two-three",
-  ]) {
-    assert.equal(
-      Check(PIPELINE_RUN_PARAMETERS, {
-        pipeline_name,
-        task: "Build a feature",
-      }),
-      false,
-    );
-  }
-  const maxLengthName = `a-${"b".repeat(15)}-${"c".repeat(15)}-${"d".repeat(15)}-${"e".repeat(14)}`;
-  assert.equal(maxLengthName.length, 64);
-  assert.equal(
-    Check(PIPELINE_RUN_PARAMETERS, {
-      pipeline_name: maxLengthName,
-      task: "Build a feature",
-    }),
-    true,
-  );
-  assert.equal(
-    Check(PIPELINE_RUN_PARAMETERS, {
-      pipeline_name: `${maxLengthName}a`,
-      task: "Build a feature",
-    }),
-    false,
-  );
-  assert.equal(
-    Check(PIPELINE_RUN_PARAMETERS, { task: "Build a feature" }),
-    false,
-  );
-  assert.throws(() => assertPipelineName(" build-safe-feature"), /no trimming/);
-  for (const pipeline_name of [
-    "one-two-three",
-    "one-two-three-four",
-    "one-two-three-four-five",
-  ]) {
-    assert.equal(
-      Check(PIPELINE_RUN_PARAMETERS, {
-        pipeline_name,
-        task: "Build a feature",
-      }),
-      true,
-    );
-  }
   for (const git_commit of [true, false]) {
     assert.equal(
       Check(PIPELINE_RUN_PARAMETERS, {
-        pipeline_name: "implement-feature-now",
+        pipeline_name: "implement-approved-feature",
         pipeline: "feature-pipeline",
         task: "Implement a feature",
         working_dir: "/repo/current-branch",
@@ -146,7 +94,7 @@ test("pipeline_run requires a valid human-readable pipeline name", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
-      pipeline_name: "plan-a-feature-now",
+      pipeline_name: "plan-approved-feature",
       pipeline: "plan-pipeline",
       task: "Plan a feature",
       working_dir: ".worktrees/feature",
@@ -185,7 +133,7 @@ test("pipeline_run requires a valid human-readable pipeline name", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
-      pipeline_name: "incomplete-closure-audit",
+      pipeline_name: "verify-prior-blockers",
       pipeline: "audit-pipeline",
       task: "Incomplete closure audit",
       audit: {
@@ -210,13 +158,63 @@ test("pipeline_run requires a valid human-readable pipeline name", () => {
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
-      pipeline_name: "build-safe-feature",
+      pipeline_name: "build-approved-feature",
       pipeline: "unknown-pipeline",
       task: "Build a feature",
     }),
     false,
   );
-  assert.equal(Check(PIPELINE_RUN_PARAMETERS, {}), false);
+  assert.equal(
+    Check(PIPELINE_RUN_PARAMETERS, { task: "Build a feature" }),
+    false,
+  );
+});
+
+test("pipeline names enforce exact word, casing, separator, and length boundaries", () => {
+  const maxName = `aa-${"b".repeat(30)}-${"c".repeat(30)}`;
+  assert.equal(maxName.length, 64);
+  for (const pipeline_name of [
+    "one-two-three",
+    "one-two-three-four",
+    "one-two-three-four-five",
+    maxName,
+  ]) {
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, { pipeline_name, task: "Task" }),
+      true,
+    );
+    assert.doesNotThrow(() => assertPipelineName(pipeline_name));
+  }
+  for (const pipeline_name of [
+    "one-two",
+    "one-two-three-four-five-six",
+    "One-two-three",
+    "one two three",
+    "one/two/three",
+    "one--two-three",
+    "one-two-three-",
+    "one-two-three!",
+    `${maxName}x`,
+  ]) {
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, { pipeline_name, task: "Task" }),
+      false,
+    );
+    assert.throws(() => assertPipelineName(pipeline_name));
+  }
+  assert.equal(Check(PIPELINE_RUN_PARAMETERS, { task: "Task" }), false);
+  assert.throws(() => assertPipelineName(undefined), /required/);
+});
+
+test("canonical pipeline ids preserve the base and append an exact token", () => {
+  assert.equal(
+    canonicalPipelineId("replace-heavy-plan-pipeline", "f82091ba"),
+    "replace-heavy-plan-pipeline-f82091ba",
+  );
+  assert.throws(
+    () => canonicalPipelineId("replace-heavy-plan-pipeline", "ABCDEF12"),
+    /exactly eight lowercase hexadecimal/,
+  );
 });
 
 test("pipeline_run schema makes plan_path required only for plan definitions", () => {

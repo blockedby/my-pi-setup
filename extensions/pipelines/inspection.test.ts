@@ -72,10 +72,18 @@ function snapshot(
 }
 
 test("pipeline inspection schemas accept exactly check id and empty list inputs", () => {
-  assert.equal(Check(PIPELINE_CHECK_PARAMETERS, { id: "run-1" }), true);
+  assert.equal(
+    Check(PIPELINE_CHECK_PARAMETERS, {
+      id: "inspect-approved-run-00000001",
+    }),
+    true,
+  );
   assert.equal(Check(PIPELINE_CHECK_PARAMETERS, {}), false);
   assert.equal(
-    Check(PIPELINE_CHECK_PARAMETERS, { id: "run-1", wait: true }),
+    Check(PIPELINE_CHECK_PARAMETERS, {
+      id: "inspect-approved-run-00000001",
+      wait: true,
+    }),
     false,
   );
   assert.equal(Check(PIPELINE_LIST_PARAMETERS, {}), true);

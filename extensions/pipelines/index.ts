@@ -9,6 +9,11 @@ import {
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+  PIPELINE_NAME_DESCRIPTION,
+  PIPELINE_NAME_MAX_LENGTH,
+  PIPELINE_NAME_PATTERN,
+} from "./pipeline-identity.ts";
+import {
   createPipelineCancellationTool,
   PIPELINE_CANCEL_PARAMETERS,
 } from "./cancellation.ts";
@@ -19,8 +24,6 @@ import {
   FEATURE_PIPELINE_ID,
   PIPELINE_DEFINITION_IDS,
   assertPipelineGitCommitSupported,
-  PIPELINE_NAME_MAX_LENGTH,
-  PIPELINE_NAME_PATTERN,
   type PipelineDefinitionId,
   type PipelineHandoff,
 } from "./domain.ts";
@@ -116,10 +119,10 @@ const PLAN_PATH_PARAMETER = Type.Union(
 const NON_PLAN_PIPELINE_PARAMETERS = Type.Object(
   {
     pipeline_name: Type.String({
-      description:
-        "Required unchanged human-readable base: exactly 3–5 lowercase kebab-case words and at most 64 characters (for example, replace-heavy-plan-pipeline); input is not trimmed or normalized.",
-      pattern: PIPELINE_NAME_PATTERN.source,
+      description: PIPELINE_NAME_DESCRIPTION,
+      minLength: 1,
       maxLength: PIPELINE_NAME_MAX_LENGTH,
+      pattern: PIPELINE_NAME_PATTERN,
     }),
     pipeline: Type.Optional(
       StringEnum(
@@ -299,7 +302,7 @@ export default function pipelines(pi: ExtensionAPI) {
     promptSnippet:
       "Start a background implementation, planning, or Luna audit pipeline",
     promptGuidelines: [
-      "Always supply pipeline_name unchanged as a recognizable base of exactly 3–5 lowercase kebab-case words and at most 64 characters; do not trim or normalize it. Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline request. Use audit-pipeline for routine repository initial or closure audits that require four independent static Luna tracks, one audit-executor contributor, and incremental Luna synthesis without remediation. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
+      "Always provide pipeline_name as the unchanged lowercase kebab-case base of 3–5 hyphen-separated words (maximum 64 characters), such as replace-heavy-plan-pipeline. The controller appends the canonical eight-character hexadecimal suffix; use that exact returned id for later inspection or cancellation. Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline request. Use audit-pipeline for routine repository initial or closure audits that require four independent static Luna tracks, one audit-executor contributor, and incremental Luna synthesis without remediation. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
       "Automatically use plan-pipeline for a durable audited implementation plan, task breakdown, dependency waves, or test/release plan when at least one complexity signal applies: the goal spans two or more of frontend, backend, data, DevOps, or runtime; it includes migration, rollout, rollback, operational readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies require repository discovery. An explicit plan-pipeline request does not require a complexity signal.",
       "Do not choose plan-pipeline merely because an implementation request is cross-layer. Do not use implementation or planning pipelines for bugs, refactors, research-only work, or trivial edits; use audit-pipeline only when the requested outcome is a bounded repository audit rather than implementation. A small feature is bounded implementation work that still benefits from independent audit; it is not a synonym for a trivial edit. If the user has not made the desired deliverable—plan versus implementation—clear, ask before launching. Before feature-pipeline or small-feature-pipeline, create and prepare a dedicated linked Git worktree and pass its exact root. git_commit is authoritative and never inferred from task prose. feature-pipeline additionally rejects omission/false and requires Linux bubblewrap plus a clean stable HEAD; its controller alone owns temporary candidate/synthesis branches, worktrees, exact promotion, and cleanup. No pipeline receives push, delivery-merge, history-rewrite, deployment, or external-state authority. After launch, do not duplicate work in the same workspace; use pipeline_check occasionally or /pipelines for live inspection while continuing only unrelated work. Do not poll; completion arrives automatically as a follow-up handoff.",
     ],

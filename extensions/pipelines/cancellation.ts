@@ -4,6 +4,10 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  PIPELINE_RUN_ID_MAX_LENGTH,
+  PIPELINE_RUN_ID_PATTERN,
+} from "./pipeline-identity.ts";
 import type { PipelineRunSnapshot } from "./domain.ts";
 
 export const PIPELINE_CANCEL_MAX_IDS = 32;
@@ -15,13 +19,14 @@ export const PIPELINE_CANCEL_PARAMETERS = Type.Object(
     ids: Type.Array(
       Type.String({
         description:
-          "Canonical pipeline run id to cancel (the supplied pipeline_name plus eight lowercase hexadecimal characters).",
+          "Canonical pipeline run id returned by pipeline_run (the supplied name plus eight lowercase hexadecimal characters).",
         minLength: 1,
-        maxLength: 256,
+        maxLength: PIPELINE_RUN_ID_MAX_LENGTH,
+        pattern: PIPELINE_RUN_ID_PATTERN,
       }),
       {
         description:
-          'Canonical pipeline run ids to cancel, e.g. ["replace-heavy-plan-pipeline-f82091ba"].',
+          'Canonical pipeline run ids to cancel, e.g. ["replace-heavy-plan-pipeline-f82091ba", "replace-heavy-plan-pipeline-a1029c44"].',
         minItems: 1,
         maxItems: PIPELINE_CANCEL_MAX_IDS,
         uniqueItems: true,
@@ -102,7 +107,7 @@ export function createPipelineCancellationTool(
     name: "pipeline_cancel",
     label: "Cancel Pipelines",
     description:
-      "Cancel one or more canonical pipeline runs in caller order. Active runs use controller-owned cancellation and cleanup; settled and unknown ids are reported without stopping the remaining requests.",
+      "Cancel one or more session-scoped pipeline runs in caller order. Active runs use controller-owned cancellation and cleanup; settled and unknown ids are reported without stopping the remaining requests.",
     promptSnippet: "Cancel one or more active pipeline runs",
     promptGuidelines: [
       "Use pipeline_cancel when the user asks to stop known pipeline runs. Pass each run id once; cancellation preserves normal controller-owned cleanup and automatic factual handoffs.",
