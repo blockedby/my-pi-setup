@@ -100,6 +100,12 @@ interface PipelineSessionFactoryOptions {
     role: string,
     workingDir: string,
   ) => string;
+  readonly featureBashResult?: (
+    runId: string,
+    role: string,
+    command: string,
+    exitCode: number | null,
+  ) => void;
 }
 
 function textContent(message: Message) {
@@ -421,6 +427,13 @@ export function createPipelineSessionFactory(
           ? createFeatureToolBoundary({
               cwd: spec.cwd,
               mode: candidateRole ? "candidate" : "selection",
+              onBashResult: (command, exitCode) =>
+                options.featureBashResult?.(
+                  spec.scopeId ?? "",
+                  spec.role,
+                  command,
+                  exitCode,
+                ),
             })
           : undefined;
       const submissionRole = auditSubmissionRole(spec.role);

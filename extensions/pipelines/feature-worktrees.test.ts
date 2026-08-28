@@ -56,13 +56,13 @@ function selectionFor(
   augmentationCandidates: FeatureSelection["augmentationCandidates"] = [],
 ): FeatureSelection {
   return {
-    reportType: "feature-implementation-selection-v1",
+    reportType: "feature-implementation-selection-v2",
     selectionOnlyAcknowledgement:
       "No code was written before primary selection.",
     comparisons: (["Minimal", "Robust", "Architectural"] as const).map(
       (role) => ({
         role,
-        usableBase: true,
+        viableCheckpoint: true,
         criteria: {
           correctness: `${role} correctness`,
           acceptanceCoverage: `${role} coverage`,
@@ -96,14 +96,15 @@ function commitCandidate(
     worktree.path,
   );
   const handoff: FeatureCandidateHandoff = {
-    reportType: "feature-implementation-candidate-v1",
+    reportType: "feature-implementation-candidate-v2",
     role: worktree.role,
-    approachSummary: `${worktree.role} complete implementation`,
+    approachSummary: `${worktree.role} implementation checkpoint`,
     changedPaths: [changedPath],
+    provenBehavior: "Fixture main path and risk are proven",
     checks: ["fixture verification passed"],
+    remainingWork: ["Complete secondary fixture behavior"],
     assumptions: [],
     tradeoffs: ["Bounded fixture tradeoff"],
-    unresolvedIssues: [],
     worktreePath: worktree.path,
     branchRef: worktree.branchRef,
     baseCommit: worktree.baseCommit,
@@ -177,17 +178,23 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
     );
     assert.equal(git(primary.path, ["rev-parse", "HEAD"]), primary.headCommit);
 
+    const augmentationCommit = lifecycle.commitAssignedWorktree(
+      "implementation-synthesis",
+      synthesis.path,
+    );
     const finalCommit = lifecycle.commitAssignedWorktree(
       "implementation-synthesis",
       synthesis.path,
     );
     const provenance: FeatureSynthesisProvenance = {
-      reportType: "feature-implementation-synthesis-v1",
+      reportType: "feature-implementation-synthesis-v2",
       primaryCandidate: primary.role,
       primaryCommit: primary.headCommit,
       acceptedAugmentations: [],
       rejectedAugmentations: [],
-      changedPaths: [],
+      augmentationChangedPaths: [],
+      augmentationCommit,
+      completionChangedPaths: [],
       checks: ["fixture verification passed"],
       assumptions: [],
       unresolvedIssues: [],
@@ -224,7 +231,7 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
   }
 });
 
-test("candidate and synthesis changed-path handoffs reject duplicates and omissions", () => {
+test("candidate handoffs reject duplicate paths while synthesis accepts attributed completion", () => {
   const repo = fixture();
   try {
     const caller = defaultFeatureGitOperations.preflight(repo.caller);
@@ -241,14 +248,15 @@ test("candidate and synthesis changed-path handoffs reject duplicates and omissi
       minimal.path,
     );
     const invalidHandoff: FeatureCandidateHandoff = {
-      reportType: "feature-implementation-candidate-v1",
+      reportType: "feature-implementation-candidate-v2",
       role: minimal.role,
-      approachSummary: "Two-path implementation",
+      approachSummary: "Two-path implementation checkpoint",
       changedPaths: ["one.txt", "one.txt"],
+      provenBehavior: "The main fixture path is proven",
       checks: ["fixture verification passed"],
+      remainingWork: ["Complete secondary fixture behavior"],
       assumptions: [],
       tradeoffs: ["fixture"],
-      unresolvedIssues: [],
       worktreePath: minimal.path,
       branchRef: minimal.branchRef,
       baseCommit: minimal.baseCommit,
@@ -274,18 +282,24 @@ test("candidate and synthesis changed-path handoffs reject duplicates and omissi
     const frozen = [validMinimal, ...otherFrozen];
     lifecycle.prepareSelectionDirectory();
     const synthesis = lifecycle.createSynthesisWorktree(validMinimal);
-    fs.writeFileSync(path.join(synthesis.path, "fourth.txt"), "rewrite\n");
+    const augmentationCommit = lifecycle.commitAssignedWorktree(
+      "implementation-synthesis",
+      synthesis.path,
+    );
+    fs.writeFileSync(path.join(synthesis.path, "completed.txt"), "complete\n");
     const finalCommit = lifecycle.commitAssignedWorktree(
       "implementation-synthesis",
       synthesis.path,
     );
     const provenance: FeatureSynthesisProvenance = {
-      reportType: "feature-implementation-synthesis-v1",
+      reportType: "feature-implementation-synthesis-v2",
       primaryCandidate: validMinimal.role,
       primaryCommit: validMinimal.headCommit,
       acceptedAugmentations: [],
       rejectedAugmentations: [],
-      changedPaths: ["fourth.txt", "fourth.txt"],
+      augmentationChangedPaths: [],
+      augmentationCommit,
+      completionChangedPaths: ["completed.txt", "completed.txt"],
       checks: ["fixture verification passed"],
       assumptions: [],
       unresolvedIssues: [],
@@ -299,17 +313,16 @@ test("candidate and synthesis changed-path handoffs reject duplicates and omissi
           selectionFor(validMinimal.role),
           frozen,
         ),
-      /changedPaths do not match/,
+      /completionChangedPaths do not match/,
     );
-    assert.throws(
-      () =>
-        lifecycle.validateSynthesis(
-          synthesis,
-          { ...provenance, changedPaths: ["fourth.txt"] },
-          selectionFor(validMinimal.role),
-          frozen,
-        ),
-      /must be attributed exactly once/,
+    assert.deepEqual(
+      lifecycle.validateSynthesis(
+        synthesis,
+        { ...provenance, completionChangedPaths: ["completed.txt"] },
+        selectionFor(validMinimal.role),
+        frozen,
+      ).changedPaths,
+      ["completed.txt"],
     );
     lifecycle.cleanup();
   } finally {
@@ -317,7 +330,7 @@ test("candidate and synthesis changed-path handoffs reject duplicates and omissi
   }
 });
 
-test("synthesis accepts only fully attributed validated losing-candidate augmentations", () => {
+test("synthesis validates adopted blobs before allowing same-path production completion", () => {
   const repo = fixture();
   try {
     const caller = defaultFeatureGitOperations.preflight(repo.caller);
@@ -376,8 +389,12 @@ test("synthesis accepts only fully attributed validated losing-candidate augment
       "implementation-synthesis",
       synthesis.path,
     );
+    const unrelatedFinalCommit = lifecycle.commitAssignedWorktree(
+      "implementation-synthesis",
+      synthesis.path,
+    );
     const unrelatedProvenance: FeatureSynthesisProvenance = {
-      reportType: "feature-implementation-synthesis-v1",
+      reportType: "feature-implementation-synthesis-v2",
       primaryCandidate: primary.role,
       primaryCommit: primary.headCommit,
       acceptedAugmentations: [
@@ -387,11 +404,13 @@ test("synthesis accepts only fully attributed validated losing-candidate augment
         },
       ],
       rejectedAugmentations: [],
-      changedPaths: ["fourth.txt"],
+      augmentationChangedPaths: ["fourth.txt"],
+      augmentationCommit: unrelatedCommit,
+      completionChangedPaths: [],
       checks: ["fixture verification passed"],
       assumptions: [],
       unresolvedIssues: [],
-      finalCommit: unrelatedCommit,
+      finalCommit: unrelatedFinalCommit,
     };
     assert.throws(
       () =>
@@ -409,12 +428,20 @@ test("synthesis accepts only fully attributed validated losing-candidate augment
       path.join(source.path, "robust.txt"),
       path.join(synthesis.path, "robust.txt"),
     );
+    const augmentationCommit = lifecycle.commitAssignedWorktree(
+      "implementation-synthesis",
+      synthesis.path,
+    );
+    fs.writeFileSync(
+      path.join(synthesis.path, "robust.txt"),
+      "Robust adopted and production-completed\n",
+    );
     const finalCommit = lifecycle.commitAssignedWorktree(
       "implementation-synthesis",
       synthesis.path,
     );
     const provenance: FeatureSynthesisProvenance = {
-      reportType: "feature-implementation-synthesis-v1",
+      reportType: "feature-implementation-synthesis-v2",
       primaryCandidate: primary.role,
       primaryCommit: primary.headCommit,
       acceptedAugmentations: [
@@ -424,7 +451,9 @@ test("synthesis accepts only fully attributed validated losing-candidate augment
         },
       ],
       rejectedAugmentations: [],
-      changedPaths: ["robust.txt"],
+      augmentationChangedPaths: ["robust.txt"],
+      augmentationCommit,
+      completionChangedPaths: ["robust.txt"],
       checks: ["fixture verification passed"],
       assumptions: [],
       unresolvedIssues: [],
@@ -483,14 +512,15 @@ test("candidate freeze rejects a clean same-branch head that does not descend fr
     ]);
     git(minimal.path, ["reset", "--hard", "-q", unrelated]);
     const handoff: FeatureCandidateHandoff = {
-      reportType: "feature-implementation-candidate-v1",
+      reportType: "feature-implementation-candidate-v2",
       role: minimal.role,
       approachSummary: "Unrelated candidate",
       changedPaths: ["base.txt"],
+      provenBehavior: "Purported main path",
       checks: ["fixture"],
+      remainingWork: [],
       assumptions: [],
       tradeoffs: ["invalid ancestry"],
-      unresolvedIssues: [],
       worktreePath: minimal.path,
       branchRef: minimal.branchRef,
       baseCommit: minimal.baseCommit,

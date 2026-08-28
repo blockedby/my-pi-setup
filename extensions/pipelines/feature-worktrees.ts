@@ -11,8 +11,8 @@ import type {
 
 const GIT_OUTPUT_LIMIT = 512 * 1024;
 const CANDIDATE_DIFF_LIMIT = 48 * 1024;
-const SYNTHESIS_DIFF_LIMIT = 128 * 1024;
-const SYNTHESIS_CHANGED_PATH_LIMIT = 64;
+const AUGMENTATION_DIFF_LIMIT = 128 * 1024;
+const AUGMENTATION_CHANGED_PATH_LIMIT = 64;
 
 export interface FeatureCallerWorktree {
   readonly workingDir: string;
@@ -792,55 +792,89 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
         "Synthesis provenance does not match controller Git state.",
       );
     }
-    if (finalCommit === worktree.primaryCommit) {
+    if (
+      provenance.augmentationCommit === worktree.primaryCommit ||
+      finalCommit === provenance.augmentationCommit
+    ) {
       throw new Error(
-        "Synthesis must create a distinct final commit, including for no-augmentation selection.",
+        "Synthesis must create distinct augmentation and completion commits, including for empty stages.",
       );
     }
     requireAncestor(
       worktree.path,
       worktree.primaryCommit,
+      provenance.augmentationCommit,
+      "Synthesis augmentation ancestry is invalid",
+    );
+    requireAncestor(
+      worktree.path,
+      provenance.augmentationCommit,
       finalCommit,
-      "Synthesis ancestry is invalid",
+      "Synthesis completion ancestry is invalid",
     );
     if (cleanStatus(worktree.path)) {
       throw new Error(
         "Synthesis worktree must be clean after its final commit.",
       );
     }
-    const changedPaths = readChangedPaths(
+    const augmentationChangedPaths = readChangedPaths(
       worktree.path,
       worktree.primaryCommit,
-      finalCommit,
+      provenance.augmentationCommit,
     );
-    if (changedPaths.length > SYNTHESIS_CHANGED_PATH_LIMIT) {
+    if (augmentationChangedPaths.length > AUGMENTATION_CHANGED_PATH_LIMIT) {
       throw new Error(
-        `Bounded augmentation changed ${changedPaths.length} paths; maximum is ${SYNTHESIS_CHANGED_PATH_LIMIT}.`,
+        `Bounded augmentation changed ${augmentationChangedPaths.length} paths; maximum is ${AUGMENTATION_CHANGED_PATH_LIMIT}.`,
       );
     }
-    const diff = boundedDiff(
+    const augmentationDiff = boundedDiff(
       worktree.path,
       worktree.primaryCommit,
-      finalCommit,
-      SYNTHESIS_DIFF_LIMIT,
+      provenance.augmentationCommit,
+      AUGMENTATION_DIFF_LIMIT,
     );
-    if (diff.truncated) {
+    if (augmentationDiff.truncated) {
       throw new Error(
-        `Bounded augmentation diff exceeds ${SYNTHESIS_DIFF_LIMIT} UTF-8 bytes.`,
+        `Bounded augmentation diff exceeds ${AUGMENTATION_DIFF_LIMIT} UTF-8 bytes.`,
       );
     }
-    if (!equalUniquePathSets(provenance.changedPaths, changedPaths)) {
+    if (
+      !equalUniquePathSets(
+        provenance.augmentationChangedPaths,
+        augmentationChangedPaths,
+      )
+    ) {
       throw new Error(
-        "Synthesis changedPaths do not match its augmentation diff.",
+        "Synthesis augmentationChangedPaths do not match its augmentation checkpoint diff.",
       );
     }
     validateAugmentationAttribution(
       provenance,
       selection,
       candidates,
-      finalCommit,
+      provenance.augmentationCommit,
       worktree.path,
-      changedPaths,
+      augmentationChangedPaths,
+    );
+    const completionChangedPaths = readChangedPaths(
+      worktree.path,
+      provenance.augmentationCommit,
+      finalCommit,
+    );
+    if (
+      !equalUniquePathSets(
+        provenance.completionChangedPaths,
+        completionChangedPaths,
+      )
+    ) {
+      throw new Error(
+        "Synthesis completionChangedPaths do not match its production-completion diff.",
+      );
+    }
+    const changedPaths = readChangedPaths(
+      worktree.path,
+      worktree.primaryCommit,
+      finalCommit,
     );
     return { ...worktree, finalCommit, changedPaths };
   }

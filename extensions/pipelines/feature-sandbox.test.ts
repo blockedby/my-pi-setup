@@ -65,7 +65,7 @@ test("candidate tools cannot read or mutate sibling worktrees and bash sees only
   }
 });
 
-test("selection tools are read-only across candidates until the controller enables augmentation", async () => {
+test("selection keeps candidates read-only and augmentation can copy them only into synthesis", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pipi-feature-selection-"),
   );
@@ -114,6 +114,17 @@ test("selection tools are read-only across candidates until the controller enabl
     );
 
     boundary.enableAugmentation();
+    await execute(tool(boundary, "bash"), {
+      command: `cp ${JSON.stringify(path.join(candidate, "candidate.txt"))} adopted.txt; printf illegal > ${JSON.stringify(path.join(candidate, "illegal-after.txt"))} || true`,
+    });
+    assert.equal(
+      fs.readFileSync(path.join(synthesis, "adopted.txt"), "utf8"),
+      "candidate\n",
+    );
+    assert.equal(
+      fs.existsSync(path.join(candidate, "illegal-after.txt")),
+      false,
+    );
     await execute(tool(boundary, "write"), {
       path: path.join(synthesis, "after.txt"),
       content: "after",

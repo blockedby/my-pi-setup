@@ -215,6 +215,7 @@ export default function pipelines(pi: ExtensionAPI) {
         discoverySessionCreated,
         discoveryToolAllowed,
         featureCommit,
+        featureBashResult,
       ) =>
         createPipelineSessionFactory({
           modelRegistry: ctx.modelRegistry,
@@ -229,6 +230,7 @@ export default function pipelines(pi: ExtensionAPI) {
           discoverySessionCreated,
           discoveryToolAllowed,
           featureCommit,
+          featureBashResult,
         }),
       onHandoff: deliver,
     });
@@ -256,7 +258,7 @@ export default function pipelines(pi: ExtensionAPI) {
     name: "pipeline_run",
     label: "Run Pipeline",
     description:
-      "Start one of four known hardcoded pipelines in a caller-provided working directory and return its run id immediately: feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/xHIGH implementation candidates; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
+      "Start one of four known hardcoded pipelines in a caller-provided working directory and return its run id immediately: feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/xHIGH implementation checkpoints; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded attributable augmentation, completes and verifies the selected approach, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
     promptSnippet:
       "Start a background implementation, planning, or Luna audit pipeline",
     promptGuidelines: [
