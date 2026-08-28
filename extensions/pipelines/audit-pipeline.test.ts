@@ -917,6 +917,50 @@ test("synthesis schema correction budget is cumulative across reducer revisions"
   await run.controller.dispose();
 });
 
+test("synthesis accepts bounded paraphrased executor evidence in intermediate output", () => {
+  const segment = synthesisSegment();
+  const staticRole = AUDIT_SEGMENT_LUNA_ROLES[0];
+  segment.accept(staticRole, trackReport(staticRole), 1);
+  segment.accept(
+    EXECUTOR_AUDIT_ROLE,
+    JSON.stringify({
+      ...trackReportValue(EXECUTOR_AUDIT_ROLE),
+      executedChecks: [
+        {
+          command: "npm run check",
+          status: "passed",
+          exitCode: 0,
+          evidence: "The type checker completed successfully.",
+        },
+      ],
+    }),
+    1,
+  );
+  const turn = segment.nextPrompt();
+  assert.equal(turn?.turn.final, false);
+  segment.settleSubmitted({
+    reportType: "audit-synthesis-intermediate",
+    integratedRoles: [EXECUTOR_AUDIT_ROLE, staticRole],
+    rootCauseCandidates: [],
+    unresolvedConflicts: [],
+    unprovenChecks: [],
+    executedChecks: [
+      {
+        command: "npm run check",
+        status: "passed",
+        exitCode: 0,
+        evidence: "Check passed; no diagnostics were emitted.",
+      },
+    ],
+    workspaceChangesObserved: [],
+    hostWorkspaceObservation: {
+      ...hostWorkspaceObservation(),
+      summary: "Host Git observation was captured after the executor.",
+    },
+    summary: "Bounded evidence summary",
+  });
+});
+
 test("executor evidence and observed workspace changes survive final canonicalization", () => {
   const segment = synthesisSegment();
   const executorReport = {
@@ -955,9 +999,41 @@ test("executor evidence and observed workspace changes survive final canonicaliz
     );
   }
   segment.nextPrompt();
-  segment.settleSubmitted(
-    JSON.parse(finalReport([...AUDIT_SEGMENT_LUNA_ROLES].reverse())),
+  const paraphrasedFinal = JSON.parse(
+    finalReport([...AUDIT_SEGMENT_LUNA_ROLES].reverse()),
   );
+  paraphrasedFinal.executedChecks = [
+    {
+      command: "npm run test:watch",
+      status: "skipped",
+      exitCode: null,
+      evidence: "Watch mode was not run because it is long-lived.",
+    },
+    {
+      command: "npm run check",
+      status: "passed",
+      exitCode: 0,
+      evidence: "The type check completed without diagnostics.",
+    },
+  ];
+  paraphrasedFinal.workspaceChangesObserved = [
+    {
+      path: ".cache/tests",
+      change: "untracked",
+      evidence: "A test cache appeared in the workspace afterward.",
+    },
+  ];
+  paraphrasedFinal.hostWorkspaceObservation = {
+    ...hostWorkspaceObservation(),
+    workspaceChanged: true,
+    statusAfter: {
+      state: "truncated",
+      value: "?? .cache/tests\n".repeat(700),
+    },
+    summary:
+      "The long Git status observation was bounded and summarized after execution.",
+  };
+  segment.settleSubmitted(paraphrasedFinal);
   assert.deepEqual(
     segment.finalReport?.executedChecks,
     executorReport.executedChecks,
@@ -971,6 +1047,28 @@ test("executor evidence and observed workspace changes survive final canonicaliz
     true,
   );
   assert.deepEqual(segment.finalReport?.findings, []);
+});
+
+test("synthesis still rejects malformed executor evidence after integration", () => {
+  const segment = synthesisSegment();
+  for (const role of AUDIT_SEGMENT_LUNA_ROLES) {
+    segment.accept(role, trackReport(role), 1);
+  }
+  segment.nextPrompt();
+  const malformed = JSON.parse(finalReport(AUDIT_SEGMENT_LUNA_ROLES));
+  malformed.executedChecks = [
+    {
+      command: "npm run check",
+      status: "passed",
+      exitCode: 0,
+      evidence: "x",
+      unsafeExtraField: true,
+    },
+  ];
+  assert.throws(
+    () => segment.settleSubmitted(malformed),
+    /executedChecks must be a bounded array of valid evidence/,
+  );
 });
 
 test("host workspace observation detects fresh bounded Git status and diff changes", () => {
