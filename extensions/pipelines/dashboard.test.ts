@@ -352,11 +352,23 @@ test("feature final audit separates repeated audit roles and selects a running t
       /:final-audit:/,
     );
   }
-  assert.match(
-    rows.find((row) => row.kind === "agent" && row.agentId === synthesis.id)
-      ?.key ?? "",
-    /:final-audit:/,
+  const synthesisRow = rows.find(
+    (row) => row.kind === "agent" && row.agentId === synthesis.id,
   );
+  assert.ok(synthesisRow);
+  assert.match(synthesisRow.key, /:final-audit:/);
+  assert.equal(glyphStatusForPipelineRow(synthesisRow), "running");
+
+  const finalAuditAgentRoles = rows
+    .filter(
+      (row): row is Extract<PipelineRow, { kind: "agent" }> =>
+        row.kind === "agent" && row.key.includes(":final-audit:"),
+    )
+    .map((row) => row.role);
+  assert.deepEqual(finalAuditAgentRoles, [
+    ...AUDIT_SEGMENT_LUNA_ROLES,
+    "audit-synthesis",
+  ]);
 });
 
 test("feature final audit selects running synthesis after final tracks settle", () => {

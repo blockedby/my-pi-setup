@@ -1267,6 +1267,14 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Verification:** `npm run test:installer` passed 39/39. Fresh `npm run test:deterministic` passed 39 installer tests, 270 deterministic extension tests, and 22 file-search tests.
 - **Pending:** None for the fixture correction; rollout of the separate pipeline behavior remains pending as recorded above.
 
+## Operation entry: correct audit synthesis dashboard ordering and activity glyph
+
+- **Request:** Show `audit-synthesis` after the final audit contributors and avoid presenting its idle wait state as successful while the final-audit stage is still running.
+- **Action:** Ordered final-audit dashboard children with the synthesis session last while preserving contributor order. An idle synthesis row now uses the running/warning glyph only while its owning final-audit stage is active; its textual session status remains `idle`, and completed-stage rendering is unchanged. Added regression coverage for both the row order and active idle-synthesis glyph.
+- **Affected paths or values:** `extensions/pipelines/dashboard.ts`, `extensions/pipelines/dashboard.test.ts`, and this record. Pipeline graph/lifecycle behavior, model sessions, installed Pipi state, credentials, model overrides, submodules, and external state are unchanged.
+- **Verification:** Focused dashboard tests passed 14/14; the full deterministic extension suite passed 270/270; repository TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
+- **Pending:** Reload or reinstall Pipi after delivery so newly opened sessions use the corrected dashboard rendering.
+
 ## Operation entry: roll out final-audit and discovery policy changes
 
 - **Request:** Commit and push the completed pipeline changes directly to `main`, then update the installed Pipi runtime.

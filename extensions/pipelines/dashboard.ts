@@ -58,6 +58,8 @@ export type PipelineRow =
       readonly label: string;
       readonly runId: string;
       readonly agentId: string;
+      readonly role: string;
+      readonly stageRunning: boolean;
       readonly status: AgentNodeSnapshot["status"];
     };
 
@@ -113,6 +115,22 @@ function latestAgentId(agents: ReadonlyArray<AgentNodeSnapshot>) {
   return (
     agents.filter((agent) => agent.status === "running").at(-1) ?? agents.at(-1)
   )?.id;
+}
+
+function childrenForStage(
+  run: PipelineRunSnapshot,
+  stage: PipelineStage,
+  children: ReadonlyArray<AgentNodeSnapshot>,
+) {
+  const matching = children.filter(
+    (agent) => childStage(run, agent, children) === stage,
+  );
+  if (stage !== "final-audit") return matching;
+  return matching.sort(
+    (left, right) =>
+      Number(left.role === AUDIT_SYNTHESIS_ROLE) -
+      Number(right.role === AUDIT_SYNTHESIS_ROLE),
+  );
 }
 
 function stageAgentId(
@@ -190,6 +208,8 @@ export function buildPipelineRows(
           label: `${root.title} · ${root.status}`,
           runId: run.id,
           agentId: root.id,
+          role: root.role,
+          stageRunning: false,
           status: root.status,
         });
       }
@@ -216,9 +236,7 @@ export function buildPipelineRows(
           status: stageStatus,
           agentId: stageAgentId(run, stage, root, children),
         });
-        for (const child of children.filter(
-          (agent) => childStage(run, agent, children) === stage,
-        )) {
+        for (const child of childrenForStage(run, stage, children)) {
           rows.push({
             key: `agent:${run.id}:${stage}:${child.id}`,
             kind: "agent",
@@ -226,6 +244,8 @@ export function buildPipelineRows(
             label: `${child.role} · attempt ${child.attempt} · ${child.model} · ${child.status}`,
             runId: run.id,
             agentId: child.id,
+            role: child.role,
+            stageRunning: stageStatus === "running",
             status: child.status,
           });
         }
@@ -298,7 +318,16 @@ export function glyphStatusForPipelineRow(row: PipelineRow) {
     if (row.status === "running" || row.status === "cancelled")
       return row.status;
   }
-  if (row.kind === "agent" && row.depth === 3) return row.status;
+  if (row.kind === "agent" && row.depth === 3) {
+    if (
+      row.role === AUDIT_SYNTHESIS_ROLE &&
+      row.status === "idle" &&
+      row.stageRunning
+    ) {
+      return "running";
+    }
+    return row.status;
+  }
   return undefined;
 }
 
