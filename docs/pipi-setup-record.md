@@ -1571,3 +1571,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Managed runtime and settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, browser/MCP assets, Herdr integration, and this record. Pipi remains at 0.84.3; credentials, model overrides, submodule pins, regular Pi state, and external services are unchanged.
 - **Verification:** `bun run install:pipi -- --skip-repository-dependencies` installed 233 isolated packages with Bun 1.4.0. `bun run check:pipi-install` verified Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install policy, model overrides, and Herdr integration; `/home/kcnc/.local/bin/pipi --version` returned `0.84.3`.
 - **Pending:** Reload or restart sessions created before this reinstall so they load the corrected pipeline extension.
+
+## Operation entry: keep feature-pipeline worktrees inside the project
+
+- **Request:** Make controller-owned feature-pipeline candidate and synthesis worktrees project-local instead of creating them under the system temporary directory, then open a PR to `main`.
+- **Action:** Changed the feature worktree lifecycle to create each run root under the caller repository's ignored `.worktrees/` directory and added deterministic path coverage.
+- **Affected paths or values:** `extensions/pipelines/feature-worktrees.ts`, `extensions/pipelines/feature-worktrees.test.ts`, and this record. Installed runtime state and active pipeline runs are unchanged.
+- **Verification:** Focused feature-worktree tests passed 7/7; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
+- **Pending:** Publish the verified branch and open the requested PR to `main`; runtime rollout is not requested.

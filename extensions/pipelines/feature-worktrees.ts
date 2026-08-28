@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type {
   FeatureCandidateHandoff,
@@ -505,9 +504,14 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
   constructor(caller: FeatureCallerWorktree, runId: string) {
     this.caller = caller;
     this.runId = runId;
+    const worktreeRoot = path.join(
+      path.dirname(caller.commonGitDir),
+      ".worktrees",
+    );
+    fs.mkdirSync(worktreeRoot, { recursive: true });
     this.temporaryRoot = fs.mkdtempSync(
       path.join(
-        os.tmpdir(),
+        worktreeRoot,
         `pipi-feature-${branchSlug(runId).split("/").at(-1)}-`,
       ),
     );

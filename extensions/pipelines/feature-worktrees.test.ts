@@ -149,6 +149,10 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
       caller,
       "run-integration",
     );
+    assert.equal(
+      path.dirname(lifecycle.temporaryRoot),
+      path.join(repo.primary, ".worktrees"),
+    );
     const worktrees = lifecycle.createCandidateWorktrees();
     assert.equal(worktrees.length, 3);
     assert.equal(new Set(worktrees.map(({ path: item }) => item)).size, 3);
