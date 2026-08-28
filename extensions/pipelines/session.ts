@@ -23,7 +23,9 @@ import {
   githubDiscoveryToolPolicy,
   pipelineRootToolPolicy,
   planPipelineChildToolPolicy,
+  planPipelineExternalEvidenceToolPolicy,
   planPipelineRootToolPolicy,
+  planPipelineSynthesisToolPolicy,
   readOnlyPipelineChildToolPolicy,
   readOnlyPipelineRootToolPolicy,
   resolveStandaloneChildProjectTrust,
@@ -39,7 +41,10 @@ import {
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
   LUNA_MODEL,
+  PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
+  PLAN_PIPELINE_SYNTHESIS_ROLE,
+  type PlanPipelineDiscoveryRole,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
   type FeaturePipelineDiscoveryRole,
@@ -47,6 +52,7 @@ import {
   type PipelineLunaAuditRole,
 } from "./domain.ts";
 import { featureDiscoveryReportSchema } from "./discovery-report.ts";
+import { planDiscoveryReportSchema } from "./plan-discovery-report.ts";
 import {
   FEATURE_CANDIDATE_ROLES,
   FEATURE_DISCOVERY_SYNTHESIS_ROLE,
@@ -178,6 +184,16 @@ export function pipelineThinkingLevel(
   return requested ?? (model === LUNA_MODEL ? "medium" : "high");
 }
 
+function planDiscoveryRole(role: string) {
+  return PLAN_PIPELINE_DISCOVERY_ROLES.find((candidate) => candidate === role);
+}
+
+function withoutWebTools(excludeTools: ReadonlyArray<string>) {
+  return {
+    excludeTools: [...excludeTools, "web_search_codex", "web_fetch_codex"],
+  };
+}
+
 function auditSubmissionRole(role: string) {
   if (role === AUDIT_SYNTHESIS_ROLE) return role;
   return AUDIT_SEGMENT_LUNA_ROLES.find((candidate) => candidate === role);
@@ -218,6 +234,38 @@ export function createPipelineDiscoverySubmitTool(
       "Submit this role's complete feature discovery V2 report to the host and stop this turn.",
     parameters: featureDiscoveryReportSchema(role),
     acceptedText: "Discovery report recorded. Stop this turn.",
+    submit,
+  });
+}
+
+export function createPipelinePlanSubmitTool(submit: (value: unknown) => void) {
+  return createTerminatingSubmissionTool({
+    name: "pipeline_plan_submit",
+    label: "Submit Plan",
+    description:
+      "Submit the complete free-form Markdown implementation plan to the controller and stop this turn.",
+    parameters: Type.Object(
+      {
+        plan: Type.String({ minLength: 1, maxLength: 1024 * 1024 }),
+      },
+      { additionalProperties: false },
+    ),
+    acceptedText: "Plan recorded. Stop this turn.",
+    submit,
+  });
+}
+
+export function createPipelinePlanDiscoverySubmitTool(
+  role: PlanPipelineDiscoveryRole,
+  submit: (value: unknown) => void,
+) {
+  return createTerminatingSubmissionTool({
+    name: "pipeline_plan_discovery_submit",
+    label: "Submit Plan Discovery Report",
+    description:
+      "Submit this role's complete strict planning evidence report to the controller and stop this turn.",
+    parameters: planDiscoveryReportSchema(role),
+    acceptedText: "Plan discovery report recorded. Stop this turn.",
     submit,
   });
 }
@@ -273,7 +321,11 @@ export function pipelineSessionToolPolicy(
   if (isRoot) {
     if (definition === AUDIT_PIPELINE_ID)
       return readOnlyPipelineChildToolPolicy();
-    if (definition === PLAN_PIPELINE_ID) return planPipelineRootToolPolicy();
+    if (definition === PLAN_PIPELINE_ID) {
+      return role === PLAN_PIPELINE_SYNTHESIS_ROLE
+        ? planPipelineSynthesisToolPolicy()
+        : planPipelineRootToolPolicy();
+    }
     if (definition === SMALL_FEATURE_PIPELINE_ID) {
       return readOnlyPipelineRootToolPolicy();
     }
@@ -289,8 +341,17 @@ export function pipelineSessionToolPolicy(
   if (definition === FEATURE_PIPELINE_ID && role === "discover-problem") {
     return githubDiscoveryToolPolicy();
   }
-  if (definition === PLAN_PIPELINE_ID && role === "discover-goal-outcomes") {
-    return githubDiscoveryToolPolicy();
+  if (
+    definition === PLAN_PIPELINE_ID &&
+    role === "discover-requirements-boundaries"
+  ) {
+    return withoutWebTools(githubDiscoveryToolPolicy().excludeTools);
+  }
+  if (
+    definition === PLAN_PIPELINE_ID &&
+    role === "discover-external-evidence"
+  ) {
+    return planPipelineExternalEvidenceToolPolicy();
   }
   if (
     definition === FEATURE_PIPELINE_ID &&
@@ -300,7 +361,9 @@ export function pipelineSessionToolPolicy(
   ) {
     return readOnlyPipelineChildToolPolicy();
   }
-  if (definition === PLAN_PIPELINE_ID) return planPipelineChildToolPolicy();
+  if (definition === PLAN_PIPELINE_ID) {
+    return withoutWebTools(planPipelineChildToolPolicy().excludeTools);
+  }
   if (definition === SMALL_FEATURE_PIPELINE_ID) {
     return role === SMALL_FEATURE_IMPLEMENTER_ROLE
       ? smallFeatureImplementerToolPolicy()
@@ -427,13 +490,22 @@ export function createPipelineSessionFactory(
       const discoveryRole = FEATURE_PIPELINE_DISCOVERY_ROLES.find(
         (candidate) => candidate === spec.role,
       );
+      const planRole = planDiscoveryRole(spec.role);
       const isDiscoverySynthesis =
         spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE;
+      const isPlanSynthesis =
+        definition === PLAN_PIPELINE_ID &&
+        isRoot &&
+        spec.role === PLAN_PIPELINE_SYNTHESIS_ROLE;
       const discoveryToolAllowed =
-        definition === FEATURE_PIPELINE_ID &&
-        (discoveryRole || isDiscoverySynthesis) &&
-        options.discoverySubmit &&
-        options.discoveryToolAllowed?.(spec.scopeId ?? "", spec.role);
+        (definition === FEATURE_PIPELINE_ID &&
+          (discoveryRole || isDiscoverySynthesis)) ||
+        (definition === PLAN_PIPELINE_ID && (planRole || isPlanSynthesis))
+          ? Boolean(
+              options.discoverySubmit &&
+              options.discoveryToolAllowed?.(spec.scopeId ?? "", spec.role),
+            )
+          : false;
       const discoverySessionToken = discoveryToolAllowed
         ? randomUUID()
         : undefined;
@@ -459,9 +531,16 @@ export function createPipelineSessionFactory(
               discoveryRole,
               submitDiscoveryValue,
             )
-          : submitDiscoveryValue && isDiscoverySynthesis
-            ? createPipelineDiscoverySynthesisSubmitTool(submitDiscoveryValue)
-            : undefined;
+          : submitDiscoveryValue && planRole
+            ? createPipelinePlanDiscoverySubmitTool(
+                planRole,
+                submitDiscoveryValue,
+              )
+            : submitDiscoveryValue && isDiscoverySynthesis
+              ? createPipelineDiscoverySynthesisSubmitTool(submitDiscoveryValue)
+              : submitDiscoveryValue && isPlanSynthesis
+                ? createPipelinePlanSubmitTool(submitDiscoveryValue)
+                : undefined;
       const auditToolAllowed =
         submissionRole &&
         options.auditSubmit &&
@@ -527,6 +606,23 @@ export function createPipelineSessionFactory(
         ...(discoveryTool ? [discoveryTool] : []),
         ...(auditTool ? [auditTool] : []),
       ];
+      const planReadTools =
+        definition === PLAN_PIPELINE_ID && !isRoot
+          ? spec.role === "discover-requirements-boundaries"
+            ? ["read", "fd", "rg", "bash", "pipeline_plan_discovery_submit"]
+            : spec.role === "discover-external-evidence"
+              ? [
+                  "read",
+                  "fd",
+                  "rg",
+                  "web_search_codex",
+                  "web_fetch_codex",
+                  "pipeline_plan_discovery_submit",
+                ]
+              : ["read", "fd", "rg", "pipeline_plan_discovery_submit"]
+          : definition === PLAN_PIPELINE_ID && isPlanSynthesis
+            ? ["read", "fd", "rg", "pipeline_plan_submit"]
+            : undefined;
       const { session } = await createAgentSession({
         cwd: spec.cwd,
         model,
@@ -538,7 +634,9 @@ export function createPipelineSessionFactory(
         ...(sessionTools.length > 0 ? { customTools: sessionTools } : {}),
         ...(featureBoundary
           ? { tools: [...featureBoundary.availableToolNames] }
-          : {}),
+          : planReadTools
+            ? { tools: planReadTools }
+            : {}),
         ...pipelineSessionToolPolicy(definition, isRoot, spec.role),
       });
       try {

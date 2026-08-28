@@ -5,12 +5,15 @@ import {
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
   STATIC_LUNA_AUDIT_ROLES,
+  PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
   SMALL_FEATURE_PIPELINE_ID,
   type PipelineDefinitionId,
 } from "./domain.ts";
 import { validateFeatureDiscoveryReport } from "./discovery-report.ts";
+import { validatePlanDiscoveryReport } from "./plan-discovery-report.ts";
 
+/** Legacy artifact validation remains for standalone compatibility; plan-pipeline does not call it. */
 export const PLAN_REQUIRED_SECTIONS = [
   "Goal and non-goals",
   "Evidence and assumptions",
@@ -242,6 +245,95 @@ function assertExistingParentInside(realWorkingDir: string, directory: string) {
   if (!pathIsInside(realWorkingDir, realExisting)) {
     throw new Error("plan_path parent resolves outside working_dir.");
   }
+  if (!fs.statSync(realExisting).isDirectory()) {
+    throw new Error("plan_path parent is not a directory.");
+  }
+}
+
+export function resolvePlanOutputPath(workingDir: string, planPath: string) {
+  if (!planPath.trim() || planPath.includes("\0")) {
+    throw new Error("plan_path must identify a non-empty workspace path.");
+  }
+  if (planPath.split(/[\\/]/).some((part) => part === "..")) {
+    throw new Error("plan_path traversal is not allowed.");
+  }
+  const realWorkingDir = fs.realpathSync(workingDir);
+  const absolutePath = path.isAbsolute(planPath)
+    ? path.resolve(planPath)
+    : path.resolve(realWorkingDir, planPath);
+  if (
+    absolutePath === realWorkingDir ||
+    !pathIsInside(realWorkingDir, absolutePath)
+  ) {
+    throw new Error("plan_path must remain inside working_dir.");
+  }
+  const directory = path.dirname(absolutePath);
+  assertExistingParentInside(realWorkingDir, directory);
+  let existingStat: fs.Stats | undefined;
+  try {
+    existingStat = fs.lstatSync(absolutePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (existingStat?.isSymbolicLink()) {
+    throw new Error("plan_path must not be a symbolic link.");
+  }
+  if (existingStat && !existingStat.isFile()) {
+    throw new Error("plan_path must identify a regular file or new file.");
+  }
+  return {
+    absolutePath,
+    relativePath: path
+      .relative(realWorkingDir, absolutePath)
+      .split(path.sep)
+      .join("/"),
+  };
+}
+
+export function writePlanOutput(
+  workingDir: string,
+  planPath: string,
+  content: string,
+) {
+  const destination = resolvePlanOutputPath(workingDir, planPath);
+  const directory = path.dirname(destination.absolutePath);
+  fs.mkdirSync(directory, { recursive: true });
+  const realWorkingDir = fs.realpathSync(workingDir);
+  const realDirectory = fs.realpathSync(directory);
+  if (!pathIsInside(realWorkingDir, realDirectory)) {
+    throw new Error("plan_path parent resolves outside working_dir.");
+  }
+  let destinationStat: fs.Stats | undefined;
+  try {
+    destinationStat = fs.lstatSync(destination.absolutePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (destinationStat?.isSymbolicLink()) {
+    throw new Error("plan_path must not be a symbolic link.");
+  }
+  if (destinationStat && !destinationStat.isFile()) {
+    throw new Error("plan_path must identify a regular file or new file.");
+  }
+
+  const temporaryDirectory = fs.mkdtempSync(
+    path.join(directory, ".pipi-plan-output-"),
+  );
+  const temporaryPath = path.join(temporaryDirectory, "plan");
+  try {
+    fs.writeFileSync(temporaryPath, content, { encoding: "utf8", flag: "wx" });
+    try {
+      if (fs.lstatSync(destination.absolutePath).isSymbolicLink()) {
+        throw new Error("plan_path must not be a symbolic link.");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    fs.renameSync(temporaryPath, destination.absolutePath);
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+  return { ...destination, content };
 }
 
 export function resolvePlanArtifact(workingDir: string, planPath: string) {
@@ -541,6 +633,15 @@ export function validatePipelineReport(
 ) {
   const report = parseJsonReport(text);
   if (!isRecord(report)) return ["Report must be exactly one JSON object."];
+
+  if (definition === PLAN_PIPELINE_ID) {
+    const planDiscoveryRole = PLAN_PIPELINE_DISCOVERY_ROLES.find(
+      (discoveryRole) => discoveryRole === role,
+    );
+    return planDiscoveryRole
+      ? validatePlanDiscoveryReport(planDiscoveryRole, report)
+      : [`Unsupported plan-pipeline report role "${role}".`];
+  }
 
   if (definition === SMALL_FEATURE_PIPELINE_ID) {
     if (role === "implement-small-feature") {

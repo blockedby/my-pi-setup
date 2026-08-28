@@ -199,6 +199,7 @@ function stageAgentId(
     );
   }
   if (
+    (run.definition === "plan-pipeline" && stage === "synthesize") ||
     stage === "build" ||
     stage === "audit-resolve" ||
     stage === "final-resolve" ||
@@ -266,7 +267,7 @@ export function buildPipelineRows(
       const children = run.agents.filter(
         (agent) => agent.parentId === run.rootId,
       );
-      if (root) {
+      if (root && run.definition !== "plan-pipeline") {
         rows.push({
           key: `agent:${run.id}:root:${root.id}`,
           kind: "agent",
@@ -292,7 +293,11 @@ export function buildPipelineRows(
           status,
           agentId: stageAgentId(run, stage, root, children),
         });
-        for (const child of childrenForStage(run, stage, children)) {
+        const stageAgents =
+          run.definition === "plan-pipeline" && stage === "synthesize" && root
+            ? [root]
+            : childrenForStage(run, stage, children);
+        for (const child of stageAgents) {
           rows.push({
             key: `agent:${run.id}:${stage}:${child.id}`,
             kind: "agent",

@@ -136,11 +136,35 @@ export function executorAuditToolPolicy() {
   };
 }
 
-export function planPipelineRootToolPolicy() {
-  return readOnlyPipelineRootToolPolicy();
+/** Plan synthesis is controller-owned: it can inspect, but cannot orchestrate. */
+export function planPipelineSynthesisToolPolicy() {
+  return {
+    excludeTools: [
+      ...CHILD_EXCLUDED_TOOL_NAMES,
+      ...PIPELINE_ORCHESTRATION_TOOL_NAMES,
+      ...PLAN_PIPELINE_MUTATING_TOOL_NAMES,
+      "web_search_codex",
+      "web_fetch_codex",
+    ],
+  };
 }
 
+export function planPipelineRootToolPolicy() {
+  return planPipelineSynthesisToolPolicy();
+}
+
+/** Plan discovery is local-read-only by default; external evidence opts in below. */
 export function planPipelineChildToolPolicy() {
+  return {
+    excludeTools: [
+      ...readOnlyPipelineChildToolPolicy().excludeTools,
+      "web_search_codex",
+      "web_fetch_codex",
+    ],
+  };
+}
+
+export function planPipelineExternalEvidenceToolPolicy() {
   return readOnlyPipelineChildToolPolicy();
 }
 

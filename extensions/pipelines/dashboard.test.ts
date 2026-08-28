@@ -240,6 +240,55 @@ test("agent rows show configured thinking and omit the first attempt marker", ()
   );
 });
 
+test("plan pipeline renders six discovery agents and xhigh synthesis under its three stages", () => {
+  const root = agent("root-1", {
+    role: "plan-synthesis",
+    model: "openai-codex/gpt-5.6-luna",
+    thinkingLevel: "xhigh",
+    parentId: undefined,
+  });
+  const discoveryRoles = [
+    "discover-requirements-boundaries",
+    "discover-architecture-responsibilities",
+    "discover-contracts-invariants",
+    "discover-reuse-simplicity",
+    "discover-quality-operations",
+    "discover-external-evidence",
+  ];
+  const discovery = discoveryRoles.map((role, index) =>
+    agent(`child-${index + 1}`, {
+      parentId: root.id,
+      role,
+      model: "openai-codex/gpt-5.6-luna",
+      thinkingLevel: "medium",
+      createdAt: index + 2,
+    }),
+  );
+  const run = {
+    ...pipelineRun("run-1", [root, ...discovery], "plan-pipeline"),
+    stage: "synthesize" as const,
+  };
+  const rows = buildPipelineRows([run], new Set([run.id]));
+  assert.deepEqual(
+    rows.filter((row) => row.kind === "stage").map((row) => row.stage),
+    ["discover", "synthesize", "complete"],
+  );
+  assert.equal(
+    rows.filter((row) => row.kind === "agent" && row.depth === 3).length,
+    7,
+  );
+  assert.equal(
+    rows.find((row) => row.kind === "agent" && row.agentId === root.id)?.label,
+    "plan-synthesis · openai-codex/gpt-5.6-luna · xhigh · running",
+  );
+  assert.equal(
+    rows.filter(
+      (row) => row.kind === "agent" && row.stageRunning && row.depth === 3,
+    ).length,
+    1,
+  );
+});
+
 test("feature Best-of-3 candidates and implementation synthesis render in separate dashboard stages", () => {
   const root = agent("root-1", {
     role: "discover-synthesis",

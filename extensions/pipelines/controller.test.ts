@@ -28,9 +28,8 @@ import {
   FINAL_AUDIT_ROLE,
   LUNA_MODEL,
   PIPELINE_CHILD_ROLES,
-  PLAN_PIPELINE_AUDIT_ROLES,
-  PLAN_PIPELINE_CHILD_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
+  PLAN_PIPELINE_SYNTHESIS_ROLE,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SOL_MODEL,
@@ -40,6 +39,7 @@ import {
   type PipelineHandoff,
 } from "./domain.ts";
 import { FEATURE_DISCOVERY_COVERAGE } from "./discovery-report.ts";
+import { planDiscoveryCoverage } from "./plan-discovery-report.ts";
 import {
   FEATURE_CANDIDATE_ROLES,
   FEATURE_DISCOVERY_SYNTHESIS_ROLE,
@@ -355,6 +355,7 @@ function featureGitHarness(
 function harness(
   options: {
     rootGate?: Promise<void>;
+    autoCompletePlan?: boolean;
     sessionGate?: (spec: AgentNodeSpec) => Promise<void> | undefined;
     autoCompleteFeatureDiscovery?: boolean;
     autoCompleteDiscoverySynthesis?: boolean;
@@ -407,35 +408,43 @@ function harness(
             rootToolsByRun.set(spec.scopeId ?? "", configuredRootTools);
           }
           const candidateRole = candidateRoleFromSpec(spec.role);
+          const planRole = PLAN_PIPELINE_DISCOVERY_ROLES.find(
+            (role) => role === spec.role,
+          );
           const autoReport =
-            spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE &&
-            options.autoCompleteDiscoverySynthesis !== false
-              ? JSON.stringify(discoverySynthesisResult())
-              : candidateRole && options.autoCompleteCandidates !== false
-                ? JSON.stringify(
-                    candidateHandoff(
-                      candidateRole,
-                      spec,
-                      lifecycles.find((lifecycle) =>
-                        spec.cwd.startsWith(lifecycle.temporaryRoot),
-                      )?.caller.baseCommit ?? BASE_COMMIT,
-                    ),
-                  )
-                : spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE &&
-                    options.autoCompleteSelectionAndSynthesis !== false
-                  ? (turn: number) =>
-                      JSON.stringify(
-                        turn === 0
-                          ? selectionResult()
-                          : implementationSynthesisResult(),
+            planRole && options.autoCompletePlan
+              ? planReportForRole(planRole)
+              : spec.role === PLAN_PIPELINE_SYNTHESIS_ROLE &&
+                  options.autoCompletePlan
+                ? "# Controller test plan\n\nA free-form plan."
+                : spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE &&
+                    options.autoCompleteDiscoverySynthesis !== false
+                  ? JSON.stringify(discoverySynthesisResult())
+                  : candidateRole && options.autoCompleteCandidates !== false
+                    ? JSON.stringify(
+                        candidateHandoff(
+                          candidateRole,
+                          spec,
+                          lifecycles.find((lifecycle) =>
+                            spec.cwd.startsWith(lifecycle.temporaryRoot),
+                          )?.caller.baseCommit ?? BASE_COMMIT,
+                        ),
                       )
-                  : options.autoCompleteFeatureDiscovery !== false &&
-                      spec.parentId &&
-                      definitionForRun(spec.scopeId ?? "") ===
-                        "feature-pipeline" &&
-                      spec.role.startsWith("discover-")
-                    ? reportForRole(spec.role)
-                    : undefined;
+                    : spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE &&
+                        options.autoCompleteSelectionAndSynthesis !== false
+                      ? (turn: number) =>
+                          JSON.stringify(
+                            turn === 0
+                              ? selectionResult()
+                              : implementationSynthesisResult(),
+                          )
+                      : options.autoCompleteFeatureDiscovery !== false &&
+                          spec.parentId &&
+                          definitionForRun(spec.scopeId ?? "") ===
+                            "feature-pipeline" &&
+                          spec.role.startsWith("discover-")
+                        ? reportForRole(spec.role)
+                        : undefined;
           const discoveryAllowed =
             Boolean(discoverySubmit) &&
             Boolean(discoveryToolAllowed?.(spec.scopeId ?? "", spec.role));
@@ -541,11 +550,17 @@ test("feature invocation rejects git_commit false or omission before Git lifecyc
   await run.controller.dispose();
 });
 
-test("git_commit keeps plan/audit rejection and small-feature acceptance", async () => {
+test("plan and audit reject commit authority, while small-feature retains it", async () => {
   const run = harness();
   for (const pipeline of ["plan-pipeline", "audit-pipeline"] as const) {
     assert.throws(
-      () => run.controller.start({ ...request(), pipeline, gitCommit: true }),
+      () =>
+        run.controller.start({
+          ...request(),
+          pipeline,
+          gitCommit: true,
+          ...(pipeline === "plan-pipeline" ? { planPath: null } : {}),
+        }),
       new RegExp(
         `git_commit is only supported for feature-pipeline and small-feature-pipeline.*${pipeline}`,
       ),
@@ -666,6 +681,39 @@ function implementationSynthesisResult() {
     unresolvedIssues: [],
     finalCommit: FINAL_SYNTHESIS_COMMIT,
   };
+}
+
+function planReportForRole(
+  role: (typeof PLAN_PIPELINE_DISCOVERY_ROLES)[number],
+) {
+  return JSON.stringify({
+    reportType: "plan-discovery-v1",
+    role,
+    applicability: "applicable",
+    summary: `${role} repository evidence`,
+    coverage: planDiscoveryCoverage(role).map((criterion) => ({
+      criterion,
+      status: "covered",
+      conclusion: `${criterion} is covered by evidence`,
+      evidence: [
+        {
+          kind: "code",
+          reference: "extensions/pipelines/controller.ts",
+          detail: "The controller provides direct repository evidence.",
+        },
+      ],
+      implications: [],
+    })),
+    evidence: [
+      {
+        kind: "code",
+        reference: "extensions/pipelines/controller.ts",
+        detail: "The controller provides direct repository evidence.",
+      },
+    ],
+    unknowns: [],
+    constraints: [],
+  });
 }
 
 function reportForRole(role: string) {
@@ -958,77 +1006,6 @@ async function finishEmbeddedAudit(
       {} as ExtensionContext,
     );
   }
-}
-
-async function advancePlanToComplete(
-  run: ReturnType<typeof harness>,
-  runId: string,
-  planPath: string,
-) {
-  await Promise.all(
-    PLAN_PIPELINE_DISCOVERY_ROLES.map((role) =>
-      run.controller.spawnChild(runId, role),
-    ),
-  );
-  PLAN_PIPELINE_DISCOVERY_ROLES.forEach((role) => settleRole(run, role));
-  run.controller.setStage(runId, "build");
-  run.controller.writePlan(runId, planPath, validPlan());
-  run.controller.setStage(runId, "audit");
-  await Promise.all(
-    PLAN_PIPELINE_AUDIT_ROLES.map((role) =>
-      run.controller.spawnChild(runId, role),
-    ),
-  );
-  PLAN_PIPELINE_AUDIT_ROLES.forEach((role) => settleRole(run, role));
-  run.controller.setStage(runId, "audit-resolve");
-  await finishEmbeddedAudit(run, runId);
-  run.controller.setStage(runId, "complete");
-}
-
-function validPlan() {
-  return `# Implementation plan
-
-## Goal and non-goals
-Goal; non-goal.
-
-## Evidence and assumptions
-Evidence; assumption.
-
-## Candidate acceptance criteria
-- AC1
-
-## Frontend tasks
-Not applicable.
-
-## Backend tasks
-Not applicable.
-
-## DevOps tasks
-Not applicable.
-
-## Cross-cutting tasks
-### TASK-001: Update the package
-- **Scope:** Make the bounded change.
-- **Likely paths/components:** src/example.ts
-- **Dependencies:** None.
-- **Acceptance/verification evidence:** Focused test passes.
-
-## Test plan
-- Unit checks apply.
-- Integration checks are not applicable.
-- Contract checks are not applicable.
-- E2E checks are not applicable.
-- Operational checks are not applicable.
-
-## Implementation waves
-- Wave 1: TASK-001
-
-## Risks, rollout, and rollback
-Low risk; revert TASK-001 if needed.
-
-## Unresolved questions
-None.
-`;
 }
 
 test("start is fire-and-forget and multiple same-cwd runs are admitted", async () => {
@@ -1782,6 +1759,24 @@ test("feature discovery submission scope is fixed to active feature discovery ro
   );
   assert.equal(
     pipelineDiscoverySubmissionAllowed(
+      "plan-pipeline",
+      "discover-requirements-boundaries",
+      "discover",
+      false,
+    ),
+    true,
+  );
+  assert.equal(
+    pipelineDiscoverySubmissionAllowed(
+      "plan-pipeline",
+      PLAN_PIPELINE_SYNTHESIS_ROLE,
+      "synthesize",
+      false,
+    ),
+    true,
+  );
+  assert.equal(
+    pipelineDiscoverySubmissionAllowed(
       "feature-pipeline",
       "discover-problem",
       "build",
@@ -2037,7 +2032,7 @@ test("definition role policies centralize child context requirements", () => {
     {},
   );
   assert.deepEqual(
-    childContextPolicyFor("plan-pipeline", "audit-decomposition-dag"),
+    childContextPolicyFor("plan-pipeline", "discover-contracts-invariants"),
     {},
   );
 });
@@ -2124,8 +2119,11 @@ test("feature root retains commit-capable tools while every child stays constrai
   }
 
   const planGoalDiscoveryDenied = new Set<string>(
-    pipelineSessionToolPolicy("plan-pipeline", false, "discover-goal-outcomes")
-      .excludeTools,
+    pipelineSessionToolPolicy(
+      "plan-pipeline",
+      false,
+      "discover-requirements-boundaries",
+    ).excludeTools,
   );
   assert.equal(planGoalDiscoveryDenied.has("bash"), false);
   for (const role of PLAN_PIPELINE_DISCOVERY_ROLES) {
@@ -2134,9 +2132,32 @@ test("feature root retains commit-capable tools while every child stays constrai
     );
     assert.equal(denied.has("edit"), true, role);
     assert.equal(denied.has("write"), true, role);
-    if (role !== "discover-goal-outcomes") {
+    assert.equal(
+      denied.has("web_search_codex"),
+      role !== "discover-external-evidence",
+      role,
+    );
+    if (role !== "discover-requirements-boundaries") {
       assert.equal(denied.has("bash"), true, role);
     }
+  }
+  const synthesisDenied = new Set<string>(
+    pipelineSessionToolPolicy(
+      "plan-pipeline",
+      true,
+      PLAN_PIPELINE_SYNTHESIS_ROLE,
+    ).excludeTools,
+  );
+  for (const denied of [
+    "bash",
+    "edit",
+    "write",
+    "web_search_codex",
+    "pipeline_complete",
+    "pipeline_child_spawn",
+    "pipeline_run",
+  ]) {
+    assert.equal(synthesisDenied.has(denied), true, denied);
   }
 });
 
@@ -2237,90 +2258,6 @@ test("roles select fixed models, remain direct root children, and record attempt
   );
 
   await run.controller.dispose();
-});
-
-test("plan-pipeline preserves earlier roles and uses a controller-owned Luna final audit", async () => {
-  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-roles-"));
-  const run = harness();
-  const runId = run.controller.start({
-    ...request(workingDir),
-    pipeline: "plan-pipeline",
-    gitCommit: false,
-  });
-  await settleInitialization();
-  const snapshot = run.controller.get(runId);
-  assert.equal(snapshot?.definition, "plan-pipeline");
-  assert.equal(snapshot?.agents[0]?.model, SOL_MODEL);
-  assert.equal(snapshot?.agents[0]?.title, "Plan pipeline Sol");
-  assert.deepEqual(run.rootToolNames.slice(0, 4), [
-    "pipeline_stage",
-    "pipeline_plan_write",
-    "pipeline_plan_validate",
-    "pipeline_git_status",
-  ]);
-
-  const discovery = await Promise.all(
-    PLAN_PIPELINE_DISCOVERY_ROLES.map((role) =>
-      run.controller.spawnChild(runId, role),
-    ),
-  );
-  PLAN_PIPELINE_DISCOVERY_ROLES.forEach((role) => settleRole(run, role));
-  run.controller.setStage(runId, "build");
-  run.controller.writePlan(runId, "docs/plans/roles.md", validPlan());
-  run.controller.setStage(runId, "audit");
-  const audits = await Promise.all(
-    PLAN_PIPELINE_AUDIT_ROLES.map((role) =>
-      run.controller.spawnChild(runId, role),
-    ),
-  );
-  PLAN_PIPELINE_AUDIT_ROLES.forEach((role) => settleRole(run, role));
-  run.controller.setStage(runId, "audit-resolve");
-  run.controller.setStage(runId, "final-audit");
-  const finalAgents = await run.controller.startFinalAudit(runId, {
-    acceptanceContract: "validated plan artifact",
-    assumptions: [],
-    checks: ["plan contract passed"],
-  });
-  await assert.rejects(
-    run.controller.startFinalAudit(runId, {
-      acceptanceContract: "duplicate",
-      assumptions: [],
-      checks: [],
-    }),
-    /already started its final audit segment/,
-  );
-  const children = [...discovery, ...audits, ...finalAgents];
-  assert.deepEqual(
-    children.map((child) => child.role),
-    [...PLAN_PIPELINE_CHILD_ROLES],
-  );
-  assert.equal(
-    children.every((child) => child.parentId === snapshot?.rootId),
-    true,
-  );
-  assert.equal(
-    children.every((child) => child.model === LUNA_MODEL),
-    true,
-  );
-  assert.equal(
-    children.some((child) => child.model === TERRA_MODEL),
-    false,
-  );
-  await assert.rejects(
-    run.controller.spawnChild(runId, "discover-problem"),
-    /Unsupported plan-pipeline child role/,
-  );
-  await assert.rejects(
-    run.controller.spawnChild(runId, "final-audit"),
-    /Unsupported plan-pipeline child role/,
-  );
-  assert.throws(
-    () => run.controller.setStage(runId, "final-resolve"),
-    /validated Luna audit synthesis/,
-  );
-
-  await run.controller.dispose();
-  fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
 test("small-feature-pipeline fans four Luna audits into one same-session remediation", async () => {
@@ -2673,49 +2610,6 @@ test("small-feature-pipeline fails closed on a malformed Luna audit report", asy
   await run.controller.dispose();
 });
 
-test("children run in parallel and wait returns reports in caller order", async () => {
-  const run = harness();
-  const runId = run.controller.start({
-    ...request(),
-    pipeline: "plan-pipeline",
-    gitCommit: false,
-  });
-  await settleInitialization();
-  const roles = PLAN_PIPELINE_DISCOVERY_ROLES;
-  const children = await Promise.all(
-    roles.map((role) => run.controller.spawnChild(runId, role)),
-  );
-  assert.equal(
-    children.every((child) => child.status === "running"),
-    true,
-  );
-
-  const wait = run.controller.waitForChildren(
-    runId,
-    children.map((child) => child.id),
-  );
-  for (const child of children) {
-    const session = run.sessions.find(
-      (candidate) => candidate.spec.role === child.role,
-    );
-    session?.emit({
-      type: "settled",
-      outcome: {
-        type: "completed",
-        finalText: reportForRole(child.role),
-      },
-    });
-  }
-  const reports = await wait;
-  assert.deepEqual(
-    reports.map((child) => child.role),
-    [...roles],
-  );
-  assert.equal(run.controller.get(runId)?.stage, "build");
-
-  await run.controller.dispose();
-});
-
 test("successful audit fan-in atomically enters audit-resolve", async () => {
   const run = harness();
   const runId = run.controller.start(request());
@@ -2919,41 +2813,6 @@ test("embedded roots cannot cancel a busy controller-owned audit synthesizer", a
   await run.controller.dispose();
 });
 
-test("fan-in does not advance when a required plan report is invalid", async () => {
-  const run = harness();
-  const runId = run.controller.start({
-    ...request(),
-    pipeline: "plan-pipeline",
-    gitCommit: false,
-  });
-  await settleInitialization();
-  const children = await Promise.all(
-    PLAN_PIPELINE_DISCOVERY_ROLES.map((role) =>
-      run.controller.spawnChild(runId, role),
-    ),
-  );
-  PLAN_PIPELINE_DISCOVERY_ROLES.slice(0, -1).forEach((role) =>
-    settleRole(run, role),
-  );
-  const invalidRole = PLAN_PIPELINE_DISCOVERY_ROLES.at(-1);
-  const invalidSession = run.sessions.find(
-    (session) => session.spec.role === invalidRole,
-  );
-  assert.ok(invalidSession);
-  invalidSession.emit({
-    type: "settled",
-    outcome: { type: "completed", finalText: "not valid report JSON" },
-  });
-
-  await run.controller.waitForChildren(
-    runId,
-    children.map((child) => child.id),
-  );
-
-  assert.equal(run.controller.get(runId)?.stage, "discover");
-  await run.controller.dispose();
-});
-
 test("a settled child can be retried in its existing session", async () => {
   const run = harness();
   const runId = run.controller.start(request());
@@ -2987,42 +2846,6 @@ test("a settled child can be retried in its existing session", async () => {
     1,
   );
   assert.equal(run.controller.getAgent(runId, child.id).status, "running");
-  await run.controller.dispose();
-});
-
-test("plan-pipeline enforces stage order and one Luna retry", async () => {
-  const run = harness();
-  const runId = run.controller.start({
-    ...request(),
-    pipeline: "plan-pipeline",
-    gitCommit: false,
-  });
-  await settleInitialization();
-  await assert.rejects(
-    run.controller.spawnChild(runId, "audit-decomposition-dag"),
-    /can only start during plan-pipeline stage audit/,
-  );
-  const child = await run.controller.spawnChild(
-    runId,
-    "discover-goal-outcomes",
-  );
-  const session = run.sessions.find(
-    (candidate) => candidate.spec.role === child.role,
-  );
-  assert.ok(session);
-  session.emit({
-    type: "settled",
-    outcome: { type: "failed", error: "transient failure" },
-  });
-  await run.controller.sendChild(runId, child.id, "Retry once.");
-  await assert.rejects(
-    run.controller.sendChild(runId, child.id, "Retry twice."),
-    /already used its retry/,
-  );
-  assert.throws(
-    () => run.controller.setStage(runId, "audit"),
-    /Invalid plan-pipeline stage transition/,
-  );
   await run.controller.dispose();
 });
 
@@ -3242,71 +3065,191 @@ test("feature completion appends committed and dirty Git facts without readiness
   fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
-test("plan completion requires and validates a repository-local plan artifact", async () => {
-  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-pipeline-"));
-  const run = harness();
+test("plan-pipeline uses six Luna discoveries and one xhigh synthesis for terminal-only output", async () => {
+  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-new-"));
+  const run = harness({ autoCompletePlan: true });
   const runId = run.controller.start({
-    task: "Plan the approved goal",
-    workingDir,
+    ...request(workingDir),
     pipeline: "plan-pipeline",
     gitCommit: false,
+    planPath: null,
   });
   await settleInitialization();
-  await advancePlanToComplete(run, runId, "docs/plans/example.md");
-  const facts = {
-    outcome: "Implementation plan written and audited",
-    changedPaths: [],
-    checks: ["plan contract passed"],
-    assumptions: ["No UI layer exists"],
-    git: ["working tree contains the plan artifact"],
-    reports: ["five discovery and five audit reports summarized"],
-    unresolvedItems: ["Owner assignment remains open"],
-    workingDir,
-  };
-
-  assert.throws(
-    () => run.controller.complete(runId, facts),
-    /requires plan_path/,
-  );
-  const artifactPath = path.join(workingDir, "docs", "plans", "example.md");
-  const replacementPath = path.join(
-    workingDir,
-    "docs",
-    "plans",
-    "replacement.md",
-  );
-  fs.writeFileSync(
-    replacementPath,
-    validPlan().replace("# Implementation plan", "# Replacement plan"),
-  );
-  fs.renameSync(replacementPath, artifactPath);
-  assert.throws(
-    () =>
-      run.controller.complete(runId, {
-        ...facts,
-        planPath: "docs/plans/example.md",
-      }),
-    /changed after this plan-pipeline run wrote it/,
-  );
-  run.controller.writePlan(runId, "docs/plans/example.md", validPlan());
-  run.controller.complete(runId, {
-    ...facts,
-    planPath: "docs/plans/example.md",
-  });
-  assert.equal(run.handoffs[0]?.definition, "plan-pipeline");
-  assert.equal(run.handoffs[0]?.facts.planPath, "docs/plans/example.md");
-  assert.deepEqual(run.handoffs[0]?.facts.changedPaths, [
-    "docs/plans/example.md",
-  ]);
+  const snapshot = run.controller.get(runId);
+  assert.equal(snapshot?.status, "completed");
+  assert.equal(snapshot?.stage, "complete");
+  assert.equal(snapshot?.agents.length, 7);
+  assert.equal(snapshot?.agents[0]?.role, PLAN_PIPELINE_SYNTHESIS_ROLE);
+  assert.equal(snapshot?.agents[0]?.model, LUNA_MODEL);
+  assert.equal(snapshot?.agents[0]?.thinkingLevel, "xhigh");
   assert.deepEqual(
-    run.handoffs[0]?.facts.auditReport?.integratedRoles,
-    AUDIT_SEGMENT_LUNA_ROLES,
+    snapshot?.agents.slice(1).map((agent) => agent.role),
+    [...PLAN_PIPELINE_DISCOVERY_ROLES],
   );
   assert.equal(
-    run.handoffs[0]?.facts.auditReport?.executedChecks[0]?.command,
-    "npm run check",
+    snapshot?.agents
+      .slice(1)
+      .every(
+        (agent) =>
+          agent.model === LUNA_MODEL && agent.thinkingLevel === "medium",
+      ),
+    true,
+  );
+  assert.equal(
+    snapshot?.completion?.plan,
+    "# Controller test plan\n\nA free-form plan.",
+  );
+  assert.equal(snapshot?.completion?.planPath, undefined);
+  assert.equal(run.handoffs[0]?.facts.plan, snapshot?.completion?.plan);
+  assert.equal(fs.readdirSync(workingDir).length, 0);
+  await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
+});
+
+test("plan-pipeline corrects malformed discovery and synthesis turns in place", async () => {
+  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-correct-"));
+  const run = harness({ autoCompletePlan: false });
+  const runId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "plan-pipeline",
+    gitCommit: false,
+    planPath: null,
+  });
+  await settleInitialization();
+  const discovery = PLAN_PIPELINE_DISCOVERY_ROLES.map((role) => {
+    const child = run.controller
+      .get(runId)
+      ?.agents.find((agent) => agent.role === role);
+    assert.ok(child);
+    return child;
+  });
+  const malformed = discovery[0];
+  assert.ok(malformed);
+  run.sessions
+    .find((session) => session.spec.role === malformed.role)
+    ?.emit({
+      type: "settled",
+      outcome: { type: "completed", finalText: "malformed" },
+    });
+  for (const child of discovery.slice(1)) {
+    run.sessions
+      .find((session) => session.spec.role === child.role)
+      ?.emit({
+        type: "settled",
+        outcome: {
+          type: "completed",
+          finalText: planReportForRole(
+            child.role as (typeof PLAN_PIPELINE_DISCOVERY_ROLES)[number],
+          ),
+        },
+      });
+  }
+  await settleInitialization();
+  const malformedSession = run.sessions.find(
+    (session) => session.spec.role === malformed.role,
+  );
+  assert.ok(malformedSession);
+  assert.equal(run.controller.get(runId)?.stage, "discover");
+  assert.equal(malformedSession.sends.length, 1);
+  malformedSession.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: planReportForRole(
+        malformed.role as (typeof PLAN_PIPELINE_DISCOVERY_ROLES)[number],
+      ),
+    },
+  });
+  await settleInitialization();
+  assert.equal(run.controller.get(runId)?.stage, "synthesize");
+
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === PLAN_PIPELINE_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis);
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: " " },
+  });
+  await settleInitialization();
+  assert.equal(synthesis.sends.length, 2);
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "# Corrected plan" },
+  });
+  await settleInitialization();
+  assert.equal(run.controller.get(runId)?.status, "completed");
+  assert.equal(run.handoffs[0]?.facts.plan, "# Corrected plan");
+  await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
+});
+
+test("plan-pipeline writes exact accepted bytes to arbitrary safe destinations", async () => {
+  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-output-"));
+  const relativePath = "nested/plan.output";
+  const run = harness({ autoCompletePlan: true });
+  const runId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "plan-pipeline",
+    gitCommit: false,
+    planPath: relativePath,
+  });
+  await settleInitialization();
+  const snapshot = run.controller.get(runId);
+  const outputPath = path.join(workingDir, relativePath);
+  assert.equal(snapshot?.status, "completed");
+  assert.equal(snapshot?.completion?.planPath, relativePath);
+  assert.equal(fs.readFileSync(outputPath, "utf8"), snapshot?.completion?.plan);
+  assert.equal(
+    run.handoffs[0]?.facts.plan,
+    fs.readFileSync(outputPath, "utf8"),
   );
 
+  const absolutePath = path.join(workingDir, "absolute.plan");
+  const absoluteRunId = run.controller.start({
+    ...request(workingDir),
+    pipeline: "plan-pipeline",
+    gitCommit: false,
+    planPath: absolutePath,
+  });
+  await settleInitialization();
+  const absoluteSnapshot = run.controller.get(absoluteRunId);
+  assert.equal(absoluteSnapshot?.completion?.planPath, "absolute.plan");
+  assert.equal(
+    fs.readFileSync(absolutePath, "utf8"),
+    absoluteSnapshot?.completion?.plan,
+  );
+  await run.controller.dispose();
+  fs.rmSync(workingDir, { recursive: true, force: true });
+});
+
+test("plan-pipeline rejects omitted and escaping output paths before a run", async () => {
+  const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-path-"));
+  const run = harness();
+  assert.throws(
+    () =>
+      run.controller.start({
+        ...request(workingDir),
+        pipeline: "plan-pipeline",
+        gitCommit: false,
+      }),
+    /requires an explicit planPath/,
+  );
+  for (const planPath of [
+    "../outside.plan",
+    path.join(os.tmpdir(), "outside.plan"),
+  ]) {
+    assert.throws(
+      () =>
+        run.controller.start({
+          ...request(workingDir),
+          pipeline: "plan-pipeline",
+          gitCommit: false,
+          planPath,
+        }),
+      /inside working_dir|traversal/,
+    );
+  }
   await run.controller.dispose();
   fs.rmSync(workingDir, { recursive: true, force: true });
 });
