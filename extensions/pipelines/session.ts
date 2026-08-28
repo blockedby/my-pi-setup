@@ -18,6 +18,7 @@ import {
   childToolPolicy,
   createChildResources,
   executorAuditToolPolicy,
+  githubDiscoveryToolPolicy,
   pipelineRootToolPolicy,
   planPipelineChildToolPolicy,
   planPipelineRootToolPolicy,
@@ -237,6 +238,12 @@ export function pipelineSessionToolPolicy(
     AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role)
   ) {
     return readOnlyPipelineChildToolPolicy();
+  }
+  if (definition === FEATURE_PIPELINE_ID && role === "discover-problem") {
+    return githubDiscoveryToolPolicy();
+  }
+  if (definition === PLAN_PIPELINE_ID && role === "discover-goal-outcomes") {
+    return githubDiscoveryToolPolicy();
   }
   if (
     definition === FEATURE_PIPELINE_ID &&

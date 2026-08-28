@@ -1017,7 +1017,6 @@ test("install rejects every configured missing submodule asset before writing Pi
   for (const [name, submodule] of Object.entries(submodules.submodules)) {
     for (const relativePath of submodule.requiredFiles) {
       const assetPath = join(cloneRoot, submodule.path, relativePath);
-      const original = readFileSync(assetPath);
       await rm(assetPath);
 
       const result = spawnSync(
@@ -1044,7 +1043,13 @@ test("install rejects every configured missing submodule asset before writing Pi
         existsSync(join(fixture.home, ".local", "bin", "pipi")),
         false,
       );
-      writeFileSync(assetPath, original);
+      execFileSync("git", [
+        "-C",
+        join(cloneRoot, submodule.path),
+        "restore",
+        "--",
+        relativePath,
+      ]);
     }
   }
 });

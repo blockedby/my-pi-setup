@@ -63,6 +63,16 @@ export const PLAN_PIPELINE_MUTATING_TOOL_NAMES = [
   "mcp",
 ] as const;
 
+/** F1/P1 discovery keeps ordinary bash so installed `gh` can read GitHub context. */
+export function githubDiscoveryToolPolicy() {
+  return {
+    excludeTools: [
+      ...CHILD_EXCLUDED_TOOL_NAMES,
+      ...PLAN_PIPELINE_MUTATING_TOOL_NAMES.filter((tool) => tool !== "bash"),
+    ],
+  };
+}
+
 /** Executor audit keeps ordinary bash but no explicit mutation or delegation tools. */
 export const EXECUTOR_AUDIT_EXCLUDED_TOOL_NAMES = [
   "edit",

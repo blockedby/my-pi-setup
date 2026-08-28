@@ -539,6 +539,12 @@ test("executor prompt requires script inspection, safe execution, workspace repo
   for (const phrase of [
     "inspect applicable manifests and the full script definition before running it",
     "cheap checks first",
+    "repository-declared noninteractive repository-wide full test suite(s)",
+    "Targeted, package-level, or affected-scope tests do not substitute for the full suite",
+    "no safe full-suite command exists",
+    "exact skipped/failed/timed-out evidence",
+    "add an unprovenChecks entry",
+    "do not invent a command",
     "never intentionally edit or create source/config files",
     "--fix",
     "snapshot updates",
@@ -556,6 +562,14 @@ test("executor prompt requires script inspection, safe execution, workspace repo
       new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
     );
   }
+  const feature = buildAuditTrackPrompt(EXECUTOR_AUDIT_ROLE, {
+    ...synthesisSegment().context,
+    purpose: "feature-final",
+  });
+  assert.match(
+    feature,
+    /repository-declared noninteractive repository-wide full test suite\(s\)/i,
+  );
   const plan = buildAuditTrackPrompt(EXECUTOR_AUDIT_ROLE, {
     ...synthesisSegment().context,
     purpose: "plan-final",
@@ -569,6 +583,10 @@ test("executor prompt requires script inspection, safe execution, workspace repo
     /Do not run product implementation tests, builds, linters, or typechecks/i,
   );
   assert.match(plan, /unsupported product checks as skipped and\/or unproven/i);
+  assert.doesNotMatch(
+    plan,
+    /repository-declared noninteractive repository-wide full test suite\(s\)/i,
+  );
   const staticPrompt = buildAuditTrackPrompt(
     STATIC_LUNA_AUDIT_ROLES[0],
     synthesisSegment().context,

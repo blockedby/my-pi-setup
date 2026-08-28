@@ -1250,3 +1250,19 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Managed state under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, package source `/home/kcnc/code/tools/pipi-alias/vendor/pi-codex`, and this record. No credential, package version, model override, submodule pin, or regular Pi state changed.
 - **Verification:** `npm run check:pipi-install` passed for runtime/branding/resume behavior, MCP policy, model overrides, and Herdr integration. `pipi list` reports the MCP adapter, primary checkout, and vendored Codex package; the sibling checkout is absent. The primary checkout and `origin/main` were synchronized at the published integration commit before this operation-record update.
 - **Pending:** Reload or restart active Pipi sessions so they load the vendored package path.
+
+## Operation entry: harden final-audit verification and GitHub discovery access
+
+- **Request:** Require standalone/feature final-audit executors to run repository-wide full test suites, and grant read-only GitHub CLI context access only to feature F1 `discover-problem` and plan P1 `discover-goal-outcomes`.
+- **Action:** Updated executor prompts and deterministic coverage for full-suite requirements and plan restrictions; added a policy preserving ordinary bash only for F1/P1 and prompt-enforced read-only `gh` evidence handling. Updated README and pipeline design documentation.
+- **Affected paths or values:** `extensions/pipelines/audit-segment.ts`, `extensions/pipelines/prompt.ts`, `extensions/pipelines/session.ts`, `extensions/shared/child-session.ts`, focused pipeline tests, `README.md`, `docs/pipelines-v1-design.md`, and this record. Installed runtime state, model overrides, credentials, submodules, and Git delivery state are unchanged.
+- **Verification:** Focused pipeline tests passed 70/70; `npm run test:extensions` passed 270/270; `npm run test:deterministic` ran 38/39 installer tests successfully but failed on the existing missing-submodule-asset case because the fixture reported `Submodule plan-gh-backlog has direct worktree changes` instead of the expected `Missing submodule pi-codex asset:`. `npm run check`, `npm run format:check`, `npm run check:submodules`, and `git diff --check` passed.
+- **Pending:** No rollout performed; reload/reinstall is intentionally pending.
+
+## Operation entry: restore missing-submodule fixtures through Git
+
+- **Request:** Resolve the installer-test failure caused by a temporarily removed executable submodule asset being recreated without its Git file mode.
+- **Action:** Changed the missing-submodule-asset fixture to restore each removed asset from the temporary clone's Git index instead of recreating only its bytes. This preserves executable modes and other tracked metadata before the fixture advances to the next submodule.
+- **Affected paths or values:** `tests/scripts/install.test.mjs` and this record. Installer production behavior, installed runtime state, credentials, model overrides, submodule pins, and Git delivery state are unchanged.
+- **Verification:** `npm run test:installer` passed 39/39. Fresh `npm run test:deterministic` passed 39 installer tests, 270 deterministic extension tests, and 22 file-search tests.
+- **Pending:** None for the fixture correction; rollout of the separate pipeline behavior remains pending as recorded above.

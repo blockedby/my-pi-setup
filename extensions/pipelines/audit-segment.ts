@@ -1002,7 +1002,7 @@ export function buildAuditTrackPrompt(
     const purposeRestriction =
       context.purpose === "plan-final"
         ? "This is plan-pipeline. Run only commands demonstrably relevant to validating the plan artifact or check-only planning contracts. Do not run product implementation tests, builds, linters, or typechecks merely because they exist. Record unsupported product checks as skipped and/or unproven with evidence."
-        : "This is a standalone or feature final audit. Select relevant existing test, lint, typecheck, formatting-check, build, or other verification scripts; prefer cheap checks first.";
+        : "This is a standalone or feature final audit. Select relevant existing test, lint, typecheck, formatting-check, build, or other verification scripts; prefer cheap checks first. After any useful focused or cheap checks, you must run the repository-declared noninteractive repository-wide full test suite(s). Targeted, package-level, or affected-scope tests do not substitute for the full suite. If no safe full-suite command exists, or it fails, times out, or cannot be run under this safety contract, record exact skipped/failed/timed-out evidence and add an unprovenChecks entry; do not invent a command.";
     return `You are the isolated Luna/medium executor-audit contributor in a trusted workspace. ${roleInstruction(role)}
 
 ${sharedAuditContract(context)}

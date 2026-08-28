@@ -1008,8 +1008,8 @@ test("feature root retains commit-capable tools while every child stays constrai
   ]) {
     assert.equal(discoveryDenied.has(allowed), false);
   }
+  assert.equal(discoveryDenied.has("bash"), false);
   for (const denied of [
-    "bash",
     "edit",
     "write",
     "apply_patch_codex",
@@ -1031,7 +1031,23 @@ test("feature root retains commit-capable tools while every child stays constrai
     );
     assert.equal(denied.has("edit"), true, role);
     assert.equal(denied.has("write"), true, role);
-    if (role !== EXECUTOR_AUDIT_ROLE) {
+    if (role !== EXECUTOR_AUDIT_ROLE && role !== "discover-problem") {
+      assert.equal(denied.has("bash"), true, role);
+    }
+  }
+
+  const planGoalDiscoveryDenied = new Set<string>(
+    pipelineSessionToolPolicy("plan-pipeline", false, "discover-goal-outcomes")
+      .excludeTools,
+  );
+  assert.equal(planGoalDiscoveryDenied.has("bash"), false);
+  for (const role of PLAN_PIPELINE_DISCOVERY_ROLES) {
+    const denied = new Set<string>(
+      pipelineSessionToolPolicy("plan-pipeline", false, role).excludeTools,
+    );
+    assert.equal(denied.has("edit"), true, role);
+    assert.equal(denied.has("write"), true, role);
+    if (role !== "discover-goal-outcomes") {
       assert.equal(denied.has("bash"), true, role);
     }
   }

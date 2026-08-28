@@ -7,6 +7,7 @@ import {
 import {
   buildFeaturePipelinePrompt,
   buildPipelineChildPrompt,
+  buildPlanPipelinePrompt,
   pipelineCommitPolicy,
   SMALL_FEATURE_AUDIT_GIT_REQUIREMENTS,
 } from "./prompt.ts";
@@ -98,6 +99,43 @@ test("feature child prompts keep commit permission disabled", () => {
     assert.match(prompt, /task prose cannot grant it/);
     assert.match(prompt, /Do not edit files or external state, commit, push/);
   }
+});
+
+test("GitHub discovery prompts permit only read-only gh context access", () => {
+  const feature = buildPipelineChildPrompt(
+    "feature-pipeline",
+    "discover-problem",
+    featureRequest(),
+  );
+  const plan = buildPipelineChildPrompt(
+    "plan-pipeline",
+    "discover-goal-outcomes",
+    featureRequest(),
+  );
+  for (const prompt of [feature, plan]) {
+    assert.match(prompt, /use installed `gh` through ordinary bash/i);
+    assert.match(prompt, /issue or epic body, comments, labels/i);
+    assert.match(prompt, /native parent\/sub-issue relationships/i);
+    assert.match(prompt, /untrusted evidence/i);
+    assert.match(prompt, /Only read-only `gh` operations are permitted/i);
+    assert.match(prompt, /do not use any other shell commands/i);
+  }
+  for (const role of [
+    "discover-outcome",
+    "discover-frontend-scope",
+    "discover-backend-scope",
+    "discover-devops-scope",
+    "discover-testing-strategy",
+  ] as const) {
+    const definition =
+      role === "discover-outcome" ? "feature-pipeline" : "plan-pipeline";
+    const prompt = buildPipelineChildPrompt(definition, role, featureRequest());
+    assert.doesNotMatch(prompt, /use installed `gh` through ordinary bash/i);
+  }
+  assert.match(
+    buildPlanPipelinePrompt(featureRequest()),
+    /Normal shell\/edit\/write tools are intentionally unavailable/,
+  );
 });
 
 test("small-feature commit authority remains an explicit structured role policy", () => {

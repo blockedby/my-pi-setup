@@ -45,6 +45,8 @@ Example:
 
 `pipeline_run` defaults to `feature-pipeline` when `pipeline` is omitted. Set `git_commit: true` only when the persistent implementation agent should be allowed to create ordinary commits on the current branch. Pipelines never receive permission to push, merge, rewrite history, manage branches or worktrees, or deploy.
 
+Final audits in standalone, feature, and plan contexts use the executor's repository-declared verification contract: standalone/feature executors run the noninteractive repository-wide full test suite after useful focused checks, while targeted tests never substitute for it. If a safe full suite is unavailable or cannot run, the executor records exact evidence and an unproven check. Plan final audits retain their planning-only prohibition on product implementation tests. Only feature `discover-problem` and plan `discover-goal-outcomes` receive ordinary bash for read-only `gh` lookup of referenced GitHub context; all other discovery and audit roles retain their shell boundaries.
+
 ### Everyday tools
 
 - `rg` content search and `fd` file discovery
