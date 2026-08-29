@@ -1,4 +1,11 @@
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
+export {
+  assertPipelineName,
+  isCanonicalPipelineRunId,
+  PIPELINE_ID_ATTEMPT_LIMIT as PIPELINE_ID_ATTEMPTS,
+  PIPELINE_NAME_MAX_LENGTH,
+  PIPELINE_NAME_PATTERN,
+} from "./pipeline-identity.ts";
 
 export const FEATURE_PIPELINE_ID = "feature-pipeline" as const;
 export const SMALL_FEATURE_PIPELINE_ID = "small-feature-pipeline" as const;
@@ -327,6 +334,7 @@ export interface PipelineRunSnapshot {
 }
 
 export interface PipelineRunRequest {
+  readonly pipelineName: string;
   readonly workingDir: string;
   readonly task: string;
   readonly pipeline?: PipelineDefinitionId;

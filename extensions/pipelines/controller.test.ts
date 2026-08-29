@@ -211,12 +211,19 @@ class FakeFeatureLifecycle implements FeatureWorktreeLifecycle {
   selectionReadOnlyChecks = 0;
   synthesisCreated = 0;
 
-  constructor(runId: string, caller: FeatureCallerWorktree) {
+  constructor(
+    runId: string,
+    caller: FeatureCallerWorktree,
+    private readonly failCandidateReservation = false,
+  ) {
     this.temporaryRoot = `/tmp/${runId}-best-of-three`;
     this.caller = caller;
   }
 
   createCandidateWorktrees() {
+    if (this.failCandidateReservation) {
+      throw new Error("Injected candidate reservation race");
+    }
     return FEATURE_CANDIDATE_ROLES.map((role) => ({
       role,
       path: `${this.temporaryRoot}/candidate-${role.toLowerCase()}`,
@@ -322,6 +329,8 @@ function candidateRoleFromSpec(role: string) {
 
 function featureGitHarness(
   lifecycles: FakeFeatureLifecycle[],
+  namespaceAvailable: (runId: string) => boolean = () => true,
+  failCandidateReservation = false,
 ): FeatureGitOperations {
   return {
     preflight(workingDir) {
@@ -344,8 +353,15 @@ function featureGitHarness(
         baseCommit,
       };
     },
+    namespaceAvailable(_caller, runId) {
+      return namespaceAvailable(runId);
+    },
     createLifecycle(caller, runId) {
-      const lifecycle = new FakeFeatureLifecycle(runId, caller);
+      const lifecycle = new FakeFeatureLifecycle(
+        runId,
+        caller,
+        failCandidateReservation,
+      );
       lifecycles.push(lifecycle);
       return lifecycle;
     },
@@ -362,6 +378,11 @@ function harness(
     autoCompleteCandidates?: boolean;
     autoCompleteSelectionAndSynthesis?: boolean;
     rejectRootCancellation?: boolean;
+    runIds?: ReadonlyArray<string>;
+    namespaceAvailable?: (runId: string) => boolean;
+    makeRunToken?: () => string;
+    useDefaultRunId?: boolean;
+    failCandidateReservation?: boolean;
   } = {},
 ) {
   const sessions: FakePipelineSession[] = [];
@@ -369,6 +390,7 @@ function harness(
   const lifecycles: FakeFeatureLifecycle[] = [];
   let agentSequence = 0;
   let runSequence = 0;
+  const injectedRunIds = [...(options.runIds ?? [])];
   let rootToolNames: string[] = [];
   const rootToolsByRun = new Map<string, ReadonlyArray<ToolDefinition>>();
   let discoverySubmitCallback:
@@ -380,7 +402,14 @@ function harness(
       ) => void)
     | undefined;
   const controller = new PipelineController({
-    makeRunId: () => `run-${++runSequence}`,
+    ...(options.useDefaultRunId
+      ? {}
+      : {
+          makeRunId: (pipelineName: string) =>
+            injectedRunIds.shift() ??
+            `${pipelineName}-${(++runSequence).toString(16).padStart(8, "0")}`,
+        }),
+    ...(options.makeRunToken ? { makeRunToken: options.makeRunToken } : {}),
     makeAgentId: () => `node-${++agentSequence}`,
     createSessionFactory: (
       rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
@@ -498,7 +527,11 @@ function harness(
     onHandoff: (handoff) => {
       handoffs.push(handoff);
     },
-    featureGit: featureGitHarness(lifecycles),
+    featureGit: featureGitHarness(
+      lifecycles,
+      options.namespaceAvailable,
+      options.failCandidateReservation,
+    ),
   });
   return {
     controller,
@@ -513,12 +546,18 @@ function harness(
     },
     submitUnauthorized(role: string, value: unknown) {
       assert.ok(discoverySubmitCallback);
-      discoverySubmitCallback("run-1", role, "unauthorized-token", value);
+      discoverySubmitCallback(
+        "approved-feature-run-00000001",
+        role,
+        "unauthorized-token",
+        value,
+      );
     },
   };
 }
 
 const request = (workingDir = implementationWorkingDir()) => ({
+  pipelineName: "approved-feature-run",
   task: "Implement the approved feature",
   workingDir,
   gitCommit: true,
@@ -529,6 +568,7 @@ test("feature invocation rejects git_commit false or omission before Git lifecyc
   assert.throws(
     () =>
       run.controller.start({
+        pipelineName: "approved-feature-run",
         task: "Implement the approved feature",
         workingDir: "/tmp/work",
         pipeline: "feature-pipeline",
@@ -539,6 +579,7 @@ test("feature invocation rejects git_commit false or omission before Git lifecyc
   assert.throws(
     () =>
       run.controller.start({
+        pipelineName: "approved-feature-run",
         task: "Implement the approved feature",
         workingDir: "/tmp/work",
         pipeline: "feature-pipeline",
@@ -1008,6 +1049,111 @@ async function finishEmbeddedAudit(
   }
 }
 
+test("controller rejects a trailing-newline pipeline name before creating state", async () => {
+  const run = harness();
+  assert.throws(
+    () =>
+      run.controller.start({
+        ...request(),
+        pipelineName: "invalid-trailing-newline\n",
+      }),
+    /pipeline_name/,
+  );
+  assert.deepEqual(run.controller.list(), []);
+  assert.equal(run.sessions.length, 0);
+  assert.equal(run.lifecycles.length, 0);
+  await run.controller.dispose();
+});
+
+test("canonical ID admission retries live and namespace collisions before discovery", async () => {
+  const base = "collision-safe-feature";
+  const occupiedId = `${base}-aaaaaaaa`;
+  const firstId = `${base}-bbbbbbbb`;
+  const secondId = `${base}-cccccccc`;
+  let discoveryObservedDuringNamespaceCheck = false;
+  const run = harness({
+    runIds: [occupiedId, firstId, firstId, secondId],
+    namespaceAvailable: (runId) => {
+      discoveryObservedDuringNamespaceCheck ||= run.sessions.some((session) =>
+        session.spec.role.startsWith("discover-"),
+      );
+      return runId !== occupiedId;
+    },
+  });
+  const first = run.controller.start({ ...request(), pipelineName: base });
+  const second = run.controller.start({ ...request(), pipelineName: base });
+  assert.equal(first, firstId);
+  assert.equal(second, secondId);
+  assert.equal(discoveryObservedDuringNamespaceCheck, false);
+  assert.deepEqual(
+    run.controller
+      .list()
+      .map((item) => item.id)
+      .sort(),
+    [firstId, secondId].sort(),
+  );
+  await run.controller.dispose();
+
+  const exhausted = harness({
+    runIds: Array.from({ length: 9 }, () => firstId),
+  });
+  exhausted.controller.start({ ...request(), pipelineName: base });
+  assert.throws(
+    () => exhausted.controller.start({ ...request(), pipelineName: base }),
+    /after 8 attempts.*No pipeline state was created/,
+  );
+  assert.equal(exhausted.controller.list().length, 1);
+  await exhausted.controller.dispose();
+
+  const namespaceExhausted = harness({
+    runIds: Array.from(
+      { length: 8 },
+      (_, index) => `${base}-${(index + 1).toString(16).padStart(8, "0")}`,
+    ),
+    namespaceAvailable: () => false,
+  });
+  assert.throws(
+    () =>
+      namespaceExhausted.controller.start({ ...request(), pipelineName: base }),
+    /after 8 attempts.*No pipeline state was created/,
+  );
+  assert.equal(namespaceExhausted.controller.list().length, 0);
+  assert.equal(namespaceExhausted.sessions.length, 0);
+  assert.equal(namespaceExhausted.lifecycles.length, 0);
+  await namespaceExhausted.controller.dispose();
+
+  const tokenInjected = harness({
+    useDefaultRunId: true,
+    makeRunToken: () => "deadbeef",
+  });
+  const tokenId = tokenInjected.controller.start({
+    ...request(),
+    pipelineName: "token-injected-plan",
+    pipeline: "plan-pipeline",
+    gitCommit: false,
+    planPath: null,
+  });
+  assert.equal(tokenId, "token-injected-plan-deadbeef");
+  await tokenInjected.controller.dispose();
+});
+
+test("candidate reservation failure creates no controller run or session state", async () => {
+  const run = harness({ failCandidateReservation: true });
+  assert.throws(
+    () =>
+      run.controller.start({
+        ...request(),
+        pipelineName: "candidate-race-boundary",
+      }),
+    /Injected candidate reservation race/,
+  );
+  assert.deepEqual(run.controller.list(), []);
+  assert.equal(run.sessions.length, 0);
+  assert.equal(run.lifecycles.length, 1);
+  assert.equal(run.lifecycles[0]?.cleaned, 1);
+  await run.controller.dispose();
+});
+
 test("start is fire-and-forget and multiple same-cwd runs are admitted", async () => {
   let releaseRoot = () => {};
   const rootGate = new Promise<void>((resolve) => {
@@ -1017,8 +1163,8 @@ test("start is fire-and-forget and multiple same-cwd runs are admitted", async (
   const firstId = gated.controller.start(request());
   const secondId = gated.controller.start(request());
 
-  assert.equal(firstId, "run-1");
-  assert.equal(secondId, "run-2");
+  assert.equal(firstId, "approved-feature-run-00000001");
+  assert.equal(secondId, "approved-feature-run-00000002");
   assert.equal(gated.controller.get(firstId)?.status, "starting");
   assert.equal(
     gated.controller.get(secondId)?.workingDir,
@@ -1375,7 +1521,8 @@ test("delayed discovery session creation cannot restore terminal run authority o
     autoCompleteFeatureDiscovery: false,
     autoCompleteDiscoverySynthesis: false,
     sessionGate: (spec) =>
-      spec.scopeId === "run-1" && spec.role === "discover-problem"
+      spec.scopeId === "approved-feature-run-00000001" &&
+      spec.role === "discover-problem"
         ? delayedSession
         : undefined,
   });
@@ -2271,7 +2418,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
 
   const initial = run.controller.get(runId);
   assert.equal(initial?.stage, "build");
-  assert.equal(initial?.agents[0]?.title, "Small feature pipeline Luna");
+  assert.equal(initial?.agents[0]?.title, "approved-feature-run-00000001");
   assert.equal(initial?.agents[0]?.model, LUNA_MODEL);
   assert.equal(
     pipelineThinkingLevel(initial?.agents[0]?.model ?? ""),

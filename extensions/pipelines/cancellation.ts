@@ -4,6 +4,10 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  PIPELINE_RUN_ID_MAX_LENGTH,
+  PIPELINE_RUN_ID_PATTERN,
+} from "./pipeline-identity.ts";
 import type { PipelineRunSnapshot } from "./domain.ts";
 
 export const PIPELINE_CANCEL_MAX_IDS = 32;
@@ -14,13 +18,15 @@ export const PIPELINE_CANCEL_PARAMETERS = Type.Object(
   {
     ids: Type.Array(
       Type.String({
-        description: "Session-scoped pipeline run id to cancel.",
+        description:
+          "Canonical pipeline run id returned by pipeline_run (the supplied name plus eight lowercase hexadecimal characters).",
         minLength: 1,
-        maxLength: 256,
+        maxLength: PIPELINE_RUN_ID_MAX_LENGTH,
+        pattern: PIPELINE_RUN_ID_PATTERN,
       }),
       {
         description:
-          'Pipeline run ids to cancel, e.g. ["pipeline-1", "pipeline-2"].',
+          'Canonical pipeline run ids to cancel, e.g. ["replace-heavy-plan-pipeline-f82091ba", "replace-heavy-plan-pipeline-a1029c44"].',
         minItems: 1,
         maxItems: PIPELINE_CANCEL_MAX_IDS,
         uniqueItems: true,
