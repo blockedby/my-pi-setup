@@ -233,7 +233,7 @@ export class AgentTreeController {
     this.notify(id);
 
     try {
-      const session = await this.factory.create(spec);
+      const session = await this.factory.create({ ...spec, id });
       if (this.disposed) {
         await session.dispose();
         throw new Error("Agent tree was disposed while creating a session.");

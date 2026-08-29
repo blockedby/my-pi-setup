@@ -117,6 +117,7 @@ interface PipelineSessionFactoryOptions {
     runId: string,
     role: string,
     token: string,
+    sessionId: string,
   ) => void;
 }
 
@@ -605,6 +606,7 @@ export function createPipelineSessionFactory(
           spec.scopeId ?? "",
           spec.role,
           executionFinishToken,
+          spec.id ?? "",
         );
       const executionFinishTool =
         executionFinishToken && options.executionFinish

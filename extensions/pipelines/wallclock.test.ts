@@ -314,6 +314,7 @@ test("controller warns current-stage sessions at 80% and settles once at 100%", 
 
   clock.value = 30_000;
   scheduler.runDue();
+  await flush();
   assert.equal(controller.get(runId)?.status, "limited");
   assert.equal(controller.get(runId)?.limitation?.stage, "discover");
   assert.equal(controller.get(runId)?.limitation?.elapsedMs, 30_000);

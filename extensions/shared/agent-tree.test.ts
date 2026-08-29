@@ -96,6 +96,8 @@ test("agent tree preserves parent, role, attempt, controls, and bounded transcri
     prompt: "inspect",
   });
 
+  assert.equal(fake.created[0]!.spec.id, root.id);
+  assert.equal(fake.created[1]!.spec.id, child.id);
   assert.equal(child.parentId, root.id);
   assert.equal(child.role, "audit");
   assert.equal(child.attempt, 2);

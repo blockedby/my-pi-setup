@@ -126,6 +126,8 @@ import {
   type PipelineWallclockState,
 } from "./wallclock.ts";
 
+const CLEANUP_TIMEOUT_MS = 5_000;
+
 export function pipelineDiscoveryToolAllowed(
   definition: PipelineDefinitionId,
   role: string,
@@ -372,6 +374,7 @@ export interface PipelineControllerOptions {
       runId: string,
       role: string,
       token: string,
+      sessionId: string,
     ) => void,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
@@ -519,8 +522,8 @@ export class PipelineController {
           this.commitFeatureWorktree(runId, role, workingDir),
         (runId, role, token, value) =>
           this.submitExecutionFinish(runId, role, token, value),
-        (runId, role, token) =>
-          this.registerExecutionSessionToken(runId, role, token),
+        (runId, role, token, sessionId) =>
+          this.registerExecutionSessionToken(runId, role, token, sessionId),
       ),
       // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
       // intentionally do not apply to pipeline roots or children.
@@ -671,9 +674,15 @@ export class PipelineController {
     if (role === FEATURE_DISCOVERY_SYNTHESIS_ROLE) return "discover";
     if (role === PLAN_PIPELINE_SYNTHESIS_ROLE) return "synthesize";
     if (role === AUDIT_SYNTHESIS_ROLE) {
-      return run.definition === AUDIT_PIPELINE_ID || run.stage === "audit"
-        ? "audit"
+      if (run.definition === AUDIT_PIPELINE_ID) return "audit";
+      return run.stage === "audit" || run.stage === "audit-resolve"
+        ? run.stage
         : "final-audit";
+    }
+    if (role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE) {
+      return run.definition === FEATURE_PIPELINE_ID && run.stage === "build"
+        ? "build"
+        : undefined;
     }
     if (role.startsWith("discover-")) return "discover";
     if (
@@ -745,14 +754,18 @@ export class PipelineController {
     runId: string,
     role: string,
     token: string,
+    sessionId: string,
   ) {
     const run = this.requireRun(runId);
     if (run.status !== "starting" && run.status !== "running") return;
-    const node = this.agentsFor(runId)
-      .filter((agent) => agent.role === role && agent.status === "starting")
-      .at(-1);
+    const node = this.tree.view.get(sessionId);
     const epoch = run.stageTiming?.epoch;
-    if (node && epoch !== undefined) {
+    if (
+      node?.scopeId === runId &&
+      node.role === role &&
+      node.status === "starting" &&
+      epoch !== undefined
+    ) {
       this.executionSessionTokens.set(token, node.id);
       this.executionSessionEpochs.set(token, epoch);
       run.executionSessionTokens.set(token, node.id);
@@ -957,8 +970,10 @@ export class PipelineController {
     this.clearDiscoveryRunState(run.id);
     this.clearExecutionRunState(run);
     this.notify();
-    void this.cleanupTerminal(run, true);
-    this.deliver(run);
+    void this.cleanupTerminal(run, true).then(
+      () => this.deliver(run),
+      () => this.deliver(run),
+    );
     return true;
   }
 
@@ -2243,29 +2258,40 @@ export class PipelineController {
         deferPrompt: true,
         shouldStart: () => run.status === "running",
       });
+      this.settleDue(run);
+      if (run.status !== "starting" && run.status !== "running") return [];
       segment.registerSynthesis(synthesis.id);
     }
 
-    const tracks = await Promise.all(
-      AUDIT_SEGMENT_LUNA_ROLES.map(async (role) => {
-        const attempt =
-          this.agentsFor(run.id).filter((agent) => agent.role === role).length +
-          1;
-        const child = await this.tree.spawn({
-          scopeId: run.id,
-          parentId: run.rootId,
-          role,
-          attempt,
-          title: scopedSessionTitle(run.id, titleForRole(role)),
-          model: modelForRole(role),
-          cwd: run.request.workingDir,
-          prompt: buildAuditTrackPrompt(role, context),
-          shouldStart: () => run.status === "running",
-        });
-        segment.registerTrack(role, child.id);
-        return child;
-      }),
-    );
+    const tracks = (
+      await Promise.all(
+        AUDIT_SEGMENT_LUNA_ROLES.map(async (role) => {
+          this.settleDue(run);
+          if (run.status !== "starting" && run.status !== "running") {
+            return undefined;
+          }
+          const attempt =
+            this.agentsFor(run.id).filter((agent) => agent.role === role)
+              .length + 1;
+          const child = await this.tree.spawn({
+            scopeId: run.id,
+            parentId: run.rootId,
+            role,
+            attempt,
+            title: scopedSessionTitle(run.id, titleForRole(role)),
+            model: modelForRole(role),
+            cwd: run.request.workingDir,
+            prompt: buildAuditTrackPrompt(role, context),
+            shouldStart: () => run.status === "running",
+          });
+          if (run.status !== "starting" && run.status !== "running") {
+            return undefined;
+          }
+          segment.registerTrack(role, child.id);
+          return child;
+        }),
+      )
+    ).filter((child): child is AgentNodeSnapshot => child !== undefined);
     await this.pumpAuditSegment(run);
     const synthesis = this.tree.view.get(segment.synthesizerId!);
     return synthesis ? [...tracks, synthesis] : tracks;
@@ -2523,6 +2549,34 @@ export class PipelineController {
     this.cancelStageTimers(run);
   }
 
+  private boundedCleanupOperation(operation: () => Promise<unknown> | unknown) {
+    return new Promise<{ timedOut?: boolean; error?: unknown }>((resolve) => {
+      let settled = false;
+      let cancelTimer = () => {};
+      const finish = (result: { timedOut?: boolean; error?: unknown }) => {
+        if (settled) return;
+        settled = true;
+        cancelTimer();
+        resolve(result);
+      };
+      try {
+        cancelTimer = this.scheduler.schedule(CLEANUP_TIMEOUT_MS, () =>
+          finish({ timedOut: true }),
+        );
+      } catch {
+        finish({ timedOut: true });
+      }
+      try {
+        void Promise.resolve(operation()).then(
+          () => finish({}),
+          (error) => finish({ error }),
+        );
+      } catch (error) {
+        finish({ error });
+      }
+    });
+  }
+
   private cleanupTerminal(run: MutableRun, cancelRoot: boolean) {
     if (run.cleanup) return run.cleanup;
     run.cleanup = (async () => {
@@ -2532,21 +2586,29 @@ export class PipelineController {
           agent.parentId &&
           (agent.status === "starting" || agent.status === "running"),
       );
-      const childResults = await Promise.allSettled(
-        active.map((agent) => this.tree.cancel(agent.id)),
+      const childResults = await Promise.all(
+        active.map((agent) =>
+          this.boundedCleanupOperation(() => this.tree.cancel(agent.id)),
+        ),
       );
       for (const result of childResults) {
-        if (result.status === "rejected")
+        if (result.timedOut) {
+          failures.push("Pipeline child cleanup timed out.");
+        } else if (result.error !== undefined) {
           failures.push(
-            `Pipeline child cleanup failed: ${boundedPipelineError(result.reason)}`,
+            `Pipeline child cleanup failed: ${boundedPipelineError(result.error)}`,
           );
+        }
       }
       if (cancelRoot && run.rootId) {
-        try {
-          await this.tree.cancel(run.rootId);
-        } catch (error) {
+        const result = await this.boundedCleanupOperation(() =>
+          this.tree.cancel(run.rootId!),
+        );
+        if (result.timedOut) {
+          failures.push("Pipeline root cancellation timed out.");
+        } else if (result.error !== undefined) {
           failures.push(
-            `Pipeline root cancellation failed: ${boundedPipelineError(error)}`,
+            `Pipeline root cancellation failed: ${boundedPipelineError(result.error)}`,
           );
         }
       }

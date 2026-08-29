@@ -92,6 +92,8 @@ export interface AgentTreeSession {
 }
 
 export interface AgentNodeSpec {
+  /** Controller-assigned identity available to the session factory before creation. */
+  readonly id?: string;
   readonly scopeId?: string;
   readonly parentId?: string;
   readonly role: string;
