@@ -114,7 +114,6 @@ import {
   securePipelineToken,
 } from "./pipeline-identity.ts";
 import {
-  DEFAULT_PIPELINE_WALLCLOCK_LIMIT_MS,
   parsePipelineWallclockLimit,
   stageTimingAt,
   systemPipelineMonotonicClock,
@@ -243,7 +242,7 @@ interface MutableRun {
   rootId?: string;
   rootReady: Promise<void>;
   resolveRootReady: () => void;
-  wallclockLimitMs: number;
+  wallclockLimitMs?: number;
   wallclockStartedAtMs: number;
   stageTiming?: PipelineStageTiming;
   wallclockProjection?: PipelineWallclockState;
@@ -564,9 +563,10 @@ export class PipelineController {
 
   private wallclockStateFor(run: MutableRun, now = this.monotonicNow(run)) {
     const timing = this.stageTimingFor(run, now);
-    if (!timing) return run.wallclockProjection;
+    const limitMs = run.wallclockLimitMs;
+    if (!timing || limitMs === undefined) return run.wallclockProjection;
     return {
-      limitMs: run.wallclockLimitMs,
+      limitMs,
       runStartedAtMs: run.wallclockStartedAtMs,
       runElapsedMs: Math.max(0, now - run.wallclockStartedAtMs),
       stageElapsedMs: timing.elapsedMs,
@@ -617,26 +617,32 @@ export class PipelineController {
     stage: PipelineStage,
     startedAtMs?: number,
   ) {
-    if (run.stage === stage && (run.stageTiming || stage === "complete")) {
+    if (
+      run.stage === stage &&
+      (run.wallclockLimitMs === undefined ||
+        run.stageTiming ||
+        stage === "complete")
+    ) {
       this.syncWarnings(run);
       return;
     }
     this.cancelStageTimers(run);
     run.stage = stage;
-    if (timedPipelineStage(run.definition, stage)) {
+    const limitMs = run.wallclockLimitMs;
+    if (limitMs !== undefined && timedPipelineStage(run.definition, stage)) {
       const stageStartedAtMs = startedAtMs ?? this.monotonicNow(run);
       const epoch = (run.stageTiming?.epoch ?? 0) + 1;
-      const warningOffset = Math.floor((run.wallclockLimitMs * 4) / 5);
+      const warningOffset = Math.floor((limitMs * 4) / 5);
       run.stageTiming = {
         definition: run.definition,
         stage,
         epoch,
         startedAtMs: stageStartedAtMs,
         warningAtMs: stageStartedAtMs + warningOffset,
-        deadlineAtMs: stageStartedAtMs + run.wallclockLimitMs,
+        deadlineAtMs: stageStartedAtMs + limitMs,
         warningReached: false,
         elapsedMs: 0,
-        remainingMs: run.wallclockLimitMs,
+        remainingMs: limitMs,
         limited: false,
       };
       run.warnedSessions.clear();
@@ -655,7 +661,7 @@ export class PipelineController {
       run.stageTiming = undefined;
       run.wallclockProjection = prior
         ? {
-            limitMs: run.wallclockLimitMs,
+            limitMs: prior.deadlineAtMs - prior.startedAtMs,
             runStartedAtMs: run.wallclockStartedAtMs,
             runElapsedMs: Math.max(0, now - run.wallclockStartedAtMs),
             stageElapsedMs: Math.max(0, now - prior.startedAtMs),
@@ -939,7 +945,13 @@ export class PipelineController {
     if (run.status !== "starting" && run.status !== "running") return false;
     if (run.limiting) return false;
     const timing = run.stageTiming;
-    if (!timing || timing.epoch !== epoch || now < timing.deadlineAtMs)
+    const limitMs = run.wallclockLimitMs;
+    if (
+      !timing ||
+      limitMs === undefined ||
+      timing.epoch !== epoch ||
+      now < timing.deadlineAtMs
+    )
       return false;
     run.limiting = true;
     const finalTiming = stageTimingAt(timing, now);
@@ -950,7 +962,7 @@ export class PipelineController {
     const partials = this.fallbackPartials(run, finalTiming);
     const validatedProgress = this.validatedProgress(run);
     const unresolvedItems = [
-      `Stage ${finalTiming.stage} exhausted its ${run.wallclockLimitMs}ms wallclock budget before the pipeline completed.`,
+      `Stage ${finalTiming.stage} exhausted its ${limitMs}ms wallclock budget before the pipeline completed.`,
       ...partials.map(
         (partial) =>
           `Partial output from ${partial.role} is provenance only and was not accepted as a report.`,
@@ -960,7 +972,7 @@ export class PipelineController {
       reason: "stage-deadline",
       stage: finalTiming.stage,
       epoch: finalTiming.epoch,
-      limitMs: run.wallclockLimitMs,
+      limitMs,
       warningAtMs: finalTiming.warningAtMs,
       deadlineAtMs: finalTiming.deadlineAtMs,
       elapsedMs: finalTiming.elapsedMs,
@@ -1175,7 +1187,9 @@ export class PipelineController {
       status: run.status,
       startedAt: run.startedAt,
       ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
-      wallclockLimitMs: run.wallclockLimitMs,
+      ...(run.wallclockLimitMs !== undefined
+        ? { wallclockLimitMs: run.wallclockLimitMs }
+        : {}),
       ...(wallclock
         ? {
             runElapsedMs: wallclock.runElapsedMs,
@@ -1323,7 +1337,7 @@ export class PipelineController {
       ...(featureCandidateWorktrees ? { featureCandidateWorktrees } : {}),
       featureSynthesisChecks: [],
       finalAuditReportDelivered: false,
-      wallclockLimitMs,
+      ...(wallclockLimitMs !== undefined ? { wallclockLimitMs } : {}),
       wallclockStartedAtMs,
       warnedSessions: new Set(),
       pendingWarnings: new Set(),

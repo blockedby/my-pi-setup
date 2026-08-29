@@ -1,7 +1,5 @@
 import type { PipelineDefinitionId, PipelineStage } from "./domain.ts";
 
-/** The default controller-owned budget for each timed pipeline stage. */
-export const DEFAULT_PIPELINE_WALLCLOCK_LIMIT_MS = 30 * 60 * 1_000;
 export const MIN_PIPELINE_WALLCLOCK_LIMIT_MS = 30 * 1_000;
 export const MAX_PIPELINE_WALLCLOCK_LIMIT_MS = 24 * 60 * 60 * 1_000;
 export const PIPELINE_WALLCLOCK_WARNING_RATIO = 0.8 as const;
@@ -35,7 +33,7 @@ export const systemPipelineWallclockScheduler: PipelineWallclockScheduler = {
  * minutes, or hours with no whitespace, sign, decimal, or compound unit.
  */
 export function parsePipelineWallclockLimit(value?: string) {
-  if (value === undefined) return DEFAULT_PIPELINE_WALLCLOCK_LIMIT_MS;
+  if (value === undefined) return undefined;
   if (typeof value !== "string" || !CANONICAL_WALLCLOCK_LIMIT.test(value)) {
     throw new Error(
       "wallclock_limit must be a canonical integer duration such as 30s, 5m, or 2h.",

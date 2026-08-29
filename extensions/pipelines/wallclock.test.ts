@@ -19,7 +19,6 @@ import {
 } from "./session.ts";
 import { Check } from "typebox/value";
 import {
-  DEFAULT_PIPELINE_WALLCLOCK_LIMIT_MS,
   MAX_PIPELINE_WALLCLOCK_LIMIT_MS,
   MIN_PIPELINE_WALLCLOCK_LIMIT_MS,
   parsePipelineWallclockLimit,
@@ -109,11 +108,8 @@ function flush() {
   return new Promise<void>((resolve) => setImmediate(resolve));
 }
 
-test("wallclock parser accepts canonical inclusive bounds and defaults omission", () => {
-  assert.equal(
-    parsePipelineWallclockLimit(),
-    DEFAULT_PIPELINE_WALLCLOCK_LIMIT_MS,
-  );
+test("wallclock parser accepts canonical inclusive bounds and disables omission", () => {
+  assert.equal(parsePipelineWallclockLimit(), undefined);
   assert.equal(
     parsePipelineWallclockLimit("30s"),
     MIN_PIPELINE_WALLCLOCK_LIMIT_MS,
@@ -148,15 +144,16 @@ test("wallclock parser accepts canonical inclusive bounds and defaults omission"
   }
 });
 
-test("public pipeline input keeps the limit canonical and bounded", () => {
+test("public pipeline input keeps the limit optional, canonical, and bounded", () => {
+  const request = {
+    pipeline_name: "bounded-wallclock-plan",
+    pipeline: "plan-pipeline",
+    task: "Produce a plan",
+    plan_path: null,
+  };
+  assert.equal(Check(PIPELINE_RUN_PARAMETERS, request), true);
   assert.equal(
-    Check(PIPELINE_RUN_PARAMETERS, {
-      pipeline_name: "bounded-wallclock-plan",
-      pipeline: "plan-pipeline",
-      task: "Produce a plan",
-      plan_path: null,
-      wallclock_limit: "5m",
-    }),
+    Check(PIPELINE_RUN_PARAMETERS, { ...request, wallclock_limit: "5m" }),
     true,
   );
   for (const wallclock_limit of [
@@ -191,6 +188,35 @@ test("public pipeline input keeps the limit canonical and bounded", () => {
       true,
     );
   }
+});
+
+test("controller leaves timing disabled when the caller omits a limit", async () => {
+  const clock = new FakeClock();
+  const scheduler = new FakeScheduler(clock);
+  const controller = new PipelineController({
+    createSessionFactory: () => ({
+      async create(spec) {
+        return new FakeSession(spec);
+      },
+    }),
+    onHandoff: () => {},
+    makeRunId: () => "untimed-wallclock-plan-00000001",
+    clock,
+    scheduler,
+  });
+  const runId = controller.start({
+    pipelineName: "untimed-wallclock-plan",
+    pipeline: "plan-pipeline",
+    task: "Produce a plan",
+    workingDir: "/tmp",
+    gitCommit: false,
+    planPath: null,
+  });
+  const run = controller.get(runId);
+  assert.equal(run?.wallclockLimitMs, undefined);
+  assert.equal(run?.stageTiming, undefined);
+  assert.equal(run?.wallclock, undefined);
+  await controller.dispose();
 });
 
 test("controller rejects out-of-range limits before inserting or creating a run", () => {
