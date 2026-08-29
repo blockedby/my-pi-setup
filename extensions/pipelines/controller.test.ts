@@ -1131,6 +1131,7 @@ test("canonical ID admission retries live and namespace collisions before discov
     pipelineName: "token-injected-plan",
     pipeline: "plan-pipeline",
     gitCommit: false,
+    planPath: null,
   });
   assert.equal(tokenId, "token-injected-plan-deadbeef");
   await tokenInjected.controller.dispose();

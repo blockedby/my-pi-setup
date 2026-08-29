@@ -141,6 +141,12 @@ const NON_PLAN_PIPELINE_PARAMETERS = Type.Object(
 
 const PLAN_PIPELINE_PARAMETERS = Type.Object(
   {
+    pipeline_name: Type.String({
+      description: PIPELINE_NAME_DESCRIPTION,
+      minLength: 1,
+      maxLength: PIPELINE_NAME_MAX_LENGTH,
+      pattern: PIPELINE_NAME_PATTERN,
+    }),
     pipeline: Type.Literal("plan-pipeline"),
     ...PIPELINE_RUN_COMMON_PROPERTIES,
     plan_path: PLAN_PATH_PARAMETER,

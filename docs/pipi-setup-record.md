@@ -1658,3 +1658,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/feature-worktrees.ts`, `extensions/pipelines/feature-worktrees.test.ts`, `extensions/pipelines/controller.test.ts`, and this record. Prior-run refs, unrelated registered worktrees, installed runtime state, credentials, model overrides, submodules, and external state are unchanged.
 - **Verification:** Focused controller and real-Git lifecycle checks passed 63/63. Fresh `env -u BROWSER_CHROME_NODE bun run test` passed 64 installer/script tests, 321 extension tests, and 22 file-search tests; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed. Closure audit integrated all five tracks exactly once, closed `RACE-001` and `AUD-001`, and reported no findings, unresolved conflicts, or unproven checks.
 - **Pending:** No runtime install or reload was requested.
+
+## Operation entry: integrate named pipeline identity with Luna-only planning
+
+- **Request:** Rebase and merge the collision-safe named-pipeline implementation, then update the local Pipi instance.
+- **Action:** Rebased the feature branch onto the current canonical `main`, preserving the newer six-Luna discovery plus Luna/xHIGH `plan-pipeline` graph and its explicit `plan_path` contract while applying required `pipeline_name` validation to both plan and non-plan tool variants. Updated the canonical-ID plan controller test to supply the current explicit null output path.
+- **Affected paths or values:** `extensions/pipelines/index.ts`, `extensions/pipelines/controller.test.ts`, and this record. Runtime installation, merge, and rollout verification remain pending; credentials, model overrides, submodule pins, and external state are unchanged.
+- **Verification:** Post-rebase pipeline schema/controller checks passed 61/61; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed. Complete deterministic verification remains pending.
+- **Pending:** Complete verification, update PR #85, merge to `main`, install from canonical source, and verify the managed runtime.

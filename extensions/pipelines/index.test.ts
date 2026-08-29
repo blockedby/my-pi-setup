@@ -221,6 +221,7 @@ test("canonical pipeline ids preserve the base and append an exact token", () =>
 test("pipeline_run schema makes plan_path required only for plan definitions", () => {
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "plan-approved-feature",
       pipeline: "plan-pipeline",
       task: "Plan a feature",
       plan_path: null,
@@ -229,6 +230,7 @@ test("pipeline_run schema makes plan_path required only for plan definitions", (
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "plan-approved-feature",
       pipeline: "plan-pipeline",
       task: "Plan a feature",
     }),
@@ -236,6 +238,7 @@ test("pipeline_run schema makes plan_path required only for plan definitions", (
   );
   assert.equal(
     Check(PIPELINE_RUN_PARAMETERS, {
+      pipeline_name: "audit-approved-feature",
       pipeline: "audit-pipeline",
       task: "Audit a feature",
       plan_path: "unsafe.plan",
