@@ -1700,3 +1700,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/{controller,wallclock,wallclock.test}.ts`, `extensions/pipelines/controller.test.ts`, `extensions/shared/agent-tree.test.ts`, and this record. No runtime installation, credentials, model overrides, submodule pins, feature refs, external services, or delivery state changed.
 - **Verification:** All pipeline and agent-tree deterministic tests passed 179/179; `bun run check`, `bun run format:check`, and `git diff --check` passed. The final audit also recorded an installer fixture failure under ambient `BROWSER_CHROME_NODE`; full repository verification is rerun separately with that environment override removed.
 - **Pending:** Run the final repository-declared deterministic suite, submodule and installer checks, then complete the pipeline with one resolution record for each final finding ID.
+
+## Operation entry: verify remediated pipeline wallclock implementation
+
+- **Request:** Complete the repository-declared verification for the remediated issue #84 wallclock implementation without rollout or external delivery actions.
+- **Action:** Prepared the repository dependency cache and reran focused pipeline/agent-tree tests plus the deterministic installer, extension, and file-search suites with the ambient fake-Bun browser override removed. Ran TypeScript, formatting, exact-submodule, installer-state, and committed-diff whitespace checks.
+- **Affected paths or values:** Verification covered the current feature branch and its existing source/docs/test changes; no installed runtime, credentials, model overrides, submodule pins, feature refs, external services, or delivery state changed.
+- **Verification:** `bun run install:dependencies` completed with no dependency changes; focused pipeline/agent-tree tests passed 179/179; `env -u BROWSER_CHROME_NODE bun run test:deterministic` passed 64 installer, 331 extension, and 22 file-search tests; `bun run check`, `bun run format:check`, `bun run check:submodules`, `bun run check:pipi-install`, `git diff --check`, and `git diff origin/main..HEAD --check` passed. No live model/backend run was used.
+- **Pending:** None for repository verification; reload/runtime rollout and GitHub delivery remain intentionally unrequested.
