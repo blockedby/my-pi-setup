@@ -6,7 +6,7 @@ export const MIN_PIPELINE_WALLCLOCK_LIMIT_MS = 30 * 1_000;
 export const MAX_PIPELINE_WALLCLOCK_LIMIT_MS = 24 * 60 * 60 * 1_000;
 export const PIPELINE_WALLCLOCK_WARNING_RATIO = 0.8 as const;
 export const PIPELINE_WALLCLOCK_LIMIT_PATTERN =
-  "^(?:(?:[3-9][0-9]|[1-9][0-9]{2}|[1-7][0-9]{3}|8[0-5][0-9]{2}|86[0-3][0-9]|86400)s|(?:[1-9]|[1-9][0-9]|[1-9][0-9]{2}|1[0-3][0-9]{2}|14[0-3][0-9]|1440)m|(?:[1-9]|1[0-9]|2[0-4])h)$";
+  "^(?:(?:[3-9][0-9]|[1-9][0-9]{2}|[1-9][0-9]{3}|[1-7][0-9]{4}|8[0-5][0-9]{3}|86[0-3][0-9]{2}|86400)s|(?:[1-9]|[1-9][0-9]|[1-9][0-9]{2}|1[0-3][0-9]{2}|14[0-3][0-9]|1440)m|(?:[1-9]|1[0-9]|2[0-4])h)$";
 
 const CANONICAL_WALLCLOCK_LIMIT = new RegExp(PIPELINE_WALLCLOCK_LIMIT_PATTERN);
 

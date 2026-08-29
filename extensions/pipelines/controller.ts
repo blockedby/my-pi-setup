@@ -612,7 +612,11 @@ export class PipelineController {
     );
   }
 
-  private enterStage(run: MutableRun, stage: PipelineStage) {
+  private enterStage(
+    run: MutableRun,
+    stage: PipelineStage,
+    startedAtMs?: number,
+  ) {
     if (run.stage === stage && (run.stageTiming || stage === "complete")) {
       this.syncWarnings(run);
       return;
@@ -620,16 +624,16 @@ export class PipelineController {
     this.cancelStageTimers(run);
     run.stage = stage;
     if (timedPipelineStage(run.definition, stage)) {
-      const startedAtMs = this.monotonicNow(run);
+      const stageStartedAtMs = startedAtMs ?? this.monotonicNow(run);
       const epoch = (run.stageTiming?.epoch ?? 0) + 1;
       const warningOffset = Math.floor((run.wallclockLimitMs * 4) / 5);
       run.stageTiming = {
         definition: run.definition,
         stage,
         epoch,
-        startedAtMs,
-        warningAtMs: startedAtMs + warningOffset,
-        deadlineAtMs: startedAtMs + run.wallclockLimitMs,
+        startedAtMs: stageStartedAtMs,
+        warningAtMs: stageStartedAtMs + warningOffset,
+        deadlineAtMs: stageStartedAtMs + run.wallclockLimitMs,
         warningReached: false,
         elapsedMs: 0,
         remainingMs: run.wallclockLimitMs,
@@ -901,9 +905,14 @@ export class PipelineController {
   }
 
   private fallbackPartials(run: MutableRun, timing: PipelineStageTiming) {
-    const known = [...run.executionPartials.values()];
+    const eligible = (agent: AgentNodeSnapshot | undefined) =>
+      agent && agent.status !== "error" && agent.status !== "cancelled";
+    const known = [...run.executionPartials.values()].filter((partial) =>
+      eligible(this.tree.view.get(partial.sessionId)),
+    );
     const knownSessions = new Set(known.map((partial) => partial.sessionId));
     for (const agent of this.agentsFor(run.id)) {
+      if (!eligible(agent)) continue;
       if (knownSessions.has(agent.id)) continue;
       if (this.sessionStage(run, agent.role) !== timing.stage) continue;
       const output = agent.liveAssistant?.text.trim() || agent.finalText.trim();
@@ -1327,7 +1336,7 @@ export class PipelineController {
     this.runs.set(id, run);
     // The initial stage budget starts at admitted run insertion, before the
     // asynchronous root/session initialization below.
-    this.enterStage(run, run.stage);
+    this.enterStage(run, run.stage, wallclockStartedAtMs);
     this.notify();
     void this.initialize(run);
     return id;
@@ -2673,9 +2682,11 @@ export class PipelineController {
     run.status = "failed";
     run.finishedAt = Date.now();
     run.error = error.slice(0, 16 * 1024);
-    void this.cleanupTerminal(run, cancelRoot).catch(() => {});
+    void this.cleanupTerminal(run, cancelRoot).then(
+      () => this.deliver(run),
+      () => this.deliver(run),
+    );
     this.notify();
-    this.deliver(run);
   }
 
   private factsForFailure(run: MutableRun): PipelineCompletionFacts {

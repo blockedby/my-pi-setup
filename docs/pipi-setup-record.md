@@ -1692,3 +1692,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/controller.ts`, `extensions/pipelines/session.ts`, `extensions/shared/agent-tree/{control,domain}.ts`, focused tests, and this record. Installed runtime, credentials, model overrides, submodule pins, feature refs, external services, and delivery state are unchanged.
 - **Verification:** Focused controller, wallclock, session, and agent-tree tests passed 65/65; `bun run check`, `bun run format:check`, and `git diff --check` passed. Full deterministic, exact-submodule, and installer verification remain pending for the final audit workspace.
 - **Pending:** Run the controller-owned final audit and all repository-declared final verification; no runtime rollout or reload is requested.
+
+## Operation entry: resolve final wallclock audit findings
+
+- **Request:** Resolve every concrete finding delivered by the controller-owned final audit for issue #84 without starting another audit or changing delivery state.
+- **Action:** Chained failed-run handoff delivery after bounded idempotent cleanup, excluded failed/cancelled sessions from limited fallback partials, expanded canonical seconds admission through the inclusive 24-hour boundary, and anchored the initial stage epoch to the admitted wallclock timestamp. Added parser/schema boundary coverage and agent-tree identity coverage.
+- **Affected paths or values:** `extensions/pipelines/{controller,wallclock,wallclock.test}.ts`, `extensions/pipelines/controller.test.ts`, `extensions/shared/agent-tree.test.ts`, and this record. No runtime installation, credentials, model overrides, submodule pins, feature refs, external services, or delivery state changed.
+- **Verification:** All pipeline and agent-tree deterministic tests passed 179/179; `bun run check`, `bun run format:check`, and `git diff --check` passed. The final audit also recorded an installer fixture failure under ambient `BROWSER_CHROME_NODE`; full repository verification is rerun separately with that environment override removed.
+- **Pending:** Run the final repository-declared deterministic suite, submodule and installer checks, then complete the pipeline with one resolution record for each final finding ID.

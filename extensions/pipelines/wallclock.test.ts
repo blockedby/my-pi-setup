@@ -123,6 +123,12 @@ test("wallclock parser accepts canonical inclusive bounds and defaults omission"
     MAX_PIPELINE_WALLCLOCK_LIMIT_MS,
   );
   assert.equal(parsePipelineWallclockLimit("5m"), 300_000);
+  for (const value of ["8640s", "9000s", "36000s", "86399s", "86400s"]) {
+    assert.equal(
+      parsePipelineWallclockLimit(value),
+      Number(value.slice(0, -1)) * 1_000,
+    );
+  }
   for (const value of [
     "0s",
     "029s",
@@ -135,6 +141,8 @@ test("wallclock parser accepts canonical inclusive bounds and defaults omission"
     "9007199254740992s",
     "29s",
     "25h",
+    "86401s",
+    "90000s",
   ]) {
     assert.throws(() => parsePipelineWallclockLimit(value), /wallclock_limit/);
   }
@@ -151,7 +159,15 @@ test("public pipeline input keeps the limit canonical and bounded", () => {
     }),
     true,
   );
-  for (const wallclock_limit of ["29s", "30.5s", "30 s", "25h", 30]) {
+  for (const wallclock_limit of [
+    "29s",
+    "30.5s",
+    "30 s",
+    "25h",
+    "86401s",
+    "90000s",
+    30,
+  ]) {
     assert.equal(
       Check(PIPELINE_RUN_PARAMETERS, {
         pipeline_name: "bounded-wallclock-plan",
@@ -161,6 +177,18 @@ test("public pipeline input keeps the limit canonical and bounded", () => {
         wallclock_limit,
       }),
       false,
+    );
+  }
+  for (const wallclock_limit of ["8640s", "9000s", "36000s", "86399s"]) {
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, {
+        pipeline_name: "bounded-wallclock-plan",
+        pipeline: "plan-pipeline",
+        task: "Produce a plan",
+        plan_path: null,
+        wallclock_limit,
+      }),
+      true,
     );
   }
 });
