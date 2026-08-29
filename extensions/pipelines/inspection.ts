@@ -4,6 +4,10 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  PIPELINE_RUN_ID_MAX_LENGTH,
+  PIPELINE_RUN_ID_PATTERN,
+} from "./pipeline-identity.ts";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import {
   AUDIT_SYNTHESIS_ROLE,
@@ -33,9 +37,11 @@ const CHECK_TRUNCATION_MARKER =
 export const PIPELINE_CHECK_PARAMETERS = Type.Object(
   {
     id: Type.String({
-      description: "Session-scoped pipeline run id to inspect.",
+      description:
+        "Canonical pipeline run id returned by pipeline_run (the supplied name plus eight lowercase hexadecimal characters).",
       minLength: 1,
-      maxLength: 1024,
+      maxLength: PIPELINE_RUN_ID_MAX_LENGTH,
+      pattern: PIPELINE_RUN_ID_PATTERN,
     }),
   },
   { additionalProperties: false },

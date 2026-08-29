@@ -27,26 +27,30 @@ function snapshot(
 
 test("pipeline cancellation schema is bounded, non-empty, unique, and exact", () => {
   assert.equal(
-    Check(PIPELINE_CANCEL_PARAMETERS, { ids: ["pipeline-1"] }),
+    Check(PIPELINE_CANCEL_PARAMETERS, {
+      ids: ["cancel-me-now-00000001"],
+    }),
     true,
   );
   assert.equal(Check(PIPELINE_CANCEL_PARAMETERS, { ids: [] }), false);
   assert.equal(
-    Check(PIPELINE_CANCEL_PARAMETERS, { ids: ["pipeline-1", "pipeline-1"] }),
+    Check(PIPELINE_CANCEL_PARAMETERS, {
+      ids: ["cancel-me-now-00000001", "cancel-me-now-00000001"],
+    }),
     false,
   );
   assert.equal(
     Check(PIPELINE_CANCEL_PARAMETERS, {
       ids: Array.from(
         { length: PIPELINE_CANCEL_MAX_IDS + 1 },
-        (_, index) => `pipeline-${index}`,
+        (_, index) => `cancel-me-now-${index.toString(16).padStart(8, "0")}`,
       ),
     }),
     false,
   );
   assert.equal(
     Check(PIPELINE_CANCEL_PARAMETERS, {
-      ids: ["pipeline-1"],
+      ids: ["cancel-me-now-00000001"],
       child_id: "agent-1",
     }),
     false,

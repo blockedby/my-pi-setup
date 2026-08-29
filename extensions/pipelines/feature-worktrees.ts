@@ -84,6 +84,7 @@ export interface FeatureWorktreeLifecycle {
 
 export interface FeatureGitOperations {
   preflight(workingDir: string): FeatureCallerWorktree;
+  namespaceAvailable(caller: FeatureCallerWorktree, runId: string): boolean;
   createLifecycle(
     caller: FeatureCallerWorktree,
     runId: string,
@@ -282,12 +283,38 @@ export function validateDedicatedFeatureWorktree(
   };
 }
 
+function featureNamespace(runId: string) {
+  return `pipi-feature/${runId}`;
+}
+
 function branchSlug(runId: string) {
-  const safe = runId
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .slice(0, 48);
-  return `pipi-feature/${safe || "run"}`;
+  return featureNamespace(runId);
+}
+
+export function featureNamespaceAvailable(
+  caller: FeatureCallerWorktree,
+  runId: string,
+) {
+  const namespace = featureNamespace(runId);
+  const refs = requireGit(
+    caller.workingDir,
+    ["for-each-ref", "--format=%(refname)", `refs/heads/${namespace}`],
+    "Unable to inspect retained feature refs",
+  );
+  if (refs) return false;
+  const worktrees = parseWorktreeList(
+    requireGit(
+      caller.workingDir,
+      ["worktree", "list", "--porcelain"],
+      "Unable to inspect registered feature worktrees",
+    ),
+  );
+  return !worktrees.some(
+    (entry) =>
+      typeof entry.branch === "string" &&
+      (entry.branch === `refs/heads/${namespace}` ||
+        entry.branch.startsWith(`refs/heads/${namespace}/`)),
+  );
 }
 
 function roleSlug(role: FeatureCandidateRole) {
@@ -319,6 +346,128 @@ function readChangedPaths(cwd: string, from: string, to: string) {
     "Unable to inspect changed paths",
   );
   return value ? value.split("\n").filter(Boolean) : [];
+}
+
+function readStagedPaths(cwd: string) {
+  const value = requireGit(
+    cwd,
+    ["diff", "--cached", "--name-only", "--no-renames", "--"],
+    "Unable to inspect staged paths",
+  );
+  return value ? value.split("\n").filter(Boolean) : [];
+}
+
+function pathHasExternalSymlink(cwd: string, filePath: string) {
+  const worktreeRoot = path.resolve(cwd);
+  const absolutePath = path.resolve(cwd, filePath);
+  const relativePath = path.relative(worktreeRoot, absolutePath);
+  if (
+    path.isAbsolute(relativePath) ||
+    relativePath.startsWith(`..${path.sep}`)
+  ) {
+    return true;
+  }
+
+  let currentPath = worktreeRoot;
+  for (const part of relativePath.split(path.sep).filter(Boolean)) {
+    currentPath = path.join(currentPath, part);
+    const seen = new Set<string>();
+    while (true) {
+      if (
+        currentPath !== worktreeRoot &&
+        !currentPath.startsWith(`${worktreeRoot}${path.sep}`)
+      ) {
+        return true;
+      }
+      let stats: fs.Stats;
+      try {
+        stats = fs.lstatSync(currentPath);
+      } catch {
+        break;
+      }
+      if (!stats.isSymbolicLink()) break;
+      if (seen.has(currentPath)) return true;
+      seen.add(currentPath);
+      currentPath = path.resolve(
+        path.dirname(currentPath),
+        fs.readlinkSync(currentPath),
+      );
+    }
+  }
+  return false;
+}
+
+const generatedDirectoryNames = new Set([
+  "node_modules",
+  ".cache",
+  ".pi",
+  ".pi-subagents",
+]);
+const generatedRootDirectoryNames = new Set([
+  "bin",
+  "build",
+  "dist",
+  "coverage",
+  "tmp",
+  "temp",
+]);
+
+function isGeneratedArtifactPath(filePath: string) {
+  const parts = filePath.split("/");
+  return (
+    parts.some((part) => generatedDirectoryNames.has(part)) ||
+    (parts.length > 0 && generatedRootDirectoryNames.has(parts[0]!))
+  );
+}
+
+function readIgnoredStagedPaths(
+  cwd: string,
+  stagedPaths: ReadonlyArray<string>,
+) {
+  return stagedPaths.filter((filePath) => {
+    try {
+      execFileSync("git", ["check-ignore", "--no-index", "--", filePath], {
+        cwd,
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function rollbackOwnedFeatureBranches(
+  cwd: string,
+  ownedBranchRefs: ReadonlyMap<string, string>,
+) {
+  const failures: string[] = [];
+  for (const [branchRef, expectedCommit] of [
+    ...ownedBranchRefs.entries(),
+  ].reverse()) {
+    try {
+      requireGit(
+        cwd,
+        ["update-ref", "-d", `refs/heads/${branchRef}`, expectedCommit],
+        `Unable to roll back controller-owned branch ${branchRef}`,
+      );
+    } catch (error) {
+      failures.push(boundedDiagnostic(error));
+    }
+  }
+  return failures;
+}
+
+export function candidateReservationFailure(
+  error: unknown,
+  rollbackFailures: ReadonlyArray<string>,
+) {
+  if (rollbackFailures.length === 0) {
+    return error instanceof Error ? error : new Error(boundedDiagnostic(error));
+  }
+  return new Error(
+    `${boundedDiagnostic(error)} Candidate reservation rollback also failed: ${rollbackFailures.join(" ")}`,
+  );
 }
 
 function equalUniquePathSets(
@@ -496,9 +645,11 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
   readonly runId: string;
   readonly temporaryRoot: string;
   private readonly ownedWorktreePaths = new Set<string>();
+  private readonly ownedBranchRefs = new Map<string, string>();
   private readonly candidateHeads = new Map<FeatureCandidateRole, string>();
   private selectionDirectory?: string;
   private synthesis?: FeatureSynthesisWorktree;
+  private candidateWorktrees?: ReadonlyArray<FeatureTemporaryWorktree>;
   private cleaned = false;
 
   constructor(caller: FeatureCallerWorktree, runId: string) {
@@ -524,9 +675,21 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       `Unable to create controller-owned worktree ${branchRef}`,
     );
     this.ownedWorktreePaths.add(worktreePath);
+    this.ownedBranchRefs.set(branchRef, commit);
+  }
+
+  private rollbackCandidateReservation() {
+    return [
+      ...this.cleanup(),
+      ...rollbackOwnedFeatureBranches(
+        this.caller.workingDir,
+        this.ownedBranchRefs,
+      ),
+    ];
   }
 
   createCandidateWorktrees() {
+    if (this.candidateWorktrees) return this.candidateWorktrees;
     const base = branchSlug(this.runId);
     const worktrees = (["Minimal", "Robust", "Architectural"] as const).map(
       (role) => ({
@@ -544,10 +707,13 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
           this.caller.baseCommit,
         );
       }
+      this.candidateWorktrees = worktrees;
       return worktrees;
     } catch (error) {
-      this.cleanup();
-      throw error;
+      throw candidateReservationFailure(
+        error,
+        this.rollbackCandidateReservation(),
+      );
     }
   }
 
@@ -751,6 +917,26 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       ["add", "-A", "--"],
       "Unable to stage feature implementation",
     );
+    const stagedPaths = readStagedPaths(resolved);
+    const ignoredStagedPaths = new Set(
+      readIgnoredStagedPaths(resolved, stagedPaths),
+    );
+    const generated = stagedPaths.filter(
+      (item) =>
+        ignoredStagedPaths.has(item) ||
+        isGeneratedArtifactPath(item) ||
+        pathHasExternalSymlink(resolved, item),
+    );
+    if (generated.length > 0) {
+      requireGit(
+        resolved,
+        ["reset", "--quiet", "--", ...stagedPaths],
+        "Unable to unstage generated feature artifacts",
+      );
+      throw new Error(
+        `Feature commit contains generated or host-controlled paths: ${generated.slice(0, 16).join(", ")}.`,
+      );
+    }
     const commitArgs = [
       "commit",
       "-m",
@@ -919,6 +1105,7 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
 
 export const defaultFeatureGitOperations: FeatureGitOperations = {
   preflight: validateDedicatedFeatureWorktree,
+  namespaceAvailable: featureNamespaceAvailable,
   createLifecycle: (caller, runId) =>
     new GitFeatureWorktreeLifecycle(caller, runId),
 };

@@ -5,8 +5,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import {
+  candidateReservationFailure,
   cleanupOwnedFeatureWorktreePaths,
   defaultFeatureGitOperations,
+  featureNamespaceAvailable,
+  rollbackOwnedFeatureBranches,
   validateDedicatedFeatureWorktree,
 } from "./feature-worktrees.ts";
 import type {
@@ -24,7 +27,10 @@ function git(cwd: string, args: ReadonlyArray<string>) {
   }).trim();
 }
 
-function fixture() {
+function fixture({
+  trackedGeneratedPath = false,
+  trackedSymlink = false,
+}: { trackedGeneratedPath?: boolean; trackedSymlink?: boolean } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-best-three-git-"));
   const primary = path.join(root, "primary");
   const caller = path.join(root, "caller");
@@ -33,6 +39,13 @@ function fixture() {
   git(primary, ["config", "user.email", "test@example.com"]);
   git(primary, ["config", "user.name", "Test"]);
   fs.writeFileSync(path.join(primary, "base.txt"), "base\n");
+  if (trackedGeneratedPath) {
+    fs.mkdirSync(path.join(primary, "node_modules"));
+    fs.writeFileSync(path.join(primary, "node_modules", "lock.json"), "{}\n");
+  }
+  if (trackedSymlink) {
+    fs.symlinkSync("base.txt", path.join(primary, "tracked-link"));
+  }
   git(primary, ["add", "."]);
   git(primary, ["commit", "-qm", "baseline"]);
   git(primary, ["worktree", "add", "-qb", "feat/caller", caller, "HEAD"]);
@@ -147,7 +160,7 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
     const caller = defaultFeatureGitOperations.preflight(repo.caller);
     const lifecycle = defaultFeatureGitOperations.createLifecycle(
       caller,
-      "run-integration",
+      "replace-heavy-plan-pipeline-f82091ba",
     );
     assert.equal(
       path.dirname(lifecycle.temporaryRoot),
@@ -169,6 +182,14 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
       branchRef,
       headCommit,
     }));
+    assert.deepEqual(
+      candidateRefs.map(({ branchRef }) => branchRef),
+      [
+        "pipi-feature/replace-heavy-plan-pipeline-f82091ba/candidate-minimal",
+        "pipi-feature/replace-heavy-plan-pipeline-f82091ba/candidate-robust",
+        "pipi-feature/replace-heavy-plan-pipeline-f82091ba/candidate-architectural",
+      ],
+    );
 
     const selectionDirectory = lifecycle.prepareSelectionDirectory();
     assert.deepEqual(fs.readdirSync(selectionDirectory), []);
@@ -223,6 +244,240 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
       git(repo.caller, ["rev-parse", synthesis.branchRef]),
       finalCommit,
     );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("feature namespace admission protects retained refs and registered branches", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const occupied = "namespace-collision-test-a1b2c3d4";
+    git(repo.caller, [
+      "branch",
+      `pipi-feature/${occupied}/candidate-minimal`,
+      "HEAD",
+    ]);
+    assert.equal(featureNamespaceAvailable(caller, occupied), false);
+    const registered = "namespace-registered-test-c3d4e5f6";
+    const registeredPath = path.join(repo.root, "registered");
+    git(repo.primary, [
+      "worktree",
+      "add",
+      "-qb",
+      `pipi-feature/${registered}/candidate-robust`,
+      registeredPath,
+      "HEAD",
+    ]);
+    assert.equal(featureNamespaceAvailable(caller, registered), false);
+    git(repo.primary, ["worktree", "remove", "--force", registeredPath]);
+    const free = "namespace-free-test-e5f6a7b8";
+    assert.equal(featureNamespaceAvailable(caller, free), true);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("candidate reservation race preserves a competing registered worktree and rolls back only owned refs", () => {
+  const repo = fixture();
+  const competingPath = path.join(repo.root, "competing");
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const runId = "namespace-race-test-a1b2c3d4";
+    assert.equal(featureNamespaceAvailable(caller, runId), true);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      runId,
+    );
+    const temporaryRoot = lifecycle.temporaryRoot;
+    const competingRef = `pipi-feature/${runId}/candidate-robust`;
+    git(repo.primary, [
+      "worktree",
+      "add",
+      "-qb",
+      competingRef,
+      competingPath,
+      caller.baseCommit,
+    ]);
+
+    assert.throws(
+      () => lifecycle.createCandidateWorktrees(),
+      /Unable to create controller-owned worktree.*candidate-robust/,
+    );
+
+    assert.equal(fs.existsSync(temporaryRoot), false);
+    const registered = git(repo.caller, ["worktree", "list", "--porcelain"]);
+    assert.doesNotMatch(registered, new RegExp(temporaryRoot));
+    assert.match(registered, new RegExp(competingPath));
+    assert.match(registered, new RegExp(`refs/heads/${competingRef}`));
+    assert.equal(git(competingPath, ["rev-parse", "HEAD"]), caller.baseCommit);
+    assert.equal(
+      git(repo.caller, ["rev-parse", competingRef]),
+      caller.baseCommit,
+    );
+    for (const role of ["minimal", "architectural"]) {
+      assert.throws(() =>
+        git(repo.caller, [
+          "rev-parse",
+          "--verify",
+          `pipi-feature/${runId}/candidate-${role}`,
+        ]),
+      );
+    }
+  } finally {
+    try {
+      git(repo.primary, ["worktree", "remove", "--force", competingPath]);
+    } catch {
+      // The fixture remains disposable if setup failed before registration.
+    }
+    repo.cleanup();
+  }
+});
+
+test("conditional rollback preserves retargeted refs and composes failure diagnostics", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const branchRef = "pipi-feature/retarget-test-a1b2c3d4/candidate-minimal";
+    git(repo.primary, ["branch", branchRef, caller.baseCommit]);
+    fs.writeFileSync(path.join(repo.primary, "retarget.txt"), "retargeted\n");
+    git(repo.primary, ["add", "retarget.txt"]);
+    git(repo.primary, ["commit", "-qm", "retarget branch"]);
+    const retargetedCommit = git(repo.primary, ["rev-parse", "HEAD"]);
+    git(repo.primary, [
+      "update-ref",
+      `refs/heads/${branchRef}`,
+      retargetedCommit,
+      caller.baseCommit,
+    ]);
+
+    const rollbackFailures = rollbackOwnedFeatureBranches(
+      repo.caller,
+      new Map([[branchRef, caller.baseCommit]]),
+    );
+    assert.equal(rollbackFailures.length, 1);
+    assert.equal(git(repo.caller, ["rev-parse", branchRef]), retargetedCommit);
+
+    const combined = candidateReservationFailure(
+      new Error("candidate robust reservation failed"),
+      rollbackFailures,
+    );
+    assert.match(combined.message, /candidate robust reservation failed/);
+    assert.match(
+      combined.message,
+      /Unable to roll back controller-owned branch.*candidate-minimal/,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("feature commits reject generated dependency symlinks before commit", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "artifact-safe-feature-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(path.join(minimal.path, "implementation.txt"), "ok\n");
+    fs.symlinkSync("/tmp", path.join(minimal.path, "node_modules"));
+    assert.throws(
+      () => lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path),
+      /generated or host-controlled paths/,
+    );
+    assert.equal(git(minimal.path, ["diff", "--cached", "--name-only"]), "");
+    fs.rmSync(path.join(minimal.path, "node_modules"));
+    const head = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+    );
+    assert.equal(
+      git(minimal.path, ["ls-tree", "--name-only", head, "--", "node_modules"]),
+      "",
+    );
+    assert.equal(
+      git(minimal.path, [
+        "ls-tree",
+        "--name-only",
+        head,
+        "--",
+        "implementation.txt",
+      ]),
+      "implementation.txt",
+    );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("feature commits permit legitimate nested paths and in-repository symlinks", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "legitimate-source-paths-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.mkdirSync(path.join(minimal.path, "src", "bin"), { recursive: true });
+    fs.mkdirSync(path.join(minimal.path, "docs", "tmp"), { recursive: true });
+    fs.writeFileSync(path.join(minimal.path, "implementation.txt"), "ok\n");
+    fs.writeFileSync(
+      path.join(minimal.path, "src", "bin", "tool.ts"),
+      "tool\n",
+    );
+    fs.writeFileSync(
+      path.join(minimal.path, "docs", "tmp", "example.md"),
+      "example\n",
+    );
+    fs.symlinkSync(
+      "../implementation.txt",
+      path.join(minimal.path, "src", "link.txt"),
+    );
+
+    const head = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+    );
+    assert.equal(
+      git(minimal.path, ["ls-tree", "-r", "--name-only", head]),
+      "base.txt\ndocs/tmp/example.md\nimplementation.txt\nsrc/bin/tool.ts\nsrc/link.txt",
+    );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("feature commits reject tracked generated paths and retargeted symlinks", () => {
+  const repo = fixture({ trackedGeneratedPath: true, trackedSymlink: true });
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "tracked-artifact-safety-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(
+      path.join(minimal.path, "node_modules", "lock.json"),
+      "changed\n",
+    );
+    fs.rmSync(path.join(minimal.path, "tracked-link"));
+    fs.symlinkSync("/tmp", path.join(minimal.path, "tracked-link"));
+
+    assert.throws(
+      () => lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path),
+      /generated or host-controlled paths/,
+    );
+    assert.equal(git(minimal.path, ["diff", "--cached", "--name-only"]), "");
+    lifecycle.cleanup();
   } finally {
     repo.cleanup();
   }
