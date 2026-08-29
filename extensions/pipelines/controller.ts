@@ -48,6 +48,8 @@ import {
   type PipelineRunRequest,
   type PipelineRunSnapshot,
   type PipelineStage,
+  type PipelineExecutionPartial,
+  type PipelineWallclockLimitation,
 } from "./domain.ts";
 import {
   resolvePlanOutputPath,
@@ -111,6 +113,18 @@ import {
   canonicalPipelineId,
   securePipelineToken,
 } from "./pipeline-identity.ts";
+import {
+  DEFAULT_PIPELINE_WALLCLOCK_LIMIT_MS,
+  parsePipelineWallclockLimit,
+  stageTimingAt,
+  systemPipelineMonotonicClock,
+  systemPipelineWallclockScheduler,
+  timedPipelineStage,
+  type PipelineMonotonicClock,
+  type PipelineStageTiming,
+  type PipelineWallclockScheduler,
+  type PipelineWallclockState,
+} from "./wallclock.ts";
 
 export function pipelineDiscoveryToolAllowed(
   definition: PipelineDefinitionId,
@@ -227,6 +241,22 @@ interface MutableRun {
   rootId?: string;
   rootReady: Promise<void>;
   resolveRootReady: () => void;
+  wallclockLimitMs: number;
+  wallclockStartedAtMs: number;
+  stageTiming?: PipelineStageTiming;
+  wallclockProjection?: PipelineWallclockState;
+  wallclockTimerCancel?: () => void;
+  warningTimerCancel?: () => void;
+  warnedSessions: Set<string>;
+  pendingWarnings: Set<string>;
+  executionPartials: Map<string, PipelineExecutionPartial>;
+  executionSessionTokens: Map<string, string>;
+  executionSessionEpochs: Map<string, number>;
+  limitation?: PipelineWallclockLimitation;
+  limiting?: boolean;
+  cleanup?: Promise<void>;
+  featureCleanupDone: boolean;
+  lastMonotonicNow?: number;
   cancellation?: Promise<PipelineRunSnapshot>;
   featureDiscoveryBootstrapped: boolean;
   featureDiscoveryReports: Map<
@@ -332,12 +362,28 @@ export interface PipelineControllerOptions {
     ) => void,
     discoveryToolAllowed?: (runId: string, role: string) => boolean,
     featureCommit?: (runId: string, role: string, workingDir: string) => string,
+    executionFinish?: (
+      runId: string,
+      role: string,
+      sessionToken: string,
+      value: unknown,
+    ) => void,
+    executionFinishSessionCreated?: (
+      runId: string,
+      role: string,
+      token: string,
+    ) => void,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
   readonly makeRunId?: (pipelineName: string) => string;
   readonly makeRunToken?: () => string;
   readonly makeAgentId?: () => string;
   readonly featureGit?: FeatureGitOperations;
+  readonly monotonicClock?: PipelineMonotonicClock;
+  readonly wallclockScheduler?: PipelineWallclockScheduler;
+  /** Concise aliases used by deterministic controller fixtures. */
+  readonly clock?: PipelineMonotonicClock;
+  readonly scheduler?: PipelineWallclockScheduler;
 }
 
 function completionSchema() {
@@ -399,6 +445,14 @@ export class PipelineController {
   private readonly featureSynthesisCorrections = new Map<string, number>();
   private readonly discoverySessionTokens = new Map<string, string>();
   private readonly discoverySubmissions = new Map<string, unknown>();
+  private readonly clock: PipelineMonotonicClock;
+  private readonly scheduler: PipelineWallclockScheduler;
+  private readonly executionSessionTokens = new Map<string, string>();
+  private readonly executionSessionEpochs = new Map<string, number>();
+  private readonly executionPartials = new Map<
+    string,
+    PipelineExecutionPartial
+  >();
   private readonly tree: AgentTreeController;
   private readonly onHandoff: PipelineControllerOptions["onHandoff"];
   private readonly featureGit: FeatureGitOperations;
@@ -407,6 +461,12 @@ export class PipelineController {
 
   constructor(options: PipelineControllerOptions) {
     this.onHandoff = options.onHandoff;
+    this.clock =
+      options.monotonicClock ?? options.clock ?? systemPipelineMonotonicClock;
+    this.scheduler =
+      options.wallclockScheduler ??
+      options.scheduler ??
+      systemPipelineWallclockScheduler;
     this.makeRunId =
       options.makeRunId ??
       ((pipelineName) =>
@@ -457,6 +517,10 @@ export class PipelineController {
         },
         (runId, role, workingDir) =>
           this.commitFeatureWorktree(runId, role, workingDir),
+        (runId, role, token, value) =>
+          this.submitExecutionFinish(runId, role, token, value),
+        (runId, role, token) =>
+          this.registerExecutionSessionToken(runId, role, token),
       ),
       // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
       // intentionally do not apply to pipeline roots or children.
@@ -472,6 +536,460 @@ export class PipelineController {
   subscribe(listener: () => void) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  private monotonicNow(run?: MutableRun) {
+    const observed = this.clock.now();
+    const safe = Number.isFinite(observed) && observed >= 0 ? observed : 0;
+    if (!run) return safe;
+    const previous = run.lastMonotonicNow ?? safe;
+    run.lastMonotonicNow = Math.max(previous, safe);
+    return run.lastMonotonicNow;
+  }
+
+  private stageTimingFor(run: MutableRun, now = this.monotonicNow(run)) {
+    if (!run.stageTiming) return undefined;
+    if (run.status !== "starting" && run.status !== "running") {
+      return run.stageTiming;
+    }
+    const projected = stageTimingAt(run.stageTiming, now);
+    if (projected.warningReached && !run.stageTiming.warningReached) {
+      run.stageTiming = projected;
+    }
+    return projected;
+  }
+
+  private wallclockStateFor(run: MutableRun, now = this.monotonicNow(run)) {
+    const timing = this.stageTimingFor(run, now);
+    if (!timing) return run.wallclockProjection;
+    return {
+      limitMs: run.wallclockLimitMs,
+      runStartedAtMs: run.wallclockStartedAtMs,
+      runElapsedMs: Math.max(0, now - run.wallclockStartedAtMs),
+      stageElapsedMs: timing.elapsedMs,
+      remainingMs: timing.remainingMs,
+      warningReached: timing.warningReached,
+      warningAtMs: timing.warningAtMs,
+      deadlineAtMs: timing.deadlineAtMs,
+      stage: timing.stage,
+      epoch: timing.epoch,
+    } satisfies PipelineWallclockState;
+  }
+
+  private cancelStageTimers(run: MutableRun) {
+    run.warningTimerCancel?.();
+    run.wallclockTimerCancel?.();
+    run.warningTimerCancel = undefined;
+    run.wallclockTimerCancel = undefined;
+  }
+
+  private scheduleStageTimers(run: MutableRun) {
+    this.cancelStageTimers(run);
+    const timing = run.stageTiming;
+    if (!timing) return;
+    const schedule = (atMs: number, callback: (epoch: number) => void) => {
+      const delay = Math.max(0, atMs - this.monotonicNow(run));
+      return this.scheduler.schedule(delay, () => {
+        if (run.stageTiming?.epoch !== timing.epoch) return;
+        const now = this.monotonicNow(run);
+        if (now < atMs) {
+          const retry = schedule(atMs, callback);
+          if (atMs === timing.warningAtMs) run.warningTimerCancel = retry;
+          else run.wallclockTimerCancel = retry;
+          return;
+        }
+        callback(timing.epoch);
+      });
+    };
+    run.warningTimerCancel = schedule(timing.warningAtMs, (epoch) =>
+      this.handleStageWarning(run, epoch),
+    );
+    run.wallclockTimerCancel = schedule(timing.deadlineAtMs, (epoch) =>
+      this.handleStageDeadline(run, epoch),
+    );
+  }
+
+  private enterStage(run: MutableRun, stage: PipelineStage) {
+    if (run.stage === stage && (run.stageTiming || stage === "complete")) {
+      this.syncWarnings(run);
+      return;
+    }
+    this.cancelStageTimers(run);
+    run.stage = stage;
+    if (timedPipelineStage(run.definition, stage)) {
+      const startedAtMs = this.monotonicNow(run);
+      const epoch = (run.stageTiming?.epoch ?? 0) + 1;
+      const warningOffset = Math.floor((run.wallclockLimitMs * 4) / 5);
+      run.stageTiming = {
+        definition: run.definition,
+        stage,
+        epoch,
+        startedAtMs,
+        warningAtMs: startedAtMs + warningOffset,
+        deadlineAtMs: startedAtMs + run.wallclockLimitMs,
+        warningReached: false,
+        elapsedMs: 0,
+        remainingMs: run.wallclockLimitMs,
+        limited: false,
+      };
+      run.warnedSessions.clear();
+      run.pendingWarnings.clear();
+      for (const [token, sessionId] of run.executionSessionTokens) {
+        const agent = this.tree.view.get(sessionId);
+        if (agent && this.sessionStage(run, agent.role) === stage) {
+          this.executionSessionEpochs.set(token, epoch);
+          run.executionSessionEpochs.set(token, epoch);
+        }
+      }
+      this.scheduleStageTimers(run);
+    } else {
+      const now = this.monotonicNow(run);
+      const prior = run.stageTiming;
+      run.stageTiming = undefined;
+      run.wallclockProjection = prior
+        ? {
+            limitMs: run.wallclockLimitMs,
+            runStartedAtMs: run.wallclockStartedAtMs,
+            runElapsedMs: Math.max(0, now - run.wallclockStartedAtMs),
+            stageElapsedMs: Math.max(0, now - prior.startedAtMs),
+            remainingMs: 0,
+            warningReached: prior.warningReached || now >= prior.warningAtMs,
+            warningAtMs: prior.warningAtMs,
+            deadlineAtMs: prior.deadlineAtMs,
+            stage,
+            epoch: prior.epoch,
+          }
+        : run.wallclockProjection;
+    }
+    this.notify();
+  }
+
+  private sessionStage(
+    run: MutableRun,
+    role: string,
+  ): PipelineStage | undefined {
+    if (role === FEATURE_DISCOVERY_SYNTHESIS_ROLE) return "discover";
+    if (role === PLAN_PIPELINE_SYNTHESIS_ROLE) return "synthesize";
+    if (role === AUDIT_SYNTHESIS_ROLE) {
+      return run.definition === AUDIT_PIPELINE_ID || run.stage === "audit"
+        ? "audit"
+        : "final-audit";
+    }
+    if (role.startsWith("discover-")) return "discover";
+    if (
+      role.startsWith("candidate-") ||
+      role === SMALL_FEATURE_IMPLEMENTER_ROLE
+    )
+      return run.stage === "final-resolve" ? "final-resolve" : "build";
+    if (role.startsWith("audit-")) {
+      if (run.definition === AUDIT_PIPELINE_ID) return "audit";
+      if (run.definition === SMALL_FEATURE_PIPELINE_ID) return "final-audit";
+      return run.stage === "final-audit" || run.stage === "final-resolve"
+        ? "final-audit"
+        : "audit";
+    }
+    if (role === "pipeline-root") return run.stage;
+    return undefined;
+  }
+
+  private warningText(run: MutableRun) {
+    return `Controller warning: stage ${run.stage} has reached 80% of its shared wallclock budget. Finish cooperatively with pipeline_execution_finish if useful, then stop; the controller will not treat partial output as a report.`;
+  }
+
+  private applyWarningToAgent(run: MutableRun, agent: AgentNodeSnapshot) {
+    const timing = run.stageTiming;
+    if (!timing || !timing.warningReached) return;
+    if (this.sessionStage(run, agent.role) !== run.stage) return;
+    const key = `${timing.epoch}:${agent.id}`;
+    if (run.warnedSessions.has(key) || run.pendingWarnings.has(key)) return;
+    if (agent.status === "running") {
+      run.warnedSessions.add(key);
+      void this.tree.send(agent.id, this.warningText(run)).catch(() => {});
+    } else if (agent.status === "starting" || agent.status === "idle") {
+      run.pendingWarnings.add(key);
+    }
+  }
+
+  private syncWarnings(run: MutableRun) {
+    const timing = this.stageTimingFor(run);
+    if (!timing?.warningReached) return;
+    for (const agent of this.agentsFor(run.id))
+      this.applyWarningToAgent(run, agent);
+  }
+
+  private handleStageWarning(run: MutableRun, epoch: number) {
+    if (run.status !== "starting" && run.status !== "running") return;
+    if (run.stageTiming?.epoch !== epoch) return;
+    const now = this.monotonicNow(run);
+    if (now < run.stageTiming.warningAtMs) {
+      this.scheduleStageTimers(run);
+      return;
+    }
+    run.stageTiming = stageTimingAt(run.stageTiming, now);
+    this.syncWarnings(run);
+    this.notify();
+  }
+
+  private handleStageDeadline(run: MutableRun, epoch: number) {
+    if (run.status !== "starting" && run.status !== "running") return;
+    if (run.stageTiming?.epoch !== epoch) return;
+    const now = this.monotonicNow(run);
+    if (now < run.stageTiming.deadlineAtMs) {
+      this.scheduleStageTimers(run);
+      return;
+    }
+    this.settleLimited(run, epoch, now);
+  }
+
+  private registerExecutionSessionToken(
+    runId: string,
+    role: string,
+    token: string,
+  ) {
+    const run = this.requireRun(runId);
+    if (run.status !== "starting" && run.status !== "running") return;
+    const node = this.agentsFor(runId)
+      .filter((agent) => agent.role === role && agent.status === "starting")
+      .at(-1);
+    const epoch = run.stageTiming?.epoch;
+    if (node && epoch !== undefined) {
+      this.executionSessionTokens.set(token, node.id);
+      this.executionSessionEpochs.set(token, epoch);
+      run.executionSessionTokens.set(token, node.id);
+      run.executionSessionEpochs.set(token, epoch);
+    }
+  }
+
+  private clearExecutionRunState(run: MutableRun) {
+    for (const [token, sessionId] of run.executionSessionTokens) {
+      this.executionSessionTokens.delete(token);
+      this.executionSessionEpochs.delete(token);
+      run.executionSessionTokens.delete(token);
+      run.executionSessionEpochs.delete(token);
+      this.executionPartials.delete(sessionId);
+    }
+  }
+
+  private submitExecutionFinish(
+    runId: string,
+    role: string,
+    token: string,
+    value: unknown,
+  ) {
+    const run = this.requireActiveRun(runId);
+    const sessionId = this.executionSessionTokens.get(token);
+    const registeredEpoch = this.executionSessionEpochs.get(token);
+    const node = sessionId ? this.tree.view.get(sessionId) : undefined;
+    const timing = run.stageTiming;
+    if (
+      !sessionId ||
+      !node ||
+      node.scopeId !== runId ||
+      node.role !== role ||
+      node.status !== "running" ||
+      !timing ||
+      registeredEpoch !== timing.epoch ||
+      this.sessionStage(run, role) !== run.stage
+    ) {
+      throw new Error("Pipeline execution finish session is not active.");
+    }
+    const key = `${timing.epoch}:${sessionId}`;
+    if (run.executionPartials.has(key)) {
+      throw new Error(
+        "This pipeline session already recorded a partial finish.",
+      );
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Pipeline execution finish must be an object.");
+    }
+    const keys = Object.keys(value);
+    if (keys.some((key) => key !== "summary" && key !== "output")) {
+      throw new Error("Pipeline execution finish contains unsupported fields.");
+    }
+    const summary = Reflect.get(value, "summary");
+    const output = Reflect.get(value, "output");
+    if (
+      (summary !== undefined && typeof summary !== "string") ||
+      (output !== undefined && typeof output !== "string") ||
+      (summary === undefined && output === undefined) ||
+      (typeof summary === "string" &&
+        !summary.trim() &&
+        typeof output === "string" &&
+        !output.trim())
+    ) {
+      throw new Error(
+        "Pipeline execution finish needs non-empty bounded output.",
+      );
+    }
+    const bound = (candidate: unknown, maxBytes: number) => {
+      if (typeof candidate !== "string" || !candidate.trim()) return undefined;
+      const bounded = truncateHead(candidate, {
+        maxBytes,
+        maxLines: 200,
+      });
+      return { value: bounded.content, truncated: bounded.truncated };
+    };
+    const boundedSummary = bound(summary, 8 * 1024);
+    const boundedOutput = bound(output, 32 * 1024);
+    if (!boundedSummary && !boundedOutput)
+      throw new Error(
+        "Pipeline execution finish needs non-empty bounded output.",
+      );
+    const partial: PipelineExecutionPartial = {
+      sessionId,
+      role,
+      stage: run.stage,
+      epoch: timing.epoch,
+      ...(boundedSummary ? { summary: boundedSummary.value } : {}),
+      ...(boundedOutput ? { output: boundedOutput.value } : {}),
+      truncated: Boolean(boundedSummary?.truncated || boundedOutput?.truncated),
+      atMs: this.monotonicNow(run),
+    };
+    run.executionPartials.set(key, partial);
+    this.executionPartials.set(sessionId, partial);
+  }
+
+  private hasExecutionPartial(run: MutableRun, sessionId: string) {
+    const epoch = run.stageTiming?.epoch;
+    return (
+      epoch !== undefined && run.executionPartials.has(`${epoch}:${sessionId}`)
+    );
+  }
+
+  private async waitUntilRunStops(run: MutableRun) {
+    if (run.status !== "starting" && run.status !== "running") return;
+    await new Promise<void>((resolve) => {
+      const unsubscribe = this.subscribe(() => {
+        if (run.status !== "starting" && run.status !== "running") {
+          unsubscribe();
+          resolve();
+        }
+      });
+      if (run.status !== "starting" && run.status !== "running") {
+        unsubscribe();
+        resolve();
+      }
+    });
+  }
+
+  private validatedProgress(run: MutableRun) {
+    const progress: string[] = [];
+    for (const role of [...run.featureDiscoveryReports.keys()])
+      progress.push(`Validated discovery report: ${role}.`);
+    for (const role of [...run.planDiscoveryReports.keys()])
+      progress.push(`Validated plan discovery report: ${role}.`);
+    const audit = run.auditSegment?.progress();
+    if (audit) {
+      progress.push(
+        `Validated audit progress: ${audit.integratedReportCount} report(s) integrated across revision ${audit.revision}.`,
+      );
+    }
+    return progress.slice(0, 64);
+  }
+
+  private fallbackPartials(run: MutableRun, timing: PipelineStageTiming) {
+    const known = [...run.executionPartials.values()];
+    const knownSessions = new Set(known.map((partial) => partial.sessionId));
+    for (const agent of this.agentsFor(run.id)) {
+      if (knownSessions.has(agent.id)) continue;
+      if (this.sessionStage(run, agent.role) !== timing.stage) continue;
+      const output = agent.liveAssistant?.text.trim() || agent.finalText.trim();
+      if (!output) continue;
+      const bounded = truncateHead(output, {
+        maxBytes: 32 * 1024,
+        maxLines: 200,
+      });
+      known.push({
+        sessionId: agent.id,
+        role: agent.role,
+        stage: timing.stage,
+        epoch: timing.epoch,
+        output: bounded.content,
+        truncated: bounded.truncated,
+        atMs: this.monotonicNow(run),
+      });
+    }
+    // Keep the limitation record small even when a graph has many attempts.
+    return known.slice(0, 16);
+  }
+
+  private settleLimited(run: MutableRun, epoch: number, now: number) {
+    if (run.status !== "starting" && run.status !== "running") return false;
+    if (run.limiting) return false;
+    const timing = run.stageTiming;
+    if (!timing || timing.epoch !== epoch || now < timing.deadlineAtMs)
+      return false;
+    run.limiting = true;
+    const finalTiming = stageTimingAt(timing, now);
+    // A reordered scheduler may deliver the deadline callback first. The
+    // warning boundary is still authoritative and must not be skipped.
+    run.stageTiming = finalTiming;
+    this.syncWarnings(run);
+    const partials = this.fallbackPartials(run, finalTiming);
+    const validatedProgress = this.validatedProgress(run);
+    const unresolvedItems = [
+      `Stage ${finalTiming.stage} exhausted its ${run.wallclockLimitMs}ms wallclock budget before the pipeline completed.`,
+      ...partials.map(
+        (partial) =>
+          `Partial output from ${partial.role} is provenance only and was not accepted as a report.`,
+      ),
+    ].slice(0, 64);
+    const limitation: PipelineWallclockLimitation = {
+      reason: "stage-deadline",
+      stage: finalTiming.stage,
+      epoch: finalTiming.epoch,
+      limitMs: run.wallclockLimitMs,
+      warningAtMs: finalTiming.warningAtMs,
+      deadlineAtMs: finalTiming.deadlineAtMs,
+      elapsedMs: finalTiming.elapsedMs,
+      validatedProgress,
+      unresolvedItems,
+      partials,
+    };
+    this.cancelStageTimers(run);
+    run.stageTiming = { ...finalTiming, limited: true };
+    run.wallclockProjection = this.wallclockStateFor(run, now);
+    run.limitation = limitation;
+    run.status = "limited";
+    run.finishedAt = Date.now();
+    run.error = "Pipeline stage wallclock limit reached.";
+    run.resolveRootReady();
+    this.clearDiscoveryRunState(run.id);
+    this.clearExecutionRunState(run);
+    this.notify();
+    void this.cleanupTerminal(run, true);
+    this.deliver(run);
+    return true;
+  }
+
+  private startDeferred(run: MutableRun, id: string, text: string) {
+    this.settleDue(run);
+    if (run.status !== "starting" && run.status !== "running") {
+      return Promise.reject(
+        new Error(`Pipeline run "${run.id}" is ${run.status}.`),
+      );
+    }
+    const timing = run.stageTiming;
+    if (timing) {
+      for (const [token, sessionId] of run.executionSessionTokens) {
+        if (sessionId !== id) continue;
+        this.executionSessionEpochs.set(token, timing.epoch);
+        run.executionSessionEpochs.set(token, timing.epoch);
+      }
+    }
+    const key = timing ? `${timing.epoch}:${id}` : undefined;
+    const warned = key ? run.pendingWarnings.delete(key) : false;
+    if (warned) {
+      run.warnedSessions.add(key!);
+      return this.tree
+        .startDeferred(id, `${this.warningText(run)}\n\n${text}`)
+        .catch((error) => {
+          run.warnedSessions.delete(key!);
+          run.pendingWarnings.add(key!);
+          throw error;
+        });
+    }
+    return this.tree.startDeferred(id, text);
   }
 
   private registerDiscoverySessionToken(
@@ -598,7 +1116,16 @@ export class PipelineController {
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
+  private settleDue(run: MutableRun) {
+    if (run.status !== "starting" && run.status !== "running") return;
+    const timing = run.stageTiming;
+    if (!timing) return;
+    const now = this.monotonicNow(run);
+    if (now >= timing.deadlineAtMs) this.settleLimited(run, timing.epoch, now);
+  }
+
   list() {
+    for (const run of this.runs.values()) this.settleDue(run);
     return [...this.runs.values()]
       .map((run) => this.snapshot(run))
       .sort((left, right) => right.startedAt - left.startedAt);
@@ -606,10 +1133,16 @@ export class PipelineController {
 
   get(runId: string) {
     const run = this.runs.get(runId);
+    if (run) this.settleDue(run);
     return run ? this.snapshot(run) : undefined;
   }
 
   private snapshot(run: MutableRun): PipelineRunSnapshot {
+    const wallclock = this.wallclockStateFor(run);
+    const stageTiming = this.stageTimingFor(run);
+    const partials = run.limitation?.partials ?? [
+      ...run.executionPartials.values(),
+    ];
     return {
       id: run.id,
       definition: run.definition,
@@ -617,7 +1150,22 @@ export class PipelineController {
       stage: run.stage,
       status: run.status,
       startedAt: run.startedAt,
-      ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
+      ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+      wallclockLimitMs: run.wallclockLimitMs,
+      ...(wallclock
+        ? {
+            runElapsedMs: wallclock.runElapsedMs,
+            stageElapsedMs: wallclock.stageElapsedMs,
+            remainingMs: wallclock.remainingMs,
+            warningReached: wallclock.warningReached,
+            warningAtMs: wallclock.warningAtMs,
+            deadlineAtMs: wallclock.deadlineAtMs,
+            wallclock,
+          }
+        : {}),
+      ...(stageTiming ? { stageTiming } : {}),
+      ...(run.limitation ? { limitation: run.limitation } : {}),
+      ...(partials.length > 0 ? { partials } : {}),
       ...(run.error ? { error: run.error } : {}),
       ...(run.rootId ? { rootId: run.rootId } : {}),
       ...(run.completion ? { completion: run.completion } : {}),
@@ -655,6 +1203,12 @@ export class PipelineController {
 
   start(request: PipelineRunRequest) {
     assertPipelineName(request.pipelineName);
+    // Parse before any Git preflight, namespace probe, run insertion, session
+    // creation, or feature worktree mutation. This ordering is part of the
+    // admission contract, not merely a schema convenience.
+    const wallclockLimitMs = parsePipelineWallclockLimit(
+      request.wallclockLimit,
+    );
     if (this.shuttingDown)
       throw new Error("Pipeline controller is shutting down.");
     const definition = request.pipeline ?? FEATURE_PIPELINE_ID;
@@ -722,6 +1276,7 @@ export class PipelineController {
       }
     }
     const rootReady = deferredSignal();
+    const wallclockStartedAtMs = this.monotonicNow();
     const run: MutableRun = {
       id,
       definition,
@@ -744,8 +1299,20 @@ export class PipelineController {
       ...(featureCandidateWorktrees ? { featureCandidateWorktrees } : {}),
       featureSynthesisChecks: [],
       finalAuditReportDelivered: false,
+      wallclockLimitMs,
+      wallclockStartedAtMs,
+      warnedSessions: new Set(),
+      pendingWarnings: new Set(),
+      executionPartials: new Map(),
+      executionSessionTokens: new Map(),
+      executionSessionEpochs: new Map(),
+      featureCleanupDone: false,
+      lastMonotonicNow: wallclockStartedAtMs,
     };
     this.runs.set(id, run);
+    // The initial stage budget starts at admitted run insertion, before the
+    // asynchronous root/session initialization below.
+    this.enterStage(run, run.stage);
     this.notify();
     void this.initialize(run);
     return id;
@@ -780,6 +1347,7 @@ export class PipelineController {
       });
       run.rootId = root.id;
       run.resolveRootReady();
+      this.settleDue(run);
       if (run.status !== "starting") {
         this.notify();
         return;
@@ -846,6 +1414,12 @@ export class PipelineController {
           `Plan discovery ${role} session ${settled.status}: ${settled.error ?? "provider failure or cancellation"}.`,
         );
       }
+      if (this.hasExecutionPartial(run, sessionId)) {
+        await this.waitUntilRunStops(run);
+        throw new Error(
+          `Plan discovery ${role} ended after a cooperative partial.`,
+        );
+      }
       const hasSubmission = this.discoverySubmissions.has(sessionId);
       const submitted = this.discoverySubmissions.get(sessionId);
       this.discoverySubmissions.delete(sessionId);
@@ -900,8 +1474,7 @@ export class PipelineController {
     );
     if (run.status !== "running") return;
     this.planDiscoveryReports(run);
-    run.stage = "synthesize";
-    this.notify();
+    this.enterStage(run, "synthesize");
   }
 
   private parsePlanSubmission(value: unknown) {
@@ -935,6 +1508,10 @@ export class PipelineController {
           `Plan synthesis session ${settled.status}: ${settled.error ?? "provider failure or cancellation"}.`,
         );
       }
+      if (this.hasExecutionPartial(run, sessionId)) {
+        await this.waitUntilRunStops(run);
+        throw new Error("Plan synthesis ended after a cooperative partial.");
+      }
       const hasSubmission = this.discoverySubmissions.has(sessionId);
       const submitted = this.discoverySubmissions.get(sessionId);
       this.discoverySubmissions.delete(sessionId);
@@ -967,6 +1544,8 @@ export class PipelineController {
   }
 
   private finishPlan(run: MutableRun, plan: string) {
+    this.settleDue(run);
+    if (run.status !== "running") return;
     let writtenPath: string | undefined;
     if (run.request.planPath !== null && run.request.planPath !== undefined) {
       writtenPath = writePlanOutput(
@@ -977,7 +1556,8 @@ export class PipelineController {
     }
     run.planText = plan;
     run.planWrittenPath = writtenPath;
-    run.stage = "complete";
+    this.clearExecutionRunState(run);
+    this.enterStage(run, "complete");
     run.status = "completed";
     run.finishedAt = Date.now();
     run.completion = {
@@ -1005,9 +1585,12 @@ export class PipelineController {
   private async initializePlanPipeline(run: MutableRun) {
     await this.bootstrapPlanDiscovery(run);
     if (run.status !== "running") return;
+    this.settleDue(run);
+    if (run.status !== "running") return;
     const reports = this.planDiscoveryReports(run);
     if (!run.rootId) throw new Error("Plan synthesis session is unavailable.");
-    await this.tree.startDeferred(
+    await this.startDeferred(
+      run,
       run.rootId,
       buildPipelinePrompt(run.definition, run.request, reports),
     );
@@ -1036,12 +1619,15 @@ export class PipelineController {
     run.rootId = discoverySynthesisAgent.id;
     run.resolveRootReady();
     if (run.status !== "starting") return;
+    this.settleDue(run);
+    if (run.status !== "starting") return;
     run.status = "running";
     this.notify();
 
     const discoveryReports = await this.bootstrapFeatureDiscovery(run);
     if (run.status !== "running") return;
-    await this.tree.startDeferred(
+    await this.startDeferred(
+      run,
       discoverySynthesisAgent.id,
       buildFeatureDiscoverySynthesisPrompt(
         run.request.task,
@@ -1059,8 +1645,9 @@ export class PipelineController {
     );
     run.featureDiscoverySynthesis = discoverySynthesis;
     if (run.status !== "running") return;
-    run.stage = "build";
-    this.notify();
+    this.settleDue(run);
+    if (run.status !== "running") return;
+    this.enterStage(run, "build");
 
     const prepared = preparedDiscoveryPackage(
       run.request.task,
@@ -1117,6 +1704,8 @@ export class PipelineController {
     );
     run.featureCandidates = frozenCandidates;
     if (run.status !== "running") return;
+    this.settleDue(run);
+    if (run.status !== "running") return;
 
     const comparisonInput: ReadonlyArray<FeatureCandidateComparisonInput> =
       frozenCandidates.map(({ candidate, handoff }) => ({
@@ -1161,6 +1750,8 @@ export class PipelineController {
       },
       "Return one strict selection-only JSON object. Do not write code, mutate candidates, or invent a fourth implementation.",
     );
+    this.settleDue(run);
+    if (run.status !== "running") return;
     run.featureSelection = selection;
     const primary = frozenCandidates.find(
       ({ candidate }) => candidate.role === selection.primaryCandidate,
@@ -1171,6 +1762,8 @@ export class PipelineController {
     if (!primary || !primaryInput) {
       throw new Error("Validated primary candidate is unavailable.");
     }
+    this.settleDue(run);
+    if (run.status !== "running") return;
     const synthesisWorktree = lifecycle.createSynthesisWorktree(
       primary.candidate,
     );
@@ -1206,11 +1799,15 @@ export class PipelineController {
     run.featureSynthesisChecks = featureAuditVerificationSummary(
       synthesized.provenance.checks.length,
     );
+    this.settleDue(run);
+    if (run.status !== "running") return;
     lifecycle.promote(synthesized.validated);
     const cleanupFailures = lifecycle.cleanup();
     if (cleanupFailures.length > 0) {
       throw new Error(cleanupFailures.join(" "));
     }
+    this.settleDue(run);
+    if (run.status !== "running") return;
 
     const postPromotionRoot = await this.tree.spawn({
       scopeId: run.id,
@@ -1236,7 +1833,8 @@ export class PipelineController {
     }
     run.rootId = postPromotionRoot.id;
     this.notify();
-    await this.tree.startDeferred(
+    await this.startDeferred(
+      run,
       postPromotionRoot.id,
       buildPipelinePrompt(
         run.definition,
@@ -1259,6 +1857,10 @@ export class PipelineController {
       const [settled] = await this.tree.wait([sessionId]);
       if (!settled)
         throw new Error(`${label} session ${sessionId} disappeared.`);
+      if (this.hasExecutionPartial(run, sessionId)) {
+        await this.waitUntilRunStops(run);
+        throw new Error(`${label} ended after a cooperative partial.`);
+      }
       const hasSubmission = this.discoverySubmissions.has(sessionId);
       const submitted = this.discoverySubmissions.get(sessionId);
       this.discoverySubmissions.delete(sessionId);
@@ -1362,6 +1964,12 @@ export class PipelineController {
           `Feature discovery ${role} session ${settled.status}: ${settled.error ?? "provider failure or cancellation"}.`,
         );
       }
+      if (this.hasExecutionPartial(run, sessionId)) {
+        await this.waitUntilRunStops(run);
+        throw new Error(
+          `Feature discovery ${role} ended after a cooperative partial.`,
+        );
+      }
       try {
         this.acceptFeatureDiscoveryTurn(run, role, settled);
         this.clearDiscoverySessionTokens(sessionId);
@@ -1399,6 +2007,8 @@ export class PipelineController {
         return this.settleFeatureDiscoveryRole(run, role, child);
       }),
     );
+    if (run.status !== "running") return [];
+    this.settleDue(run);
     if (run.status !== "running") return [];
     const reports = this.featureDiscoveryReports(run);
     const fanInIssues = validateFeatureDiscoveryFanIn(reports);
@@ -1571,6 +2181,10 @@ export class PipelineController {
       standalone: boolean;
     },
   ) {
+    this.settleDue(run);
+    if (run.status !== "starting" && run.status !== "running") {
+      throw new Error(`Pipeline run "${run.id}" is ${run.status}.`);
+    }
     if (run.auditSegment) {
       throw new Error("This pipeline run already has an audit segment.");
     }
@@ -1755,6 +2369,8 @@ export class PipelineController {
   }
 
   private async runAuditSegmentPump(run: MutableRun) {
+    this.settleDue(run);
+    if (run.status !== "starting" && run.status !== "running") return;
     const segment = run.auditSegment;
     if (!segment) return;
     try {
@@ -1765,6 +2381,9 @@ export class PipelineController {
           child.status === "starting" ||
           child.status === "running"
         ) {
+          continue;
+        }
+        if (this.hasExecutionPartial(run, id)) {
           continue;
         }
         if (child.status === "error" || child.status === "cancelled") {
@@ -1794,6 +2413,7 @@ export class PipelineController {
         segment.progress().reducerStatus === "busy" &&
         synthesizer.status === "idle"
       ) {
+        if (this.hasExecutionPartial(run, synthesisId)) return;
         try {
           const submitted = segment.takeSubmission(synthesisId);
           if (submitted !== undefined) segment.settleSubmitted(submitted);
@@ -1816,8 +2436,7 @@ export class PipelineController {
         if (run.definition === AUDIT_PIPELINE_ID) {
           this.completeStandaloneAudit(run, finalReport);
         } else if (run.stage === "final-audit") {
-          run.stage = "final-resolve";
-          this.notify();
+          this.enterStage(run, "final-resolve");
         }
         return;
       }
@@ -1829,7 +2448,7 @@ export class PipelineController {
       if (synthesizer.finalText || synthesizer.transcript.length > 0) {
         await this.tree.send(synthesisId, next.prompt);
       } else {
-        await this.tree.startDeferred(synthesisId, next.prompt);
+        await this.startDeferred(run, synthesisId, next.prompt);
       }
     } catch (error) {
       this.failRun(
@@ -1844,9 +2463,11 @@ export class PipelineController {
     run: MutableRun,
     report: NonNullable<PipelineCompletionFacts["auditReport"]>,
   ) {
+    this.settleDue(run);
     if (run.status !== "running") return;
     const progress = run.auditSegment?.progress();
-    run.stage = "complete";
+    this.clearExecutionRunState(run);
+    this.enterStage(run, "complete");
     run.status = "completed";
     run.finishedAt = Date.now();
     run.completion = {
@@ -1882,33 +2503,98 @@ export class PipelineController {
   }
 
   private cleanupFeatureLifecycle(run: MutableRun) {
+    if (run.featureCleanupDone) return [];
+    run.featureCleanupDone = true;
     const failures = run.featureLifecycle?.cleanup() ?? [];
-    if (failures.length === 0) return;
+    if (failures.length === 0) return failures;
     run.error = [run.error, ...failures]
       .filter(Boolean)
       .join(" ")
       .slice(0, 16 * 1024);
     this.notify();
+    return failures;
+  }
+
+  private captureTerminalTiming(run: MutableRun) {
+    const now = this.monotonicNow(run);
+    if (run.stageTiming) run.stageTiming = stageTimingAt(run.stageTiming, now);
+    const state = this.wallclockStateFor(run, now);
+    if (state) run.wallclockProjection = state;
+    this.cancelStageTimers(run);
+  }
+
+  private cleanupTerminal(run: MutableRun, cancelRoot: boolean) {
+    if (run.cleanup) return run.cleanup;
+    run.cleanup = (async () => {
+      const failures: string[] = [];
+      const active = this.agentsFor(run.id).filter(
+        (agent) =>
+          agent.parentId &&
+          (agent.status === "starting" || agent.status === "running"),
+      );
+      const childResults = await Promise.allSettled(
+        active.map((agent) => this.tree.cancel(agent.id)),
+      );
+      for (const result of childResults) {
+        if (result.status === "rejected")
+          failures.push(
+            `Pipeline child cleanup failed: ${boundedPipelineError(result.reason)}`,
+          );
+      }
+      if (cancelRoot && run.rootId) {
+        try {
+          await this.tree.cancel(run.rootId);
+        } catch (error) {
+          failures.push(
+            `Pipeline root cancellation failed: ${boundedPipelineError(error)}`,
+          );
+        }
+      }
+      failures.push(...this.cleanupFeatureLifecycle(run));
+      if (failures.length > 0) {
+        run.error = [run.error, ...failures]
+          .filter(Boolean)
+          .join(" ")
+          .slice(0, 16 * 1024);
+        this.notify();
+        if (run.status === "cancelled") throw new Error(failures.join(" "));
+      }
+    })();
+    return run.cleanup;
   }
 
   private onTreeChange() {
     if (this.shuttingDown) return;
     for (const run of this.runs.values()) {
       if (run.status !== "starting" && run.status !== "running") continue;
+      const timing = run.stageTiming;
+      this.syncWarnings(run);
       const root = run.rootId ? this.tree.view.get(run.rootId) : undefined;
-      if (!root) continue;
+      if (!root) {
+        if (timing && this.monotonicNow(run) >= timing.deadlineAtMs) {
+          this.settleLimited(run, timing.epoch, this.monotonicNow(run));
+        }
+        continue;
+      }
       if (root.status === "cancelled") {
         this.clearDiscoveryRunState(run.id);
+        this.clearExecutionRunState(run);
+        this.captureTerminalTiming(run);
         run.status = "cancelled";
         run.finishedAt = Date.now();
         run.error = root.error;
-        void this.cancelActiveChildren(run).finally(() => {
-          this.cleanupFeatureLifecycle(run);
-          this.deliver(run);
-        });
+        void this.cleanupTerminal(run, false)
+          .catch(() => {})
+          .finally(() => this.deliver(run));
       } else if (root.status === "error") {
         this.clearDiscoveryRunState(run.id);
         this.failRun(run, root.error ?? "Pipeline root failed.");
+      } else if (
+        timing &&
+        this.monotonicNow(run) >= timing.deadlineAtMs &&
+        (run.status === "starting" || run.status === "running")
+      ) {
+        this.settleLimited(run, timing.epoch, this.monotonicNow(run));
       }
       if (run.status === "starting" || run.status === "running") {
         void this.pumpAuditSegment(run);
@@ -1920,18 +2606,14 @@ export class PipelineController {
   private failRun(run: MutableRun, error: string, cancelRoot = false) {
     if (run.status !== "starting" && run.status !== "running") return;
     this.clearDiscoveryRunState(run.id);
+    this.clearExecutionRunState(run);
+    this.captureTerminalTiming(run);
     run.status = "failed";
     run.finishedAt = Date.now();
     run.error = error.slice(0, 16 * 1024);
-    const cleanup = this.cancelActiveChildren(run).finally(() =>
-      this.cleanupFeatureLifecycle(run),
-    );
-    if (cancelRoot && run.rootId) {
-      void this.tree.cancel(run.rootId).catch(() => {});
-    }
+    void this.cleanupTerminal(run, cancelRoot).catch(() => {});
     this.notify();
-    if (run.featureLifecycle) void cleanup.finally(() => this.deliver(run));
-    else this.deliver(run);
+    this.deliver(run);
   }
 
   private factsForFailure(run: MutableRun): PipelineCompletionFacts {
@@ -1947,6 +2629,23 @@ export class PipelineController {
     };
   }
 
+  private factsForLimited(run: MutableRun): PipelineCompletionFacts {
+    const limitation = run.limitation;
+    return {
+      outcome:
+        "The pipeline was limited before completion. No success or readiness claim was made.",
+      changedPaths: [],
+      checks: limitation?.validatedProgress ?? [],
+      assumptions: [],
+      git: [],
+      reports: [],
+      unresolvedItems: limitation?.unresolvedItems ?? [
+        "The pipeline ended at its wallclock stage deadline.",
+      ],
+      workingDir: run.request.workingDir,
+    };
+  }
+
   private deliver(run: MutableRun) {
     if (this.shuttingDown || this.handoffs.has(run.id)) return;
     if (run.status === "starting" || run.status === "running") return;
@@ -1955,8 +2654,19 @@ export class PipelineController {
       runId: run.id,
       definition: run.definition,
       status: run.status,
-      facts: run.completion ?? this.factsForFailure(run),
+      facts:
+        run.completion ??
+        (run.status === "limited"
+          ? this.factsForLimited(run)
+          : this.factsForFailure(run)),
       ...(run.error ? { error: run.error } : {}),
+      ...(run.wallclockProjection
+        ? { wallclock: run.wallclockProjection }
+        : run.stageTiming
+          ? { wallclock: this.wallclockStateFor(run) }
+          : {}),
+      ...(run.limitation ? { limitation: run.limitation } : {}),
+      ...(run.limitation ? { partials: run.limitation.partials } : {}),
     };
     void Promise.resolve(this.onHandoff(handoff)).catch(() => {});
   }
@@ -2034,8 +2744,7 @@ export class PipelineController {
         remediationComplete &&
         boundary.roles.every((role) => this.roleHasValidReport(run, role))
       ) {
-        run.stage = boundary.nextStage;
-        this.notify();
+        this.enterStage(run, boundary.nextStage);
       }
       return;
     }
@@ -2049,8 +2758,7 @@ export class PipelineController {
           waitedChildren.some((child) => child.role === role),
         )
       ) {
-        run.stage = "synthesize";
-        this.notify();
+        this.enterStage(run, "synthesize");
       }
       return;
     }
@@ -2077,8 +2785,7 @@ export class PipelineController {
     ) {
       return;
     }
-    run.stage = nextStage;
-    this.notify();
+    this.enterStage(run, nextStage);
   }
 
   setStage(runId: string, stage: PipelineStage) {
@@ -2157,8 +2864,7 @@ export class PipelineController {
         );
       }
     }
-    run.stage = stage;
-    this.notify();
+    this.enterStage(run, stage);
     return this.snapshot(run);
   }
 
@@ -2195,6 +2901,10 @@ export class PipelineController {
     additionalContext: string,
     controllerOwnedDiscovery: boolean,
   ) {
+    this.settleDue(run);
+    if (run.status !== "starting" && run.status !== "running") {
+      throw new Error(`Pipeline run "${run.id}" is ${run.status}.`);
+    }
     const runId = run.id;
     if (!roleBelongsToDefinition(run.definition, role)) {
       throw new Error(`Unsupported ${run.definition} child role "${role}".`);
@@ -2343,12 +3053,15 @@ export class PipelineController {
     }
     const children = await this.tree.wait(ids, signal);
     const run = this.requireRun(runId);
+    this.settleDue(run);
+    if (run.status !== "starting" && run.status !== "running") return children;
     await this.pumpAuditSegment(run);
     if (
       run.definition === SMALL_FEATURE_PIPELINE_ID &&
       (run.status === "starting" || run.status === "running")
     ) {
       const invalid = children.find((child) => {
+        if (this.hasExecutionPartial(run, child.id)) return false;
         if (child.status === "error" || child.status === "cancelled") {
           return true;
         }
@@ -2408,6 +3121,11 @@ export class PipelineController {
   async sendChild(runId: string, id: string, text: string) {
     const run = this.requireActiveRun(runId);
     const agent = this.getAgent(runId, id);
+    if (this.hasExecutionPartial(run, id)) {
+      throw new Error(
+        "A cooperative partial cannot be retried or continued and does not trigger replacement.",
+      );
+    }
     if (!agent.parentId) throw new Error(`Agent "${id}" is the pipeline root.`);
     if (
       agent.role === AUDIT_SYNTHESIS_ROLE ||
@@ -2653,7 +3371,8 @@ export class PipelineController {
       };
     }
     this.clearDiscoveryRunState(run.id);
-    run.stage = "complete";
+    this.clearExecutionRunState(run);
+    this.enterStage(run, "complete");
     run.status = "completed";
     run.finishedAt = Date.now();
     run.completion = completion;
@@ -2662,29 +3381,17 @@ export class PipelineController {
     return this.snapshot(run);
   }
 
-  private async cancelActiveChildren(run: MutableRun) {
-    const active = this.agentsFor(run.id).filter(
-      (agent) =>
-        agent.parentId &&
-        (agent.status === "starting" || agent.status === "running"),
-    );
-    await Promise.allSettled(active.map((agent) => this.tree.cancel(agent.id)));
-  }
-
   private async cancelRunOnce(run: MutableRun) {
     this.clearDiscoveryRunState(run.id);
+    this.clearExecutionRunState(run);
+    this.captureTerminalTiming(run);
     run.status = "cancelled";
     run.finishedAt = Date.now();
+    run.resolveRootReady();
     this.notify();
-    await run.rootReady;
-    await this.cancelActiveChildren(run);
     try {
-      if (run.rootId) await this.tree.cancel(run.rootId);
-    } catch (error) {
-      run.error = `Pipeline root cancellation failed: ${boundedPipelineError(error)}`;
-      throw error;
+      await this.cleanupTerminal(run, true);
     } finally {
-      this.cleanupFeatureLifecycle(run);
       this.deliver(run);
     }
     return this.snapshot(run);
@@ -2693,6 +3400,16 @@ export class PipelineController {
   async cancelRun(runId: string) {
     const run = this.requireRun(runId);
     if (run.cancellation) return run.cancellation;
+    if (
+      (run.status === "starting" || run.status === "running") &&
+      run.stageTiming
+    ) {
+      const now = this.monotonicNow(run);
+      if (now >= run.stageTiming.deadlineAtMs) {
+        this.settleLimited(run, run.stageTiming.epoch, now);
+        return this.snapshot(run);
+      }
+    }
     if (run.status !== "starting" && run.status !== "running")
       return this.snapshot(run);
     const cancellation = this.cancelRunOnce(run);
@@ -2708,6 +3425,13 @@ export class PipelineController {
 
   private requireActiveRun(runId: string) {
     const run = this.requireRun(runId);
+    if (run.status === "starting" || run.status === "running") {
+      const timing = run.stageTiming;
+      const now = this.monotonicNow(run);
+      if (timing && now >= timing.deadlineAtMs) {
+        this.settleLimited(run, timing.epoch, now);
+      }
+    }
     if (run.status !== "starting" && run.status !== "running") {
       throw new Error(`Pipeline run "${runId}" is ${run.status}.`);
     }
@@ -3055,6 +3779,17 @@ export class PipelineController {
   async dispose() {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
+    for (const run of this.runs.values()) {
+      this.cancelStageTimers(run);
+      if (run.status === "starting" || run.status === "running") {
+        this.captureTerminalTiming(run);
+        run.status = "cancelled";
+        run.finishedAt = Date.now();
+        run.resolveRootReady();
+        this.clearDiscoveryRunState(run.id);
+        this.clearExecutionRunState(run);
+      }
+    }
     await this.tree.dispose();
     for (const run of this.runs.values()) this.cleanupFeatureLifecycle(run);
     this.listeners.clear();

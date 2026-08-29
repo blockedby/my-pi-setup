@@ -27,6 +27,20 @@ import {
   type PipelineDefinitionId,
   type PipelineHandoff,
 } from "./domain.ts";
+import {
+  parsePipelineWallclockLimit,
+  PIPELINE_WALLCLOCK_LIMIT_PATTERN,
+} from "./wallclock.ts";
+
+export {
+  DEFAULT_PIPELINE_WALLCLOCK_LIMIT_MS,
+  MAX_PIPELINE_WALLCLOCK_LIMIT_MS,
+  MIN_PIPELINE_WALLCLOCK_LIMIT_MS,
+  parsePipelineWallclockLimit,
+  parseWallclockLimit,
+  PIPELINE_WALLCLOCK_WARNING_RATIO,
+  PIPELINE_WALLCLOCK_LIMIT_PATTERN,
+} from "./wallclock.ts";
 import { createPipelineSessionFactory } from "./session.ts";
 import {
   createPipelineInspectionTools,
@@ -106,6 +120,14 @@ const PIPELINE_RUN_COMMON_PROPERTIES = {
         "Typed initial or closure audit scope for audit-pipeline. No commands or refs are accepted.",
     }),
   ),
+  wallclock_limit: Type.Optional(
+    Type.String({
+      description:
+        "Canonical integer stage budget, in seconds, minutes, or hours; omission defaults to 30m and accepted values are 30s through 24h.",
+      pattern: PIPELINE_WALLCLOCK_LIMIT_PATTERN,
+      maxLength: 32,
+    }),
+  ),
 };
 
 const PLAN_PATH_PARAMETER = Type.Union(
@@ -180,6 +202,11 @@ export function handoffText(handoff: PipelineHandoff) {
     `Pipeline ${handoff.runId} ${handoff.status}.`,
     `Selected pipeline: ${handoff.definition}`,
     `Working directory: ${facts.workingDir}`,
+    ...(handoff.wallclock
+      ? [
+          `Wallclock: stage ${handoff.wallclock.stage} · elapsed ${handoff.wallclock.stageElapsedMs}ms · remaining ${handoff.wallclock.remainingMs}ms · warning ${handoff.wallclock.warningReached ? "reached" : "not reached"}`,
+        ]
+      : []),
     ...(facts.planPath ? [`Plan path: ${facts.planPath}`] : []),
     ...(facts.plan !== undefined ? [`Plan:\n${facts.plan}`] : []),
     `Outcome:\n${facts.outcome}`,
@@ -194,6 +221,13 @@ export function handoffText(handoff: PipelineHandoff) {
     `Git and commits:\n${facts.git.map((item) => `- ${item}`).join("\n") || "- none reported"}`,
     `Reports:\n${facts.reports.map((item) => `- ${item}`).join("\n") || "- none reported"}`,
     `Unresolved items:\n${facts.unresolvedItems.map((item) => `- ${item}`).join("\n") || "- none reported"}`,
+    ...(handoff.limitation
+      ? [
+          `Wallclock limitation: stage ${handoff.limitation.stage} reached its deadline after ${handoff.limitation.elapsedMs}ms.`,
+          `Validated progress:\n${handoff.limitation.validatedProgress.map((item) => `- ${item}`).join("\n") || "- none"}`,
+          `Bounded cooperative partials:\n${handoff.limitation.partials.map((partial) => `- ${partial.role}: ${[partial.summary, partial.output].filter(Boolean).join(" — ") || "(no output)"}`).join("\n") || "- none"}`,
+        ]
+      : []),
   ];
   if (handoff.error) sections.push(`Pipeline error:\n${handoff.error}`);
   return sections.join("\n\n");
@@ -215,13 +249,15 @@ export default function pipelines(pi: ExtensionAPI) {
     const running = runs.filter(
       (run) => run.status === "starting" || run.status === "running",
     ).length;
+    const limited = runs.filter((run) => run.status === "limited").length;
     const failed = runs.filter(
       (run) => run.status === "failed" || run.status === "cancelled",
     ).length;
-    const done = runs.length - running - failed;
+    const done = runs.length - running - failed - limited;
     const parts = [
       running ? ui.theme.fg("warning", `■ ${running} running`) : "",
       done ? ui.theme.fg("success", `■ ${done} done`) : "",
+      limited ? ui.theme.fg("warning", `■ ${limited} limited`) : "",
       failed ? ui.theme.fg("error", `■ ${failed} failed`) : "",
       ui.theme.fg("accent", "/pipelines") + ui.theme.fg("dim", " to view"),
     ].filter(Boolean);
@@ -243,6 +279,9 @@ export default function pipelines(pi: ExtensionAPI) {
           status: handoff.status,
           definition: handoff.definition,
           workingDir: handoff.facts.workingDir,
+          ...(handoff.wallclock ? { wallclock: handoff.wallclock } : {}),
+          ...(handoff.limitation ? { limitation: handoff.limitation } : {}),
+          ...(handoff.partials ? { partials: handoff.partials } : {}),
         },
       },
       { deliverAs: "followUp", triggerTurn: true },
@@ -263,6 +302,8 @@ export default function pipelines(pi: ExtensionAPI) {
         discoverySessionCreated,
         discoveryToolAllowed,
         featureCommit,
+        executionFinish,
+        executionFinishSessionCreated,
       ) =>
         createPipelineSessionFactory({
           modelRegistry: ctx.modelRegistry,
@@ -277,6 +318,8 @@ export default function pipelines(pi: ExtensionAPI) {
           discoverySessionCreated,
           discoveryToolAllowed,
           featureCommit,
+          executionFinish,
+          executionFinishSessionCreated,
         }),
       onHandoff: deliver,
     });
@@ -304,11 +347,11 @@ export default function pipelines(pi: ExtensionAPI) {
     name: "pipeline_run",
     label: "Run Pipeline",
     description:
-      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name (maximum 64 characters) and return its canonical name-plus-eight-hex run id immediately: feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/xHIGH implementation candidates; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. plan-pipeline produces a complete repository-grounded plan through six parallel Luna discoveries and one Luna/xHIGH synthesis; pass plan_path explicitly as a destination or null. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
+      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name (maximum 64 characters) and return its canonical name-plus-eight-hex run id immediately. Optionally set wallclock_limit to a canonical 30s–24h stage budget; omission uses 30m. Supported definitions are feature-pipeline, small-feature-pipeline, plan-pipeline, and audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/xHIGH implementation candidates; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. plan-pipeline produces a complete repository-grounded plan through six parallel Luna discoveries and one Luna/xHIGH synthesis; pass plan_path explicitly as a destination or null. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
     promptSnippet:
       "Start a background implementation, planning, or Luna audit pipeline",
     promptGuidelines: [
-      "Always provide pipeline_name as the unchanged lowercase kebab-case base of 3–5 hyphen-separated words (maximum 64 characters), such as replace-heavy-plan-pipeline. The controller appends the canonical eight-character hexadecimal suffix; use that exact returned id for later inspection or cancellation. Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline request. Use audit-pipeline for routine repository initial or closure audits that require four independent static Luna tracks, one audit-executor contributor, and incremental Luna synthesis without remediation. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
+      "Always provide pipeline_name as the unchanged lowercase kebab-case base of 3–5 hyphen-separated words (maximum 64 characters), such as replace-heavy-plan-pipeline. Optionally provide wallclock_limit as an integer duration such as 30s, 5m, or 2h; stages warn at 80% and end as limited at 100% unless an earlier outcome wins. The controller appends the canonical eight-character hexadecimal suffix; use that exact returned id for later inspection or cancellation. Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline request. Use audit-pipeline for routine repository initial or closure audits that require four independent static Luna tracks, one audit-executor contributor, and incremental Luna synthesis without remediation. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
       "Automatically use plan-pipeline for a durable audited implementation plan, task breakdown, dependency waves, or test/release plan when at least one complexity signal applies: the goal spans two or more of frontend, backend, data, DevOps, or runtime; it includes migration, rollout, rollback, operational readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies require repository discovery. An explicit plan-pipeline request does not require a complexity signal.",
       "Do not choose plan-pipeline merely because an implementation request is cross-layer. Do not use implementation or planning pipelines for bugs, refactors, research-only work, or trivial edits; use audit-pipeline only when the requested outcome is a bounded repository audit rather than implementation. A small feature is bounded implementation work that still benefits from independent audit; it is not a synonym for a trivial edit. If the user has not made the desired deliverable—plan versus implementation—clear, ask before launching. Before feature-pipeline or small-feature-pipeline, create and prepare a dedicated linked Git worktree and pass its exact root. git_commit is authoritative and never inferred from task prose. feature-pipeline additionally rejects omission/false and requires Linux bubblewrap plus a clean stable HEAD; its controller alone owns temporary candidate/synthesis branches, worktrees, exact promotion, and cleanup. No pipeline receives push, delivery-merge, history-rewrite, deployment, or external-state authority. After launch, do not duplicate work in the same workspace; use pipeline_check occasionally or /pipelines for live inspection while continuing only unrelated work. Do not poll; completion arrives automatically as a follow-up handoff.",
     ],
@@ -322,6 +365,9 @@ export default function pipelines(pi: ExtensionAPI) {
         throw new Error(`working_dir is not a directory: ${workingDir}`);
       }
       const definition = resolvePipelineDefinition(params.pipeline);
+      // Keep range validation in the public admission path as well as the
+      // controller so rejected requests do not even construct controller state.
+      parsePipelineWallclockLimit(params.wallclock_limit);
       if (definition === "plan-pipeline" && params.plan_path === undefined) {
         throw new Error(
           "plan-pipeline requires plan_path explicitly as a path or null.",
@@ -370,15 +416,24 @@ export default function pipelines(pi: ExtensionAPI) {
         ...(definition === "plan-pipeline"
           ? { planPath: params.plan_path ?? null }
           : {}),
+        ...(params.wallclock_limit !== undefined
+          ? { wallclockLimit: params.wallclock_limit }
+          : {}),
       });
+      const admitted = getController(ctx).get(runId);
       return {
         content: [
           {
             type: "text",
-            text: `Started ${definition} ${runId} in ${workingDir}. It is running in the background; completion will arrive as a follow-up handoff.`,
+            text: `Started ${definition} ${runId} in ${workingDir} with a ${params.wallclock_limit ?? "30m"} per-stage budget. It is running in the background; completion or limitation will arrive as a follow-up handoff.`,
           },
         ],
-        details: { runId, definition, workingDir },
+        details: {
+          runId,
+          definition,
+          workingDir,
+          wallclockLimitMs: admitted?.wallclockLimitMs,
+        },
       };
     },
   });
@@ -398,9 +453,19 @@ export default function pipelines(pi: ExtensionAPI) {
         definition?: PipelineDefinitionId;
         workingDir?: string;
       };
-      const failed = details.status !== "completed";
+      const failed =
+        details.status === "failed" ||
+        details.status === "cancelled" ||
+        details.status === "limited";
       const header =
-        theme.fg(failed ? "error" : "success", "■") +
+        theme.fg(
+          details.status === "limited"
+            ? "warning"
+            : failed
+              ? "error"
+              : "success",
+          "■",
+        ) +
         " " +
         theme.fg("accent", theme.bold(details.runId ?? "?")) +
         theme.fg("muted", ` · ${details.status ?? "unknown"}`);

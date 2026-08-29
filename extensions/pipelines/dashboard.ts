@@ -32,7 +32,7 @@ import {
 
 type DashboardStage = PipelineStage | "synthesis";
 type DashboardStageStatus =
-  "pending" | "running" | "done" | "failed" | "cancelled";
+  "pending" | "running" | "done" | "failed" | "cancelled" | "limited";
 
 export type PipelineRow =
   | {
@@ -233,7 +233,12 @@ function stageStatus(
   }
   if (stageIndex < currentStageIndex) return "done";
   if (stageIndex > currentStageIndex) return "pending";
-  if (run.status === "failed" || run.status === "cancelled") return run.status;
+  if (
+    run.status === "failed" ||
+    run.status === "cancelled" ||
+    run.status === "limited"
+  )
+    return run.status;
   return run.status === "completed" ? "done" : "running";
 }
 
@@ -378,11 +383,16 @@ export function glyphStatusForPipelineRow(row: PipelineRow) {
     if (row.status === "completed") return "done";
     if (row.status === "failed") return "error";
     if (row.status === "cancelled") return "cancelled";
+    if (row.status === "limited") return "limited";
     return "running";
   }
   if (row.kind === "stage") {
     if (row.status === "failed") return "error";
-    if (row.status === "running" || row.status === "cancelled")
+    if (
+      row.status === "running" ||
+      row.status === "cancelled" ||
+      row.status === "limited"
+    )
       return row.status;
   }
   if (row.kind === "agent" && row.depth === 3) {
@@ -398,7 +408,10 @@ export function glyphStatusForPipelineRow(row: PipelineRow) {
   return undefined;
 }
 
-function statusGlyph(status: AgentNodeSnapshot["status"], theme: Theme) {
+function statusGlyph(
+  status: AgentNodeSnapshot["status"] | "limited",
+  theme: Theme,
+) {
   if (status === "done" || status === "idle") return theme.fg("success", "■");
   if (status === "error" || status === "cancelled")
     return theme.fg("error", "■");

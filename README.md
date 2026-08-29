@@ -31,7 +31,7 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 | `plan-pipeline`          | A repository-grounded implementation plan instead of code, returned directly or saved to a chosen workspace path |
 | `audit-pipeline`         | A read-only initial or closure audit with no remediation                                                         |
 
-Run `/pipelines` to inspect progress or ask Pipi to cancel one or more active runs. Each launch gets a recognizable name plus a short unique suffix, so repeated runs remain easy to distinguish. Press `Enter` to expand a run or open the agent responsible for a stage. Status colors make running, completed, and failed work easy to scan.
+Run `/pipelines` to inspect progress or ask Pipi to cancel one or more active runs. Each launch gets a recognizable name plus a short unique suffix, so repeated runs remain easy to distinguish. Pipeline stages warn before their configurable wallclock limit; use `30s`–`24h` durations when launching a run, or accept the 30-minute default. Press `Enter` to expand a run or open the agent responsible for a stage. Status colors make running, completed, limited, and failed work easy to scan.
 
 Implementation agents work in dedicated Git worktrees, keeping feature changes isolated from the main checkout while pipelines handle implementation, review, and verification.
 

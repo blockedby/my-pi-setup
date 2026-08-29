@@ -106,6 +106,18 @@ interface PipelineSessionFactoryOptions {
     role: string,
     workingDir: string,
   ) => string;
+  /** Controller-owned, session-bound cooperative partial settlement. */
+  readonly executionFinish?: (
+    runId: string,
+    role: string,
+    sessionToken: string,
+    value: unknown,
+  ) => void;
+  readonly executionFinishSessionCreated?: (
+    runId: string,
+    role: string,
+    token: string,
+  ) => void;
 }
 
 function textContent(message: Message) {
@@ -281,6 +293,28 @@ export function createPipelineDiscoverySynthesisSubmitTool(
     parameters: FEATURE_DISCOVERY_SYNTHESIS_SCHEMA,
     acceptedText: "Discovery synthesis recorded. Stop this turn.",
     submit,
+  });
+}
+
+export const PIPELINE_EXECUTION_FINISH_PARAMETERS = Type.Object(
+  {
+    summary: Type.Optional(Type.String({ minLength: 1, maxLength: 8 * 1024 })),
+    output: Type.Optional(Type.String({ minLength: 1, maxLength: 32 * 1024 })),
+  },
+  { additionalProperties: false, minProperties: 1 },
+);
+
+export function createPipelineExecutionFinishTool(
+  finish: (value: unknown) => void,
+) {
+  return createTerminatingSubmissionTool({
+    name: "pipeline_execution_finish",
+    label: "Finish Pipeline Execution",
+    description:
+      "Record bounded cooperative partial output for the controller before this session stops. This is provenance only and cannot complete, report, retry, replace, or advance a pipeline.",
+    parameters: PIPELINE_EXECUTION_FINISH_PARAMETERS,
+    acceptedText: "Bounded partial output recorded. Stop this turn.",
+    submit: finish,
   });
 }
 
@@ -563,6 +597,26 @@ export function createPipelineSessionFactory(
               ),
             )
           : undefined;
+      const executionFinishToken = options.executionFinish
+        ? randomUUID()
+        : undefined;
+      if (executionFinishToken)
+        options.executionFinishSessionCreated?.(
+          spec.scopeId ?? "",
+          spec.role,
+          executionFinishToken,
+        );
+      const executionFinishTool =
+        executionFinishToken && options.executionFinish
+          ? createPipelineExecutionFinishTool((value) =>
+              options.executionFinish!(
+                spec.scopeId ?? "",
+                spec.role,
+                executionFinishToken,
+                value,
+              ),
+            )
+          : undefined;
       const customTools =
         isRoot &&
         spec.role === "pipeline-root" &&
@@ -605,11 +659,19 @@ export function createPipelineSessionFactory(
         ...(featureCommitTool ? [featureCommitTool] : []),
         ...(discoveryTool ? [discoveryTool] : []),
         ...(auditTool ? [auditTool] : []),
+        ...(executionFinishTool ? [executionFinishTool] : []),
       ];
       const planReadTools =
         definition === PLAN_PIPELINE_ID && !isRoot
           ? spec.role === "discover-requirements-boundaries"
-            ? ["read", "fd", "rg", "bash", "pipeline_plan_discovery_submit"]
+            ? [
+                "read",
+                "fd",
+                "rg",
+                "bash",
+                "pipeline_plan_discovery_submit",
+                ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
+              ]
             : spec.role === "discover-external-evidence"
               ? [
                   "read",
@@ -618,10 +680,23 @@ export function createPipelineSessionFactory(
                   "web_search_codex",
                   "web_fetch_codex",
                   "pipeline_plan_discovery_submit",
+                  ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
                 ]
-              : ["read", "fd", "rg", "pipeline_plan_discovery_submit"]
+              : [
+                  "read",
+                  "fd",
+                  "rg",
+                  "pipeline_plan_discovery_submit",
+                  ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
+                ]
           : definition === PLAN_PIPELINE_ID && isPlanSynthesis
-            ? ["read", "fd", "rg", "pipeline_plan_submit"]
+            ? [
+                "read",
+                "fd",
+                "rg",
+                "pipeline_plan_submit",
+                ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
+              ]
             : undefined;
       const { session } = await createAgentSession({
         cwd: spec.cwd,
@@ -633,7 +708,12 @@ export function createPipelineSessionFactory(
         resourceLoader: resources.loader,
         ...(sessionTools.length > 0 ? { customTools: sessionTools } : {}),
         ...(featureBoundary
-          ? { tools: [...featureBoundary.availableToolNames] }
+          ? {
+              tools: [
+                ...featureBoundary.availableToolNames,
+                ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
+              ],
+            }
           : planReadTools
             ? { tools: planReadTools }
             : {}),
@@ -643,7 +723,10 @@ export function createPipelineSessionFactory(
         options.sessionCreated?.(session);
         await bindChildSessionExtensions(session);
         if (featureBoundary) {
-          session.setActiveToolsByName([...featureBoundary.initialActiveTools]);
+          session.setActiveToolsByName([
+            ...featureBoundary.initialActiveTools,
+            ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
+          ]);
         }
       } catch (error) {
         await shutdownAndDisposeChildSession(session);
@@ -690,6 +773,7 @@ export function createPipelineSessionFactory(
             "edit",
             "write",
             "pipeline_feature_commit",
+            ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
           ]);
         },
         async interrupt() {

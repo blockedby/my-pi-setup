@@ -141,7 +141,10 @@ function agentStatusCounts(agents: ReadonlyArray<AgentNodeSnapshot>) {
 }
 
 function elapsedMs(run: PipelineRunSnapshot, now: number) {
-  return Math.max(0, (run.finishedAt ?? now) - run.startedAt);
+  return (
+    run.wallclock?.runElapsedMs ??
+    Math.max(0, (run.finishedAt ?? now) - run.startedAt)
+  );
 }
 
 function formatElapsed(milliseconds: number) {
@@ -197,6 +200,17 @@ export function projectPipelineList(runs: ReadonlyArray<PipelineRunSnapshot>) {
       status: run.status,
       startedAt: run.startedAt,
       ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+      ...(run.wallclock
+        ? {
+            wallclockLimitMs: run.wallclock.limitMs,
+            runElapsedMs: run.wallclock.runElapsedMs,
+            stageElapsedMs: run.wallclock.stageElapsedMs,
+            remainingMs: run.wallclock.remainingMs,
+            warningReached: run.wallclock.warningReached,
+            warningAtMs: run.wallclock.warningAtMs,
+            deadlineAtMs: run.wallclock.deadlineAtMs,
+          }
+        : {}),
       workingDir: run.workingDir,
     }));
 }
@@ -208,7 +222,7 @@ export function formatPipelineList(
   return pipelines
     .map(
       (run) =>
-        `${run.id} [${run.status}] ${run.definition} · ${run.stage} · ${new Date(run.startedAt).toISOString()} · ${run.workingDir}`,
+        `${run.id} [${run.status}] ${run.definition} · ${run.stage}${run.remainingMs !== undefined ? ` · ${run.remainingMs}ms remaining` : ""} · ${new Date(run.startedAt).toISOString()} · ${run.workingDir}`,
     )
     .join("\n");
 }
@@ -277,6 +291,20 @@ export function projectPipelineCheck(
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
     elapsedMs: elapsedMs(run, now),
     workingDir: run.workingDir,
+    ...(run.wallclock
+      ? {
+          wallclockLimitMs: run.wallclock.limitMs,
+          runElapsedMs: run.wallclock.runElapsedMs,
+          stageElapsedMs: run.wallclock.stageElapsedMs,
+          remainingMs: run.wallclock.remainingMs,
+          warningReached: run.wallclock.warningReached,
+          warningAtMs: run.wallclock.warningAtMs,
+          deadlineAtMs: run.wallclock.deadlineAtMs,
+          ...(run.stageTiming ? { stageTiming: run.stageTiming } : {}),
+          partialCount: (run.limitation?.partials ?? run.partials ?? []).length,
+          ...(run.limitation ? { limitation: run.limitation } : {}),
+        }
+      : {}),
     rootStatus: root?.status ?? "not-started",
     agentStatusCounts: agentStatusCounts(agents),
     agents: projectedAgents,
@@ -347,6 +375,17 @@ export function formatPipelineCheck(details: ProjectedPipelineCheck) {
     `Status: ${details.status}`,
     `Stage: ${details.stage} (${details.stageProgress.current}/${details.stageProgress.total})`,
     `Elapsed: ${formatElapsed(details.elapsedMs)}`,
+    ...(details.remainingMs !== undefined
+      ? [
+          `Stage elapsed: ${formatElapsed(details.stageElapsedMs ?? 0)} · Remaining: ${formatElapsed(details.remainingMs)}`,
+          `Wallclock limit: ${formatElapsed(details.wallclockLimitMs ?? 0)} · Warning: ${details.warningReached ? "reached" : "pending"}`,
+        ]
+      : []),
+    ...(details.status === "limited"
+      ? [
+          "Outcome: limited (stage deadline reached; no success/readiness claim)",
+        ]
+      : []),
     `Working directory: ${details.workingDir}`,
     `Root status: ${details.rootStatus}`,
     `Agent status counts: ${counts}`,
@@ -380,6 +419,12 @@ export function formatPipelineCheck(details: ProjectedPipelineCheck) {
   if (details.auditSegment) {
     lines.push(
       `Audit segment: ${details.auditSegment.mode} · ${details.auditSegment.phase} · reports accepted ${details.auditSegment.acceptedReportCount}/${details.auditSegment.expectedReportCount} · pending ${details.auditSegment.pendingReportCount} · integrated ${details.auditSegment.integratedReportCount} · reducer ${details.auditSegment.reducerStatus} · revision ${details.auditSegment.revision} · final ${details.auditSegment.finalReportValidated ? "validated" : "pending"}`,
+    );
+  }
+
+  if (details.limitation) {
+    lines.push(
+      `Limitation: ${details.limitation.stage} reached its deadline · validated progress ${details.limitation.validatedProgress.length} · bounded partials ${details.limitation.partials.length}`,
     );
   }
 

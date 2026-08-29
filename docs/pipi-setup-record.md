@@ -1588,6 +1588,7 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/feature-worktrees.ts`, `extensions/pipelines/feature-worktrees.test.ts`, and this record. Installed runtime state and active pipeline runs are unchanged.
 - **Verification:** Focused feature-worktree tests passed 7/7; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
 - **Pending:** PR [#82](https://github.com/blockedby/my-pi-setup/pull/82) is open against `main` for the user to merge after the preceding fix; runtime rollout is not requested.
+
 ## Operation entry: simplify plan-pipeline into a Luna planning graph
 
 - **Request:** Replace the heavyweight plan-pipeline with the agreed planning-specific Luna-only discover, synthesize, complete graph and support explicit optional plan output.
@@ -1627,6 +1628,7 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `~/.pipi/agent/settings.json`, GitHub issue #84, untracked `docs/plans/pipeline-stage-wallclock-limits.md`, and this record. Installed package binaries, credentials, model overrides, submodule pins, and the running pipeline process were unchanged.
 - **Verification:** `pipeline_list` showed exactly one real `pipeline-1` run despite duplicate command registrations. Settings now contain only the managed MCP adapter, canonical repository, and canonical pi-codex package roots; `bun scripts/check-pipi-install.mjs` passes. The plan artifact validated successfully, its focused contract tests passed 5/5, and `gh issue create` returned issue #84.
 - **Pending:** Restart Pipi after this active run/session so extensions reload once, then run a fresh plan-pipeline if an execution test of the Luna-only graph is still desired. The installer/checker should separately be hardened against stale duplicate local repository package roots.
+
 ## Operation entry: implement collision-safe canonical pipeline names and retained namespaces
 
 - **Request:** Implement collision-safe human-readable names and retained Git namespaces for all four Pipi pipelines, including strict admission, canonical IDs, pre-discovery conflict handling, artifact-safe feature commits, and exact handoff paths; do not install, reload, deploy, push, or mutate external state.
@@ -1674,3 +1676,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Canonical `main`, managed runtime/settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, browser/MCP assets, Herdr integration, and this record. Pipi remains 0.84.3; credentials, model overrides, submodule pins, regular Pi state, and unrelated local `docs/plans/` work are unchanged.
 - **Verification:** Post-rebase verification passed 64 installer/script tests, 325 extension tests, 22 file-search tests, TypeScript, formatting, exact submodules, and `git diff --check`. PR #85 is merged at `fbc3b5f`; local `main` equals `origin/main`. `bun run install:pipi -- --skip-repository-dependencies` installed 233 isolated packages with Bun 1.4.0; `bun run check:pipi-install` verified Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install policy, model overrides, and Herdr integration. `/home/kcnc/.local/bin/pipi --version` reports 0.84.3, and package sources contain only the canonical checkout plus expected MCP and pi-codex packages.
 - **Pending:** Reload or restart sessions created before this rollout so they load the required `pipeline_name` contract and canonical run-ID behavior.
+
+## Operation entry: implement per-stage pipeline wallclock limits
+
+- **Request:** Implement GitHub issue `blockedby/my-pi-setup#84`: configurable per-stage wallclock warnings and hard limits for all four Pipi pipeline graphs, with deterministic monotonic timing, bounded cooperative partials, limited handoffs, and preserved graph/Git invariants.
+- **Action:** Added canonical `pipeline_run.wallclock_limit` admission (30-second through 24-hour inclusive, 30-minute default), controller-owned monotonic stage epochs with exact 80% warnings and 100% limited settlement, root-independent bounded cleanup, late-session disposal guards, the constrained session-bound `pipeline_execution_finish` tool, bounded provenance-only partial output, and timing/limitation projections across inspection, list, dashboard, cancellation, and handoff surfaces. Documented the detailed contract and kept README guidance user-facing.
+- **Affected paths or values:** `extensions/pipelines/{domain,wallclock,controller,session,index,inspection,dashboard}.ts`, `extensions/pipelines/wallclock.test.ts`, `README.md`, `docs/pipelines-v1-design.md`, and this record. No installed runtime, authentication data, model overrides, submodule pins, GitHub state, or external delivery state was changed.
+- **Verification:** Focused pipeline tests passed 97/97 with `TMPDIR` set to the disposable worktree directory; TypeScript checking passed using the existing repository dependency cache. Repository dependency bootstrap was attempted but registry access was refused, so the full deterministic suite, formatter, submodule, installer, and diff checks remain pending in a Git-capable prepared worktree.
+- **Pending:** Run the repository-declared full deterministic, formatting, exact-submodule, installer, and `git diff --check` verification after dependency/bootstrap access is restored; no runtime rollout or reload was requested.
