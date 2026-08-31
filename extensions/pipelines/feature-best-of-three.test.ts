@@ -94,6 +94,12 @@ test("strict handoff, selection, and synthesis contracts reject incomplete or un
     parseFeatureCandidateHandoff(JSON.stringify(handoff("Minimal"))).role,
     "Minimal",
   );
+  assert.deepEqual(
+    parseFeatureCandidateHandoff(
+      JSON.stringify({ ...handoff("Minimal"), changedPaths: [] }),
+    ).changedPaths,
+    [],
+  );
   const selection = {
     reportType: "feature-implementation-selection-v1",
     selectionOnlyAcknowledgement:

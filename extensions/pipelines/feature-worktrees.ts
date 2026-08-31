@@ -543,6 +543,91 @@ function readIgnoredPaths(cwd: string, paths: ReadonlyArray<string>) {
   });
 }
 
+function hasExactGitPath(
+  cwd: string,
+  args: ReadonlyArray<string>,
+  filePath: string,
+) {
+  return nulSeparatedPaths(
+    requireGitRaw(cwd, args, "Unable to inspect Git paths"),
+  ).some((entry) => {
+    const separator = entry.indexOf("\t");
+    return separator >= 0 && entry.slice(separator + 1) === filePath;
+  });
+}
+
+function hasExactTrackedPath(cwd: string, filePath: string) {
+  return (
+    hasExactGitPath(
+      cwd,
+      ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", filePath],
+      filePath,
+    ) ||
+    hasExactGitPath(
+      cwd,
+      ["--literal-pathspecs", "ls-tree", "-r", "-z", "HEAD", "--", filePath],
+      filePath,
+    )
+  );
+}
+
+function symlinkTargetEscapes(cwd: string, filePath: string, target: string) {
+  const absolutePath = path.resolve(cwd, filePath);
+  const targetPath = path.isAbsolute(target)
+    ? path.resolve(target)
+    : path.resolve(path.dirname(absolutePath), target);
+  const relativeTarget = path.relative(cwd, targetPath);
+  return (
+    path.isAbsolute(relativeTarget) ||
+    relativeTarget.startsWith(`..${path.sep}`) ||
+    pathHasExternalSymlink(cwd, relativeTarget)
+  );
+}
+
+function gitSymlinkTarget(
+  cwd: string,
+  args: ReadonlyArray<string>,
+  filePath: string,
+  objectIndex: number,
+) {
+  const entry = nulSeparatedPaths(
+    requireGitRaw(cwd, args, "Unable to inspect tracked deletion path"),
+  ).find((item) => {
+    const separator = item.indexOf("\t");
+    return separator >= 0 && item.slice(separator + 1) === filePath;
+  });
+  if (!entry) return undefined;
+  const separator = entry.indexOf("\t");
+  const metadata = entry.slice(0, separator).split(/\s+/);
+  if (metadata[0] !== "120000" || !metadata[objectIndex]) return undefined;
+  return requireGitRaw(
+    cwd,
+    ["cat-file", "blob", metadata[objectIndex]!],
+    "Unable to inspect tracked symlink target",
+  );
+}
+
+function trackedDeletedSymlinkEscapes(cwd: string, filePath: string) {
+  const targets = [
+    gitSymlinkTarget(
+      cwd,
+      ["--literal-pathspecs", "ls-tree", "-r", "-z", "HEAD", "--", filePath],
+      filePath,
+      2,
+    ),
+    gitSymlinkTarget(
+      cwd,
+      ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", filePath],
+      filePath,
+      1,
+    ),
+  ];
+  return targets.some(
+    (target) =>
+      target !== undefined && symlinkTargetEscapes(cwd, filePath, target),
+  );
+}
+
 export function rollbackOwnedFeatureBranches(
   cwd: string,
   ownedBranchRefs: ReadonlyMap<string, string>,
@@ -818,19 +903,28 @@ function validateExplicitCommitPaths(
       `Feature commit rejected unsafe/outside repository-relative paths: ${invalid.slice(0, 16).join(", ")}.`,
     );
   }
-  const generated = paths.filter(
-    (filePath) =>
-      isGeneratedArtifactPath(filePath) || isHostControlledPath(filePath),
-  );
+  const generated = paths.filter(isGeneratedArtifactPath);
+  const hostControlled = paths.filter(isHostControlledPath);
   const ignored = readIgnoredPaths(workingDir, paths);
-  if (generated.length > 0 || ignored.length > 0) {
-    const rejected = [...new Set([...generated, ...ignored])];
+  if (generated.length > 0) {
     throw new Error(
-      `Feature commit rejected generated or host-controlled paths (including ignored paths): ${rejected.slice(0, 16).join(", ")}.`,
+      `Feature commit rejected generated paths: ${generated.slice(0, 16).join(", ")}.`,
     );
   }
-  const escaped = paths.filter((filePath) =>
-    pathHasExternalSymlink(workingDir, filePath),
+  if (hostControlled.length > 0) {
+    throw new Error(
+      `Feature commit rejected host-controlled paths: ${hostControlled.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (ignored.length > 0) {
+    throw new Error(
+      `Feature commit rejected ignored paths: ${ignored.slice(0, 16).join(", ")}.`,
+    );
+  }
+  const escaped = paths.filter(
+    (filePath) =>
+      pathHasExternalSymlink(workingDir, filePath) ||
+      trackedDeletedSymlinkEscapes(workingDir, filePath),
   );
   if (escaped.length > 0) {
     throw new Error(
@@ -838,26 +932,16 @@ function validateExplicitCommitPaths(
     );
   }
   const missing = paths.filter((filePath) => {
-    if (fs.existsSync(path.resolve(workingDir, filePath))) {
+    const absolutePath = path.resolve(workingDir, filePath);
+    if (fs.existsSync(absolutePath)) {
       try {
-        if (fs.lstatSync(path.resolve(workingDir, filePath)).isDirectory()) {
-          return true;
-        }
+        if (fs.lstatSync(absolutePath).isDirectory()) return true;
       } catch {
         return true;
       }
       return false;
     }
-    try {
-      execFileSync(
-        "git",
-        ["--literal-pathspecs", "ls-files", "--error-unmatch", "--", filePath],
-        { cwd: workingDir, stdio: "ignore" },
-      );
-      return false;
-    } catch {
-      return true;
-    }
+    return !hasExactTrackedPath(workingDir, filePath);
   });
   if (missing.length > 0) {
     throw new Error(
@@ -871,16 +955,16 @@ function classifyUnsafeCommittedPaths(
   workingDir: string,
   paths: ReadonlyArray<string>,
 ) {
-  const generated = paths.filter(
-    (filePath) =>
-      isGeneratedArtifactPath(filePath) || isHostControlledPath(filePath),
-  );
+  const generated = paths.filter(isGeneratedArtifactPath);
+  const hostControlled = paths.filter(isHostControlledPath);
   const ignored = readIgnoredPaths(workingDir, paths);
   const escaped = paths.filter((filePath) =>
     pathHasExternalSymlink(workingDir, filePath),
   );
   return {
-    generated: [...new Set([...generated, ...ignored])],
+    generated: [...new Set(generated)],
+    hostControlled: [...new Set(hostControlled)],
+    ignored: [...new Set(ignored)],
     escaped,
   };
 }
@@ -893,7 +977,17 @@ function assertCommittedPathsSafe(
   const unsafe = classifyUnsafeCommittedPaths(workingDir, paths);
   if (unsafe.generated.length > 0) {
     throw new Error(
-      `${label} rejected generated or host-controlled paths in committed diff: ${unsafe.generated.slice(0, 16).join(", ")}.`,
+      `${label} rejected generated paths in committed diff: ${unsafe.generated.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.hostControlled.length > 0) {
+    throw new Error(
+      `${label} rejected host-controlled paths in committed diff: ${unsafe.hostControlled.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.ignored.length > 0) {
+    throw new Error(
+      `${label} rejected ignored paths in committed diff: ${unsafe.ignored.slice(0, 16).join(", ")}.`,
     );
   }
   if (unsafe.escaped.length > 0) {
@@ -912,7 +1006,17 @@ function assertCommittedTreeSafe(
   const unsafe = classifyUnsafeCommittedPaths(workingDir, treePaths);
   if (unsafe.generated.length > 0) {
     throw new Error(
-      `${label} rejected generated or host-controlled paths in committed tree: ${unsafe.generated.slice(0, 16).join(", ")}.`,
+      `${label} rejected generated paths in committed tree: ${unsafe.generated.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.hostControlled.length > 0) {
+    throw new Error(
+      `${label} rejected host-controlled paths in committed tree: ${unsafe.hostControlled.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.ignored.length > 0) {
+    throw new Error(
+      `${label} rejected ignored paths in committed tree: ${unsafe.ignored.slice(0, 16).join(", ")}.`,
     );
   }
   if (unsafe.escaped.length > 0) {
@@ -1429,7 +1533,17 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
     );
     if (unsafeInitial.generated.length > 0) {
       throw new Error(
-        `Feature commit rejected generated or host-controlled paths already staged: ${unsafeInitial.generated.slice(0, 16).join(", ")}.`,
+        `Feature commit rejected generated paths already staged: ${unsafeInitial.generated.slice(0, 16).join(", ")}.`,
+      );
+    }
+    if (unsafeInitial.hostControlled.length > 0) {
+      throw new Error(
+        `Feature commit rejected host-controlled paths already staged: ${unsafeInitial.hostControlled.slice(0, 16).join(", ")}.`,
+      );
+    }
+    if (unsafeInitial.ignored.length > 0) {
+      throw new Error(
+        `Feature commit rejected ignored paths already staged: ${unsafeInitial.ignored.slice(0, 16).join(", ")}.`,
       );
     }
     if (unsafeInitial.escaped.length > 0) {
@@ -1465,7 +1579,17 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       const unsafe = classifyUnsafeCommittedPaths(resolved, stagedPaths);
       if (unsafe.generated.length > 0) {
         throw new Error(
-          `Feature commit rejected generated or host-controlled paths (including ignored paths): ${unsafe.generated.slice(0, 16).join(", ")}.`,
+          `Feature commit rejected generated paths: ${unsafe.generated.slice(0, 16).join(", ")}.`,
+        );
+      }
+      if (unsafe.hostControlled.length > 0) {
+        throw new Error(
+          `Feature commit rejected host-controlled paths: ${unsafe.hostControlled.slice(0, 16).join(", ")}.`,
+        );
+      }
+      if (unsafe.ignored.length > 0) {
+        throw new Error(
+          `Feature commit rejected ignored paths: ${unsafe.ignored.slice(0, 16).join(", ")}.`,
         );
       }
       if (unsafe.escaped.length > 0) {
@@ -1602,11 +1726,6 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
     if (diff.truncated) {
       throw new Error(
         `Bounded augmentation diff exceeds ${SYNTHESIS_DIFF_LIMIT} UTF-8 bytes.`,
-      );
-    }
-    if (!equalUniquePathSets(provenance.changedPaths, changedPaths)) {
-      throw new Error(
-        "Synthesis changedPaths do not match its augmentation diff.",
       );
     }
     validateAugmentationAttribution(
