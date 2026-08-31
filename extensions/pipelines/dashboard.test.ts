@@ -300,7 +300,7 @@ test("feature Best-of-3 candidates and implementation synthesis render in separa
       role: `candidate-${role.toLowerCase()}`,
       title: `${role} candidate`,
       model: "openai-codex/gpt-5.6-luna",
-      thinkingLevel: "xhigh",
+      thinkingLevel: "high",
       createdAt: index + 2,
     }),
   );
@@ -334,7 +334,7 @@ test("feature Best-of-3 candidates and implementation synthesis render in separa
     FEATURE_CANDIDATE_ROLES.map((role) => `candidate-${role.toLowerCase()}`),
   );
   assert.equal(
-    buildAgents.every((row) => row.label.includes(" · xhigh · running")),
+    buildAgents.every((row) => row.label.includes(" · high · running")),
     true,
   );
   assert.ok(synthesisStage);
@@ -362,7 +362,7 @@ test("feature dashboard reserves a pending synthesis stage before its agent star
   const candidate = agent("candidate-1", {
     parentId: root.id,
     role: "candidate-minimal",
-    thinkingLevel: "xhigh",
+    thinkingLevel: "high",
   });
   const run = {
     ...pipelineRun("run-1", [root, candidate]),

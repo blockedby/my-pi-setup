@@ -388,7 +388,7 @@ export interface PipelineRunRequest {
   readonly audit?: AuditPipelineInput;
   /** Required explicitly for plan-pipeline; null means terminal-only delivery. */
   readonly planPath?: string | null;
-  /** Caller-selected canonical duration; omission disables wallclock timing. */
+  /** Caller-selected canonical duration; omission disables per-stage timing. */
   readonly wallclockLimit?: string;
 }
 

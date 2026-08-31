@@ -42,6 +42,8 @@ import { FEATURE_DISCOVERY_COVERAGE } from "./discovery-report.ts";
 import { planDiscoveryCoverage } from "./plan-discovery-report.ts";
 import {
   FEATURE_CANDIDATE_ROLES,
+  FEATURE_CANDIDATE_STEERING_LIMIT_MS,
+  FEATURE_CANDIDATE_STEERING_WARNING_MS,
   FEATURE_DISCOVERY_SYNTHESIS_ROLE,
   FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
   type FeatureCandidateHandoff,
@@ -58,6 +60,7 @@ import type {
   FeatureSynthesisWorktree,
   ValidatedFeatureSynthesis,
 } from "./feature-worktrees.ts";
+import type { PipelineWallclockScheduler } from "./wallclock.ts";
 
 interface LinkedWorktreeFixture {
   root: string;
@@ -134,6 +137,7 @@ class FakePipelineSession implements AgentTreeSession {
     spec: AgentNodeSpec,
     autoReport?: string | ((turn: number) => string),
     discoverySubmit?: (value: unknown) => void,
+    private readonly synchronousAutoComplete = false,
   ) {
     this.activeTools = activeTools;
     this.spec = spec;
@@ -159,12 +163,13 @@ class FakePipelineSession implements AgentTreeSession {
       typeof this.autoReport === "function"
         ? this.autoReport(this.turn++)
         : this.autoReport;
-    queueMicrotask(() =>
+    const settle = () =>
       this.emit({
         type: "settled",
         outcome: { type: "completed", finalText: report },
-      }),
-    );
+      });
+    if (this.synchronousAutoComplete) settle();
+    else queueMicrotask(settle);
   }
 
   async prompt(text: string) {
@@ -202,6 +207,34 @@ const CANDIDATE_COMMITS: Readonly<Record<FeatureCandidateRole, string>> = {
   Architectural: "d".repeat(40),
 };
 const FINAL_SYNTHESIS_COMMIT = "e".repeat(40);
+
+class ManualScheduler implements PipelineWallclockScheduler {
+  readonly scheduled: Array<{
+    delayMs: number;
+    callback: () => void;
+    cancelled: boolean;
+  }> = [];
+
+  schedule(delayMs: number, callback: () => void) {
+    const entry = { delayMs, callback, cancelled: false };
+    this.scheduled.push(entry);
+    return () => {
+      entry.cancelled = true;
+    };
+  }
+
+  fire(delayMs: number) {
+    for (const entry of this.scheduled) {
+      if (!entry.cancelled && entry.delayMs === delayMs) entry.callback();
+    }
+  }
+
+  invokeQueued(delayMs: number) {
+    for (const entry of this.scheduled) {
+      if (entry.delayMs === delayMs) entry.callback();
+    }
+  }
+}
 
 class FakeFeatureLifecycle implements FeatureWorktreeLifecycle {
   readonly temporaryRoot: string;
@@ -384,6 +417,7 @@ function harness(
     autoCompleteFeatureDiscovery?: boolean;
     autoCompleteDiscoverySynthesis?: boolean;
     autoCompleteCandidates?: boolean;
+    synchronousCandidateFirstTurn?: boolean;
     autoCompleteSelectionAndSynthesis?: boolean;
     rejectRootCancellation?: boolean;
     runIds?: ReadonlyArray<string>;
@@ -391,6 +425,7 @@ function harness(
     makeRunToken?: () => string;
     useDefaultRunId?: boolean;
     failCandidateReservation?: boolean;
+    scheduler?: PipelineWallclockScheduler;
   } = {},
 ) {
   const sessions: FakePipelineSession[] = [];
@@ -419,6 +454,7 @@ function harness(
         }),
     ...(options.makeRunToken ? { makeRunToken: options.makeRunToken } : {}),
     makeAgentId: () => `node-${++agentSequence}`,
+    ...(options.scheduler ? { scheduler: options.scheduler } : {}),
     createSessionFactory: (
       rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
       definitionForRun,
@@ -458,15 +494,30 @@ function harness(
                     options.autoCompleteDiscoverySynthesis !== false
                   ? JSON.stringify(discoverySynthesisResult())
                   : candidateRole && options.autoCompleteCandidates !== false
-                    ? JSON.stringify(
-                        candidateHandoff(
-                          candidateRole,
-                          spec,
-                          lifecycles.find((lifecycle) =>
-                            spec.cwd.startsWith(lifecycle.temporaryRoot),
-                          )?.caller.baseCommit ?? BASE_COMMIT,
-                        ),
-                      )
+                    ? options.synchronousCandidateFirstTurn
+                      ? (turn: number) =>
+                          turn === 0
+                            ? "{}"
+                            : JSON.stringify(
+                                candidateHandoff(
+                                  candidateRole,
+                                  spec,
+                                  lifecycles.find((lifecycle) =>
+                                    spec.cwd.startsWith(
+                                      lifecycle.temporaryRoot,
+                                    ),
+                                  )?.caller.baseCommit ?? BASE_COMMIT,
+                                ),
+                              )
+                      : JSON.stringify(
+                          candidateHandoff(
+                            candidateRole,
+                            spec,
+                            lifecycles.find((lifecycle) =>
+                              spec.cwd.startsWith(lifecycle.temporaryRoot),
+                            )?.caller.baseCommit ?? BASE_COMMIT,
+                          ),
+                        )
                     : spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE &&
                         options.autoCompleteSelectionAndSynthesis !== false
                       ? (turn: number) =>
@@ -523,6 +574,7 @@ function harness(
                     value,
                   )
               : undefined,
+            Boolean(candidateRole && options.synchronousCandidateFirstTurn),
           );
           if (!spec.parentId && options.rejectRootCancellation) {
             session.interruptError = new Error("root cancellation rejected");
@@ -1224,8 +1276,7 @@ test("feature-pipeline enters build while Best-of-3 candidates are running", asy
   assert.equal(candidates.length, 3);
   assert.equal(
     candidates.every(
-      (session) =>
-        session.isStreaming && session.spec.thinkingLevel === "xhigh",
+      (session) => session.isStreaming && session.spec.thinkingLevel === "high",
     ),
     true,
   );
@@ -1233,10 +1284,236 @@ test("feature-pipeline enters build while Best-of-3 candidates are running", asy
   await run.controller.dispose();
 });
 
-test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with identical complete context", async () => {
+test("feature candidate steering timers arm independently after each session starts", async () => {
+  let releaseDelayedCandidate = () => {};
+  const delayedCandidate = new Promise<void>((resolve) => {
+    releaseDelayedCandidate = resolve;
+  });
+  const scheduler = new ManualScheduler();
   const run = harness({
     autoCompleteFeatureDiscovery: false,
     autoCompleteDiscoverySynthesis: false,
+    autoCompleteCandidates: false,
+    scheduler,
+    sessionGate: (spec) =>
+      spec.role === "candidate-robust" ? delayedCandidate : undefined,
+  });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) settleRole(run, role);
+  await settleInitialization();
+
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis?.discoverySubmit);
+  synthesis.discoverySubmit(discoverySynthesisResult());
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "" },
+  });
+  await settleInitialization();
+
+  assert.equal(
+    scheduler.scheduled.filter(
+      ({ delayMs }) =>
+        delayMs === FEATURE_CANDIDATE_STEERING_WARNING_MS ||
+        delayMs === FEATURE_CANDIDATE_STEERING_LIMIT_MS,
+    ).length,
+    4,
+  );
+  assert.equal(
+    run.sessions.some((session) => session.spec.role === "candidate-robust"),
+    false,
+  );
+
+  releaseDelayedCandidate();
+  await settleInitialization();
+  assert.equal(
+    scheduler.scheduled.filter(
+      ({ delayMs }) =>
+        delayMs === FEATURE_CANDIDATE_STEERING_WARNING_MS ||
+        delayMs === FEATURE_CANDIDATE_STEERING_LIMIT_MS,
+    ).length,
+    6,
+  );
+  await run.controller.cancelRun(runId);
+  assert.equal(
+    scheduler.scheduled.every(({ cancelled }) => cancelled),
+    true,
+  );
+  assert.equal(run.controller.get(runId)?.status, "cancelled");
+  await run.controller.dispose();
+});
+
+test("synchronously settled invalid candidate turns retain steering through correction", async () => {
+  const scheduler = new ManualScheduler();
+  const run = harness({ synchronousCandidateFirstTurn: true, scheduler });
+  const runId = run.controller.start(request());
+  for (let turn = 0; turn < 12; turn++) await settleInitialization();
+
+  const candidates = run.sessions.filter((session) =>
+    candidateRoleFromSpec(session.spec.role),
+  );
+  assert.equal(candidates.length, 3);
+  assert.equal(
+    candidates.every((session) => session.sends.length === 1),
+    true,
+  );
+  assert.equal(
+    scheduler.scheduled.filter(
+      ({ delayMs }) =>
+        delayMs === FEATURE_CANDIDATE_STEERING_WARNING_MS ||
+        delayMs === FEATURE_CANDIDATE_STEERING_LIMIT_MS,
+    ).length,
+    6,
+  );
+  assert.equal(
+    scheduler.scheduled.every(({ cancelled }) => cancelled),
+    true,
+  );
+  assert.equal(run.controller.get(runId)?.status, "running");
+  await run.controller.dispose();
+});
+
+test("feature candidates receive independent steering without timeout cancellation", async () => {
+  const scheduler = new ManualScheduler();
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteDiscoverySynthesis: false,
+    autoCompleteCandidates: false,
+    scheduler,
+  });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) settleRole(run, role);
+  await settleInitialization();
+
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis?.discoverySubmit);
+  synthesis.discoverySubmit(discoverySynthesisResult());
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "" },
+  });
+  await settleInitialization();
+
+  const candidates = run.sessions.filter((session) =>
+    candidateRoleFromSpec(session.spec.role),
+  );
+  assert.equal(candidates.length, 3);
+  assert.equal(
+    scheduler.scheduled.filter(
+      ({ delayMs }) => delayMs === FEATURE_CANDIDATE_STEERING_WARNING_MS,
+    ).length,
+    3,
+  );
+  assert.equal(
+    scheduler.scheduled.filter(
+      ({ delayMs }) => delayMs === FEATURE_CANDIDATE_STEERING_LIMIT_MS,
+    ).length,
+    3,
+  );
+
+  const completed = candidates[0];
+  const completedRole = completed
+    ? candidateRoleFromSpec(completed.spec.role)
+    : undefined;
+  assert.ok(completed && completedRole);
+  completed.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: JSON.stringify(
+        candidateHandoff(
+          completedRole,
+          completed.spec,
+          run.lifecycles[0]?.caller.baseCommit,
+        ),
+      ),
+    },
+  });
+  await settleInitialization();
+
+  scheduler.fire(FEATURE_CANDIDATE_STEERING_WARNING_MS);
+  await settleInitialization();
+  assert.deepEqual(
+    candidates.map((session) => session.sends.length),
+    [0, 1, 1],
+  );
+
+  scheduler.fire(FEATURE_CANDIDATE_STEERING_LIMIT_MS);
+  await settleInitialization();
+  assert.deepEqual(
+    candidates.map((session) => session.sends.length),
+    [0, 2, 2],
+  );
+  assert.equal(run.controller.get(runId)?.status, "running");
+  assert.equal(
+    candidates.every((session) => session.interrupted === 0),
+    true,
+  );
+  assert.equal(
+    run.sessions.some(
+      (session) => session.spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+    ),
+    false,
+  );
+  await run.controller.cancelRun(runId);
+  assert.deepEqual(
+    candidates.map((session) => session.interrupted),
+    [0, 1, 1],
+  );
+  await run.controller.dispose();
+});
+
+test("controller disposal cancels every pending candidate steering timer", async () => {
+  const scheduler = new ManualScheduler();
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteDiscoverySynthesis: false,
+    autoCompleteCandidates: false,
+    scheduler,
+  });
+  run.controller.start(request());
+  await settleInitialization();
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) settleRole(run, role);
+  await settleInitialization();
+
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis?.discoverySubmit);
+  synthesis.discoverySubmit(discoverySynthesisResult());
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "" },
+  });
+  await settleInitialization();
+
+  assert.equal(
+    scheduler.scheduled.filter(
+      ({ delayMs }) =>
+        delayMs === FEATURE_CANDIDATE_STEERING_WARNING_MS ||
+        delayMs === FEATURE_CANDIDATE_STEERING_LIMIT_MS,
+    ).length,
+    6,
+  );
+  await run.controller.dispose();
+  assert.equal(
+    scheduler.scheduled.every(({ cancelled }) => cancelled),
+    true,
+  );
+});
+
+test("feature discovery fan-in feeds three parallel Luna/high candidates with identical complete context", async () => {
+  const scheduler = new ManualScheduler();
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteDiscoverySynthesis: false,
+    scheduler,
   });
   const runId = run.controller.start(request());
   await settleInitialization();
@@ -1302,7 +1579,7 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
     candidates.every(
       (session) =>
         session.spec.model === LUNA_MODEL &&
-        session.spec.thinkingLevel === "xhigh" &&
+        session.spec.thinkingLevel === "high" &&
         session.prompts.length === 1,
     ),
     true,
@@ -1324,6 +1601,29 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
   assert.equal(run.controller.get(runId)?.stage, "build");
   assert.equal(run.lifecycles[0]?.promoted, 1);
   assert.equal(run.lifecycles[0]?.cleaned, 1);
+  assert.equal(
+    scheduler.scheduled
+      .filter(
+        ({ delayMs }) =>
+          delayMs === FEATURE_CANDIDATE_STEERING_WARNING_MS ||
+          delayMs === FEATURE_CANDIDATE_STEERING_LIMIT_MS,
+      )
+      .every(({ cancelled }) => cancelled),
+    true,
+  );
+  const candidateSendCounts = candidates.map((session) => session.sends.length);
+  scheduler.invokeQueued(FEATURE_CANDIDATE_STEERING_WARNING_MS);
+  scheduler.invokeQueued(FEATURE_CANDIDATE_STEERING_LIMIT_MS);
+  await settleInitialization();
+  assert.deepEqual(
+    candidates.map((session) => session.sends.length),
+    candidateSendCounts,
+  );
+  assert.equal(
+    candidates.every((session) => session.interrupted === 0),
+    true,
+  );
+  assert.equal(run.controller.get(runId)?.status, "running");
   const acceptedTokens = Reflect.get(run.controller, "discoverySessionTokens");
   assert.ok(acceptedTokens instanceof Map);
   assert.equal(acceptedTokens.size, 0);

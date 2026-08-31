@@ -122,7 +122,7 @@ const PIPELINE_RUN_COMMON_PROPERTIES = {
   wallclock_limit: Type.Optional(
     Type.String({
       description:
-        "Caller-selected canonical integer stage budget in seconds, minutes, or hours; omission disables wallclock timing, and accepted values are 30s through 24h.",
+        "Caller-selected canonical integer stage budget in seconds, minutes, or hours; omission disables per-stage timing, and accepted values are 30s through 24h.",
       pattern: PIPELINE_WALLCLOCK_LIMIT_PATTERN,
       maxLength: 32,
     }),
@@ -346,7 +346,7 @@ export default function pipelines(pi: ExtensionAPI) {
     name: "pipeline_run",
     label: "Run Pipeline",
     description:
-      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name (maximum 64 characters) and return its canonical name-plus-eight-hex run id immediately. Optionally set wallclock_limit to a caller-selected canonical 30s–24h stage budget; omission disables wallclock timing. Supported definitions are feature-pipeline, small-feature-pipeline, plan-pipeline, and audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/xHIGH implementation candidates; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. plan-pipeline produces a complete repository-grounded plan through six parallel Luna discoveries and one Luna/xHIGH synthesis; pass plan_path explicitly as a destination or null. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
+      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name (maximum 64 characters) and return its canonical name-plus-eight-hex run id immediately. Optionally set wallclock_limit to a caller-selected canonical 30s–24h stage budget; omission disables per-stage timing. Supported definitions are feature-pipeline, small-feature-pipeline, plan-pipeline, and audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/high implementation candidates with independent 10-minute steering budgets that do not cancel the run; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. plan-pipeline produces a complete repository-grounded plan through six parallel Luna discoveries and one Luna/xHIGH synthesis; pass plan_path explicitly as a destination or null. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
     promptSnippet:
       "Start a background implementation, planning, or Luna audit pipeline",
     promptGuidelines: [
