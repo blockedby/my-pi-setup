@@ -510,6 +510,7 @@ const generatedDirectoryNames = new Set([
   ".cache",
   ".pi",
   ".pi-subagents",
+  ".worktrees",
 ]);
 const generatedRootDirectoryNames = new Set([
   "bin",
@@ -732,7 +733,7 @@ function boundedDiff(cwd: string, from: string, to: string, limit: number) {
 }
 
 function isHostControlledPath(filePath: string) {
-  return filePath === ".git" || filePath.startsWith(".git/");
+  return filePath.split("/").some((part) => part === ".git");
 }
 
 function invalidRelativePath(filePath: string) {
