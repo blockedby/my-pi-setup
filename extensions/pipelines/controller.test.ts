@@ -42,6 +42,8 @@ import { FEATURE_DISCOVERY_COVERAGE } from "./discovery-report.ts";
 import { planDiscoveryCoverage } from "./plan-discovery-report.ts";
 import {
   FEATURE_CANDIDATE_ROLES,
+  FEATURE_CANDIDATE_WAVE_LIMIT_MS,
+  FEATURE_CANDIDATE_WAVE_WARNING_MS,
   FEATURE_DISCOVERY_SYNTHESIS_ROLE,
   FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
   type FeatureCandidateHandoff,
@@ -58,6 +60,7 @@ import type {
   FeatureSynthesisWorktree,
   ValidatedFeatureSynthesis,
 } from "./feature-worktrees.ts";
+import type { PipelineWallclockScheduler } from "./wallclock.ts";
 
 interface LinkedWorktreeFixture {
   root: string;
@@ -202,6 +205,28 @@ const CANDIDATE_COMMITS: Readonly<Record<FeatureCandidateRole, string>> = {
   Architectural: "d".repeat(40),
 };
 const FINAL_SYNTHESIS_COMMIT = "e".repeat(40);
+
+class ManualScheduler implements PipelineWallclockScheduler {
+  readonly scheduled: Array<{
+    delayMs: number;
+    callback: () => void;
+    cancelled: boolean;
+  }> = [];
+
+  schedule(delayMs: number, callback: () => void) {
+    const entry = { delayMs, callback, cancelled: false };
+    this.scheduled.push(entry);
+    return () => {
+      entry.cancelled = true;
+    };
+  }
+
+  fire(delayMs: number) {
+    for (const entry of this.scheduled) {
+      if (!entry.cancelled && entry.delayMs === delayMs) entry.callback();
+    }
+  }
+}
 
 class FakeFeatureLifecycle implements FeatureWorktreeLifecycle {
   readonly temporaryRoot: string;
@@ -391,6 +416,7 @@ function harness(
     makeRunToken?: () => string;
     useDefaultRunId?: boolean;
     failCandidateReservation?: boolean;
+    scheduler?: PipelineWallclockScheduler;
   } = {},
 ) {
   const sessions: FakePipelineSession[] = [];
@@ -419,6 +445,7 @@ function harness(
         }),
     ...(options.makeRunToken ? { makeRunToken: options.makeRunToken } : {}),
     makeAgentId: () => `node-${++agentSequence}`,
+    ...(options.scheduler ? { scheduler: options.scheduler } : {}),
     createSessionFactory: (
       rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
       definitionForRun,
@@ -1224,8 +1251,7 @@ test("feature-pipeline enters build while Best-of-3 candidates are running", asy
   assert.equal(candidates.length, 3);
   assert.equal(
     candidates.every(
-      (session) =>
-        session.isStreaming && session.spec.thinkingLevel === "xhigh",
+      (session) => session.isStreaming && session.spec.thinkingLevel === "high",
     ),
     true,
   );
@@ -1233,10 +1259,71 @@ test("feature-pipeline enters build while Best-of-3 candidates are running", asy
   await run.controller.dispose();
 });
 
-test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with identical complete context", async () => {
+test("feature candidate wave warns at eight minutes and fails closed at its fixed ten-minute deadline", async () => {
+  const scheduler = new ManualScheduler();
   const run = harness({
     autoCompleteFeatureDiscovery: false,
     autoCompleteDiscoverySynthesis: false,
+    autoCompleteCandidates: false,
+    scheduler,
+  });
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) settleRole(run, role);
+  await settleInitialization();
+
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis?.discoverySubmit);
+  synthesis.discoverySubmit(discoverySynthesisResult());
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "" },
+  });
+  await settleInitialization();
+
+  const candidates = run.sessions.filter((session) =>
+    candidateRoleFromSpec(session.spec.role),
+  );
+  assert.equal(candidates.length, 3);
+  assert.deepEqual(
+    scheduler.scheduled.slice(-2).map(({ delayMs }) => delayMs),
+    [FEATURE_CANDIDATE_WAVE_WARNING_MS, FEATURE_CANDIDATE_WAVE_LIMIT_MS],
+  );
+
+  scheduler.fire(FEATURE_CANDIDATE_WAVE_WARNING_MS);
+  await settleInitialization();
+  assert.equal(
+    candidates.every((session) => session.sends.length === 1),
+    true,
+  );
+  assert.equal(run.controller.get(runId)?.status, "running");
+
+  scheduler.fire(FEATURE_CANDIDATE_WAVE_LIMIT_MS);
+  await settleInitialization();
+  const failed = run.controller.get(runId);
+  assert.equal(failed?.status, "failed");
+  assert.match(failed?.error ?? "", /fixed 10-minute wallclock limit/);
+  assert.equal(
+    candidates.every((session) => session.interrupted === 1),
+    true,
+  );
+  assert.equal(
+    run.sessions.some(
+      (session) => session.spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+    ),
+    false,
+  );
+  await run.controller.dispose();
+});
+
+test("feature discovery fan-in feeds three parallel Luna/high candidates with identical complete context", async () => {
+  const scheduler = new ManualScheduler();
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteDiscoverySynthesis: false,
+    scheduler,
   });
   const runId = run.controller.start(request());
   await settleInitialization();
@@ -1302,7 +1389,7 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
     candidates.every(
       (session) =>
         session.spec.model === LUNA_MODEL &&
-        session.spec.thinkingLevel === "xhigh" &&
+        session.spec.thinkingLevel === "high" &&
         session.prompts.length === 1,
     ),
     true,
@@ -1324,6 +1411,18 @@ test("feature discovery fan-in feeds three parallel Luna/xHIGH candidates with i
   assert.equal(run.controller.get(runId)?.stage, "build");
   assert.equal(run.lifecycles[0]?.promoted, 1);
   assert.equal(run.lifecycles[0]?.cleaned, 1);
+  assert.equal(
+    scheduler.scheduled
+      .filter(
+        ({ delayMs }) =>
+          delayMs === FEATURE_CANDIDATE_WAVE_WARNING_MS ||
+          delayMs === FEATURE_CANDIDATE_WAVE_LIMIT_MS,
+      )
+      .every(({ cancelled }) => cancelled),
+    true,
+  );
+  scheduler.fire(FEATURE_CANDIDATE_WAVE_LIMIT_MS);
+  assert.equal(run.controller.get(runId)?.status, "running");
   const acceptedTokens = Reflect.get(run.controller, "discoverySessionTokens");
   assert.ok(acceptedTokens instanceof Map);
   assert.equal(acceptedTokens.size, 0);

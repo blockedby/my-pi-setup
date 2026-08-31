@@ -6,7 +6,7 @@ _Status: implemented design record. The public surface is intentionally four bou
 
 `pipeline_run` accepts a self-contained `task`, caller-selected `working_dir`, and one of four hardcoded definitions:
 
-- `feature-pipeline`: controller-owned five-track discovery and synthesis, three isolated parallel Luna/xHIGH implementation candidates, one Luna/xHIGH read-only selection plus primary-based bounded synthesis, exact promotion/cleanup, a Luna/xHIGH post-promotion remediation root, four Luna audits, reusable five-contributor final Luna audit segment, root final resolution and factual completion;
+- `feature-pipeline`: controller-owned five-track discovery and synthesis, three isolated parallel Luna/high implementation candidates with a fixed 10-minute wave limit, one Luna/xHIGH read-only selection plus primary-based bounded synthesis, exact promotion/cleanup, a Luna/xHIGH post-promotion remediation root, four Luna audits, reusable five-contributor final Luna audit segment, root final resolution and factual completion;
 - `small-feature-pipeline`: read-only Luna/medium coordinator, one persistent Luna implementer, four parallel Luna auditors, and one same-session implementer remediation pass;
 - `plan-pipeline`: controller-owned six-track Luna/medium evidence discovery, one Luna/xHIGH free-form synthesis session, and factual completion with optional caller-selected in-workspace output;
 - `audit-pipeline`: four isolated read-only Luna/medium static audit tracks, one trusted-workspace Luna/medium audit-executor contributor, and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, readiness decision, or Git decision.
@@ -23,9 +23,11 @@ Pipeline graphs predeclare their roots and children and therefore do not consume
 
 ## Per-stage wallclock limits
 
-`pipeline_run.wallclock_limit` is optional and accepts only a caller-selected canonical integer duration with one unit (`30s`, `5m`, or `2h`). Omission disables wallclock timing; no agent, prompt, or controller default selects a budget. Explicit values are inclusive from 30 seconds through 24 hours. The public extension validates the syntax and range before constructing controller state, and the controller repeats admission validation before any run ID, session, worktree, or feature lifecycle allocation. The value is normalized to milliseconds internally and is not inferred from task text.
+`pipeline_run.wallclock_limit` is optional and accepts only a caller-selected canonical integer duration with one unit (`30s`, `5m`, or `2h`). Omission disables caller-selected per-stage wallclock timing; no agent, prompt, or controller chooses a general stage budget. Explicit values are inclusive from 30 seconds through 24 hours. The public extension validates the syntax and range before constructing controller state, and the controller repeats admission validation before any run ID, session, worktree, or feature lifecycle allocation. The value is normalized to milliseconds internally and is not inferred from task text.
 
 The controller owns one monotonic budget for each reachable asynchronous stage. The initial budget starts at admitted run insertion before asynchronous initialization; a later budget starts exactly when the controller enters that stage. Feature times `discover`, `build`, `audit`, `audit-resolve`, `final-audit`, and `final-resolve`; small-feature times `build`, `final-audit`, and `final-resolve`; plan times `discover` and `synthesize`; standalone audit times `audit`. Plan `complete` remains an untimed atomic transition. A stage's retries, corrections, replacements, fan-in, root readiness, and remediation share its original epoch and deadline.
+
+Independently of the optional stage budget, the feature pipeline's three parallel implementation candidates share one fixed 10-minute wave budget starting after all three sessions are spawned. At eight minutes, only candidates still starting or running receive one wrap-up warning. If any candidate remains active at ten minutes, the controller fails the run, cancels the candidate/root sessions, and performs normal feature-lifecycle cleanup; selection and synthesis never start. Completing all three handoffs cancels both wave timers. The injected scheduler and run/stage/status guards keep tests deterministic and stale callbacks inert. This fixed limit does not apply to discovery, implementation selection/synthesis, post-promotion remediation, or neighboring pipeline definitions; an explicit shorter `wallclock_limit` may still end the surrounding build stage first.
 
 At exactly 80% of a stage budget, the controller records warning state and signals each active current-stage session once. A deferred current-stage session receives one pending warning through its bootstrap prompt, and a session created after the boundary receives one immediate warning if it belongs to the current stage. Future-stage sessions remain dormant. Stage and epoch guards make reordered or stale scheduler callbacks inert. Enforcement and projections use an injected monotonic clock/scheduler; civil `startedAt` and `finishedAt` values are display metadata only.
 
@@ -109,7 +111,7 @@ Canonical ID/namespace admission and candidate-worktree reservation
   → validated full discovery fan-in
   → separate read-only Luna/medium discovery synthesis
   → one exact captured Git base
-  → three isolated parallel Luna/xHIGH candidates: Minimal | Robust | Architectural
+  → three isolated parallel Luna/high candidates with one fixed 10-minute wave budget: Minimal | Robust | Architectural
   → three complete committed candidate handoffs and frozen refs
   → one Luna/xHIGH selection-only comparison
   → exactly one validated primary
@@ -131,7 +133,7 @@ Discovery remains the existing five-track strict `feature-discovery-v2` fan-in. 
 
 After full fan-in, a separate read-only Luna/medium `discover-synthesis` session returns strict bounded `feature-discovery-synthesis-v1`: summary, feature contract, observable acceptance criteria, constraints/non-goals, exact evidence-backed precedents, relevant paths, contracts/invariants, risks, unknowns, assumptions, and verification expectations. Its prompt includes the exact JSON shape, and it submits through the terminating schema-typed `pipeline_discovery_synthesis_submit` tool reused from the audit/discovery submission pattern; compact final-text JSON remains a fallback. Tool payloads are session-token-bound and consumed only after that turn settles. Rejected tool or fallback payloads report bounded JSON-pointer schema details during the existing three same-session correction turns. This stage does not choose a model or implementation role. The host prepares one immutable JSON package containing the original task, all five complete validated reports and synthesis, acceptance/constraints/non-goals, paths/precedents, contracts/invariants, risks/unknowns/assumptions, and verification expectations.
 
-All three candidate sessions start dependency-ready in parallel, use `openai-codex/gpt-5.6-luna` with `xhigh`, and receive that byte-identical package before their first implementation turn. Only the surrounding role objective differs:
+All three candidate sessions start dependency-ready in parallel, use `openai-codex/gpt-5.6-luna` with `high`, share the fixed 10-minute candidate-wave budget described above, and receive that byte-identical package before their first implementation turn. Only the surrounding role objective differs:
 
 - **Minimal** minimizes the correct diff, touched components/abstractions, and scope while preserving all acceptance criteria;
 - **Robust** emphasizes invariants, edge/failure/recovery paths, regression resistance, and testability; complexity must reduce a concrete risk;

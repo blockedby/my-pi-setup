@@ -75,6 +75,8 @@ import {
 } from "./prompt.ts";
 import {
   FEATURE_CANDIDATE_ROLES,
+  FEATURE_CANDIDATE_WAVE_LIMIT_MS,
+  FEATURE_CANDIDATE_WAVE_WARNING_MS,
   FEATURE_DISCOVERY_SYNTHESIS_ROLE,
   FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
   assertBoundedSynthesisInput,
@@ -1714,7 +1716,7 @@ export class PipelineController {
             `${worktree.role} implementation candidate`,
           ),
           model: LUNA_MODEL,
-          thinkingLevel: "xhigh",
+          thinkingLevel: "high",
           cwd: worktree.path,
           prompt: buildFeatureCandidatePrompt(
             worktree.role,
@@ -1727,25 +1729,64 @@ export class PipelineController {
         }),
       ),
     );
-    const frozenCandidates = await Promise.all(
-      candidateAgents.map(async (agent, index) => {
-        const worktree = candidateWorktrees[index];
-        if (!worktree)
-          throw new Error("Candidate worktree mapping disappeared.");
-        return this.settleFeatureSession(
-          run,
-          agent.id,
-          `${worktree.role} implementation candidate`,
-          (text) => {
-            const handoff = parseFeatureCandidateHandoff(text);
-            const candidate = lifecycle.freezeCandidate(worktree, handoff);
-            this.tree.disableViewMutations(agent.id);
-            return { candidate, handoff };
-          },
-          `Return one complete strict ${worktree.role} candidate handoff after committing and verifying the complete implementation in your assigned worktree.`,
-        );
-      }),
+    const candidateSettlements = candidateAgents.map(async (agent, index) => {
+      const worktree = candidateWorktrees[index];
+      if (!worktree) throw new Error("Candidate worktree mapping disappeared.");
+      return this.settleFeatureSession(
+        run,
+        agent.id,
+        `${worktree.role} implementation candidate`,
+        (text) => {
+          const handoff = parseFeatureCandidateHandoff(text);
+          const candidate = lifecycle.freezeCandidate(worktree, handoff);
+          this.tree.disableViewMutations(agent.id);
+          return { candidate, handoff };
+        },
+        `Return one complete strict ${worktree.role} candidate handoff after committing and verifying the complete implementation in your assigned worktree.`,
+      );
+    });
+    const cancelCandidateWarning = this.scheduler.schedule(
+      FEATURE_CANDIDATE_WAVE_WARNING_MS,
+      () => {
+        if (run.status !== "running" || run.stage !== "build") return;
+        for (const agent of candidateAgents) {
+          const current = this.tree.view.get(agent.id);
+          if (current?.status !== "starting" && current?.status !== "running") {
+            continue;
+          }
+          void this.tree
+            .send(
+              agent.id,
+              "The feature candidate wave has used 8 of its fixed 10 minutes. Wrap up verification, commit the complete implementation, and submit the required handoff before the deadline.",
+            )
+            .catch(() => {});
+        }
+      },
     );
+    const cancelCandidateDeadline = this.scheduler.schedule(
+      FEATURE_CANDIDATE_WAVE_LIMIT_MS,
+      () => {
+        if (run.status !== "running" || run.stage !== "build") return;
+        const pending = candidateAgents.some((agent) => {
+          const status = this.tree.view.get(agent.id)?.status;
+          return status === "starting" || status === "running";
+        });
+        if (!pending) return;
+        this.failRun(
+          run,
+          "Feature implementation candidate wave exceeded its fixed 10-minute wallclock limit.",
+          true,
+        );
+      },
+    );
+    const frozenCandidates = await (async () => {
+      try {
+        return await Promise.all(candidateSettlements);
+      } finally {
+        cancelCandidateWarning();
+        cancelCandidateDeadline();
+      }
+    })();
     run.featureCandidates = frozenCandidates;
     if (run.status !== "running") return;
     this.settleDue(run);
