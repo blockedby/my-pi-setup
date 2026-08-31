@@ -1748,3 +1748,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/{feature-worktrees,feature-worktrees.test,feature-best-of-three,feature-sandbox,feature-sandbox.test,session,session.test,controller,controller.test}.ts`, `docs/pipelines-v1-design.md`, and this record. No README, runtime installation, credentials, model overrides, submodule pins, caller worktree, or external delivery state changed.
 - **Verification:** Focused real-Git lifecycle tests passed 18/18; sandbox tests passed 2/2; feature contract/session tests passed 7/7; controller tests passed 52/52. TypeScript showed no errors under `extensions/pipelines` and changed files passed Prettier checks. Full dependency bootstrap was attempted but registry access was refused; repository-wide check, deterministic suite, installer, submodule, and final diff checks remain pending.
 - **Pending:** Run the repository-declared full verification in a dependency-complete Git-capable worktree; no runtime rollout, push, merge, or deployment is requested.
+
+## Operation entry: remediate safe feature-pipeline commit audit findings
+
+- **Request:** Resolve the independent post-promotion audit findings for the safe feature-pipeline candidate commit and freeze flow without changing delivery state.
+- **Action:** Prevent repository pre-commit hooks from expanding controller-selected feature commits by using the controller-owned no-verification commit path, and replace recursive unbounded untracked cleanup with bounded filesystem-entry traversal plus safe empty-directory removal under owned candidate worktrees.
+- **Affected paths or values:** `extensions/pipelines/feature-worktrees.ts`, `extensions/pipelines/feature-worktrees.test.ts`, and this record. No caller worktree, runtime installation, credentials, model overrides, submodule pins, external services, or delivery state changed.
+- **Verification:** Focused feature-worktree lifecycle tests passed 20/20, including hook pollution and nested cleanup-bound regressions. Repository-wide type, formatting, deterministic, installer, submodule, and diff checks remain to be run for final verification.
+- **Pending:** Complete the controller-owned final audit and repository-declared verification; no runtime rollout, push, merge, or deployment is requested.

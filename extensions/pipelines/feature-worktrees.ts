@@ -449,8 +449,8 @@ function readStatusEntries(cwd: string) {
         "status",
         "--porcelain=v1",
         "-z",
-        "--untracked-files=normal",
-        "--ignored=matching",
+        "--untracked-files=all",
+        "--ignored=traditional",
       ],
       "Unable to inspect worktree status",
     ),
@@ -932,7 +932,72 @@ function unstageAllPaths(workingDir: string) {
   );
 }
 
-function removeOwnedUntrackedPath(workingDir: string, filePath: string) {
+function removeOwnedUntrackedEntry(
+  root: string,
+  absolute: string,
+  budget: { remaining: number },
+) {
+  let stats: fs.Stats;
+  try {
+    stats = fs.lstatSync(absolute);
+  } catch {
+    return;
+  }
+  if (budget.remaining <= 0) {
+    throw new Error(
+      `Untracked cleanup exceeded the bounded entry limit of ${UNTRACKED_CLEANUP_PATH_LIMIT}.`,
+    );
+  }
+  budget.remaining -= 1;
+  if (stats.isSymbolicLink()) {
+    fs.unlinkSync(absolute);
+    return;
+  }
+  if (!isWithinPath(root, comparablePath(absolute))) {
+    throw new Error("Untracked cleanup path escapes the owned worktree.");
+  }
+  if (!stats.isDirectory()) {
+    fs.unlinkSync(absolute);
+    return;
+  }
+  for (const entry of fs.readdirSync(absolute)) {
+    removeOwnedUntrackedEntry(root, path.join(absolute, entry), budget);
+  }
+  try {
+    fs.rmdirSync(absolute);
+  } catch (error) {
+    throw new Error(
+      `Unable to remove owned untracked directory: ${boundedDiagnostic(error)}`,
+    );
+  }
+}
+
+function removeEmptyOwnedAncestors(
+  root: string,
+  start: string,
+  budget: { remaining: number },
+) {
+  let current = start;
+  while (current !== root && isWithinPath(root, current)) {
+    let stats: fs.Stats;
+    try {
+      stats = fs.lstatSync(current);
+    } catch {
+      current = path.dirname(current);
+      continue;
+    }
+    if (!stats.isDirectory() || stats.isSymbolicLink()) break;
+    if (fs.readdirSync(current).length > 0) break;
+    removeOwnedUntrackedEntry(root, current, budget);
+    current = path.dirname(current);
+  }
+}
+
+function removeOwnedUntrackedPath(
+  workingDir: string,
+  filePath: string,
+  budget: { remaining: number },
+) {
   const root = canonical(workingDir);
   const withoutTrailingSlash = filePath.replace(/\/$/, "");
   if (
@@ -945,22 +1010,8 @@ function removeOwnedUntrackedPath(workingDir: string, filePath: string) {
     );
   }
   const absolute = path.resolve(root, withoutTrailingSlash);
-  let stats: fs.Stats;
-  try {
-    stats = fs.lstatSync(absolute);
-  } catch {
-    return;
-  }
-  if (stats.isSymbolicLink()) {
-    fs.unlinkSync(absolute);
-    return;
-  }
-  if (!isWithinPath(root, comparablePath(absolute))) {
-    throw new Error(
-      `Untracked cleanup path escapes the owned worktree: ${filePath}.`,
-    );
-  }
-  fs.rmSync(absolute, { recursive: true, force: true });
+  removeOwnedUntrackedEntry(root, absolute, budget);
+  removeEmptyOwnedAncestors(root, path.dirname(absolute), budget);
 }
 
 function isWithinPath(root: string, candidate: string) {
@@ -998,9 +1049,10 @@ function finalizeOwnedWorktree(
       `${label} has ${statuses.length} untracked leftovers; bounded cleanup allows at most ${UNTRACKED_CLEANUP_PATH_LIMIT}.`,
     );
   }
+  const cleanupBudget = { remaining: UNTRACKED_CLEANUP_PATH_LIMIT };
   try {
     for (const { filePath } of statuses) {
-      removeOwnedUntrackedPath(workingDir, filePath);
+      removeOwnedUntrackedPath(workingDir, filePath, cleanupBudget);
     }
   } catch (error) {
     throw new Error(
@@ -1423,6 +1475,7 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       }
       const commitArgs = [
         "commit",
+        "--no-verify",
         "-m",
         candidateRole
           ? `feature-pipeline ${candidateRole.toLowerCase()} candidate`

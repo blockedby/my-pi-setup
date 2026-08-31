@@ -543,6 +543,84 @@ test("explicit feature paths commit additions, modifications, deletions, and exc
   }
 });
 
+test("explicit feature commits cannot be expanded by repository hooks", () => {
+  const repo = fixture();
+  try {
+    const hooksPath = path.join(repo.root, "hooks");
+    fs.mkdirSync(hooksPath);
+    fs.writeFileSync(
+      path.join(hooksPath, "pre-commit"),
+      "#!/bin/sh\nprintf 'hook\n' > hook-artifact.txt\ngit add -- hook-artifact.txt\n",
+      { mode: 0o755 },
+    );
+    fs.chmodSync(path.join(hooksPath, "pre-commit"), 0o755);
+    git(repo.primary, ["config", "core.hooksPath", hooksPath]);
+
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "explicit-path-hook-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(path.join(minimal.path, "selected.txt"), "selected\n");
+    const result = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+      ["selected.txt"],
+    );
+
+    assert.equal(
+      git(minimal.path, [
+        "ls-tree",
+        "--name-only",
+        result.head,
+        "--",
+        "hook-artifact.txt",
+      ]),
+      "",
+    );
+    assert.equal(
+      fs.existsSync(path.join(minimal.path, "hook-artifact.txt")),
+      false,
+    );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("owned untracked cleanup bounds nested artifact contents", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "bounded-untracked-cleanup-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    const handoff = commitCandidate(minimal, lifecycle);
+    const cachePath = path.join(minimal.path, ".cache", "nested");
+    fs.mkdirSync(cachePath, { recursive: true });
+    for (let index = 0; index < 513; index += 1) {
+      fs.writeFileSync(
+        path.join(cachePath, `artifact-${index}.tmp`),
+        "cache\n",
+      );
+    }
+
+    assert.throws(
+      () => lifecycle.freezeCandidate(minimal, handoff),
+      /513 untracked leftovers/,
+    );
+    assert.equal(fs.existsSync(cachePath), true);
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("feature commits reject tracked generated paths and retargeted symlinks", () => {
   const repo = fixture({ trackedGeneratedPath: true, trackedSymlink: true });
   try {
