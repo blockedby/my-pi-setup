@@ -1716,3 +1716,19 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/{wallclock,controller,index,domain}.ts`, `extensions/pipelines/wallclock.test.ts`, `README.md`, `docs/pipelines-v1-design.md`, and this record. PR #86 remains open; no merge, installation, reload, credentials, model overrides, submodule pins, or external runtime state changed.
 - **Verification:** Focused wallclock/controller tests passed 59/59 and prove that a run without `wallclock_limit` has no stage timing or wallclock projection, while explicit and invalid duration contracts remain covered. Fresh `env -u BROWSER_CHROME_NODE bun run test:deterministic` passed 64 installer/script tests, 332 extension tests, and 22 file-search tests; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
 - **Pending:** The user will decide later whether limits should support distinct per-agent or per-stage budgets; do not infer or add those policies now.
+
+## Operation entry: set local Sol reasoning default
+
+- **Request:** Set the local Pipi Sol default reasoning level to medium.
+- **Action:** Changed `defaultThinkingLevel` from `high` to `medium`.
+- **Affected paths or values:** `~/.pipi/agent/settings.json`; no source, credentials, models, or regular Pi settings changed.
+- **Verification:** Confirmed `openai-codex/gpt-5.6-sol`, `defaultThinkingLevel=medium`, valid JSON, and mode `0600`.
+- **Pending:** New sessions use the default; existing sessions retain their session-specific level.
+
+## Operation entry: roll out explicit-only pipeline wallclock limits
+
+- **Request:** Merge PR #86 and update the local Pipi installation after removing the implicit 30-minute wallclock budget.
+- **Action:** Merged PR [#86](https://github.com/blockedby/my-pi-setup/pull/86), synchronized canonical `main` to squash commit `45ef65a`, removed the dedicated feature worktree/local branch while retaining the remote branch, and reinstalled Pipi from canonical source with repository dependency preparation skipped. Wallclock timing remains inactive unless the caller explicitly supplies `pipeline_run.wallclock_limit`; agents and the controller select no budget by default.
+- **Affected paths or values:** Canonical `main`, managed runtime/settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, browser/MCP assets, Herdr integration, PR #86, and this record. Pipi remains 0.84.3; credentials, model overrides, submodule pins, regular Pi state, the local Sol medium default, and unrelated untracked plan artifacts are unchanged.
+- **Verification:** Pre-merge verification passed 64 installer/script tests, 332 extension tests, 22 file-search tests, focused wallclock/controller tests 59/59, TypeScript, formatting, exact submodules, and `git diff --check`. `bun run install:pipi -- --skip-repository-dependencies` installed 233 isolated packages through Bun 1.4.0; `bun run check:pipi-install` verified Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install policy, model overrides, and Herdr integration; `/home/kcnc/.local/bin/pipi --version` returned `0.84.3`.
+- **Pending:** Reload or restart sessions created before this reinstall so they load the explicit-only wallclock contract. Per-agent or distinct per-stage budget design remains deferred.
