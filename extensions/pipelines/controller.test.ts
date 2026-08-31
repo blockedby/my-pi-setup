@@ -137,6 +137,7 @@ class FakePipelineSession implements AgentTreeSession {
     spec: AgentNodeSpec,
     autoReport?: string | ((turn: number) => string),
     discoverySubmit?: (value: unknown) => void,
+    private readonly synchronousAutoComplete = false,
   ) {
     this.activeTools = activeTools;
     this.spec = spec;
@@ -162,12 +163,13 @@ class FakePipelineSession implements AgentTreeSession {
       typeof this.autoReport === "function"
         ? this.autoReport(this.turn++)
         : this.autoReport;
-    queueMicrotask(() =>
+    const settle = () =>
       this.emit({
         type: "settled",
         outcome: { type: "completed", finalText: report },
-      }),
-    );
+      });
+    if (this.synchronousAutoComplete) settle();
+    else queueMicrotask(settle);
   }
 
   async prompt(text: string) {
@@ -415,6 +417,7 @@ function harness(
     autoCompleteFeatureDiscovery?: boolean;
     autoCompleteDiscoverySynthesis?: boolean;
     autoCompleteCandidates?: boolean;
+    synchronousCandidateFirstTurn?: boolean;
     autoCompleteSelectionAndSynthesis?: boolean;
     rejectRootCancellation?: boolean;
     runIds?: ReadonlyArray<string>;
@@ -491,15 +494,30 @@ function harness(
                     options.autoCompleteDiscoverySynthesis !== false
                   ? JSON.stringify(discoverySynthesisResult())
                   : candidateRole && options.autoCompleteCandidates !== false
-                    ? JSON.stringify(
-                        candidateHandoff(
-                          candidateRole,
-                          spec,
-                          lifecycles.find((lifecycle) =>
-                            spec.cwd.startsWith(lifecycle.temporaryRoot),
-                          )?.caller.baseCommit ?? BASE_COMMIT,
-                        ),
-                      )
+                    ? options.synchronousCandidateFirstTurn
+                      ? (turn: number) =>
+                          turn === 0
+                            ? "{}"
+                            : JSON.stringify(
+                                candidateHandoff(
+                                  candidateRole,
+                                  spec,
+                                  lifecycles.find((lifecycle) =>
+                                    spec.cwd.startsWith(
+                                      lifecycle.temporaryRoot,
+                                    ),
+                                  )?.caller.baseCommit ?? BASE_COMMIT,
+                                ),
+                              )
+                      : JSON.stringify(
+                          candidateHandoff(
+                            candidateRole,
+                            spec,
+                            lifecycles.find((lifecycle) =>
+                              spec.cwd.startsWith(lifecycle.temporaryRoot),
+                            )?.caller.baseCommit ?? BASE_COMMIT,
+                          ),
+                        )
                     : spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE &&
                         options.autoCompleteSelectionAndSynthesis !== false
                       ? (turn: number) =>
@@ -556,6 +574,7 @@ function harness(
                     value,
                   )
               : undefined,
+            Boolean(candidateRole && options.synchronousCandidateFirstTurn),
           );
           if (!spec.parentId && options.rejectRootCancellation) {
             session.interruptError = new Error("root cancellation rejected");
@@ -1319,6 +1338,41 @@ test("feature candidate steering timers arm independently after each session sta
     6,
   );
   await run.controller.cancelRun(runId);
+  assert.equal(
+    scheduler.scheduled.every(({ cancelled }) => cancelled),
+    true,
+  );
+  assert.equal(run.controller.get(runId)?.status, "cancelled");
+  await run.controller.dispose();
+});
+
+test("synchronously settled invalid candidate turns retain steering through correction", async () => {
+  const scheduler = new ManualScheduler();
+  const run = harness({ synchronousCandidateFirstTurn: true, scheduler });
+  const runId = run.controller.start(request());
+  for (let turn = 0; turn < 12; turn++) await settleInitialization();
+
+  const candidates = run.sessions.filter((session) =>
+    candidateRoleFromSpec(session.spec.role),
+  );
+  assert.equal(candidates.length, 3);
+  assert.equal(
+    candidates.every((session) => session.sends.length === 1),
+    true,
+  );
+  assert.equal(
+    scheduler.scheduled.filter(
+      ({ delayMs }) =>
+        delayMs === FEATURE_CANDIDATE_STEERING_WARNING_MS ||
+        delayMs === FEATURE_CANDIDATE_STEERING_LIMIT_MS,
+    ).length,
+    6,
+  );
+  assert.equal(
+    scheduler.scheduled.every(({ cancelled }) => cancelled),
+    true,
+  );
+  assert.equal(run.controller.get(runId)?.status, "running");
   await run.controller.dispose();
 });
 
@@ -1413,6 +1467,45 @@ test("feature candidates receive independent steering without timeout cancellati
     [0, 1, 1],
   );
   await run.controller.dispose();
+});
+
+test("controller disposal cancels every pending candidate steering timer", async () => {
+  const scheduler = new ManualScheduler();
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteDiscoverySynthesis: false,
+    autoCompleteCandidates: false,
+    scheduler,
+  });
+  run.controller.start(request());
+  await settleInitialization();
+  for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) settleRole(run, role);
+  await settleInitialization();
+
+  const synthesis = run.sessions.find(
+    (session) => session.spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+  );
+  assert.ok(synthesis?.discoverySubmit);
+  synthesis.discoverySubmit(discoverySynthesisResult());
+  synthesis.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "" },
+  });
+  await settleInitialization();
+
+  assert.equal(
+    scheduler.scheduled.filter(
+      ({ delayMs }) =>
+        delayMs === FEATURE_CANDIDATE_STEERING_WARNING_MS ||
+        delayMs === FEATURE_CANDIDATE_STEERING_LIMIT_MS,
+    ).length,
+    6,
+  );
+  await run.controller.dispose();
+  assert.equal(
+    scheduler.scheduled.every(({ cancelled }) => cancelled),
+    true,
+  );
 });
 
 test("feature discovery fan-in feeds three parallel Luna/high candidates with identical complete context", async () => {

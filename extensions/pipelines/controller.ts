@@ -1735,7 +1735,7 @@ export class PipelineController {
           if (status !== "starting" && status !== "running") return;
           void this.tree.send(agent.id, message).catch(() => {});
         };
-        if (agent.status !== "running") {
+        if (run.status !== "running") {
           return { agent, cancelSteeringTimers: [] };
         }
         const cancelSteeringTimers = [
@@ -2643,14 +2643,18 @@ export class PipelineController {
     });
   }
 
+  private cancelFeatureCandidateSteering(run: MutableRun) {
+    for (const cancels of run.featureCandidateSteeringCancels.values()) {
+      for (const cancel of cancels) cancel();
+    }
+    run.featureCandidateSteeringCancels.clear();
+  }
+
   private cleanupTerminal(run: MutableRun, cancelRoot: boolean) {
     if (run.cleanup) return run.cleanup;
     run.cleanup = (async () => {
       const failures: string[] = [];
-      for (const cancels of run.featureCandidateSteeringCancels.values()) {
-        for (const cancel of cancels) cancel();
-      }
-      run.featureCandidateSteeringCancels.clear();
+      this.cancelFeatureCandidateSteering(run);
       const active = this.agentsFor(run.id).filter(
         (agent) =>
           agent.parentId &&
@@ -3916,6 +3920,7 @@ export class PipelineController {
     this.shuttingDown = true;
     for (const run of this.runs.values()) {
       this.cancelStageTimers(run);
+      this.cancelFeatureCandidateSteering(run);
       if (run.status === "starting" || run.status === "running") {
         this.captureTerminalTiming(run);
         run.status = "cancelled";
