@@ -7,7 +7,7 @@
     "protobufjs"
   ],
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@earendil-works/pi-coding-agent": "0.84.4",
     "chrome-devtools-mcp": "1.8.0",
     "pi-mcp-adapter": "2.15.0"
   },
