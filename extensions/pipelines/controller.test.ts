@@ -2709,6 +2709,7 @@ test("small-feature-pipeline fails closed on a malformed implementation report",
   });
 
   await run.controller.waitForChildren(runId, [implementer.id]);
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(run.controller.get(runId)?.status, "failed");
   assert.equal(run.controller.get(runId)?.stage, "build");
@@ -2749,6 +2750,7 @@ test("small-feature-pipeline fails closed on a malformed Luna audit report", asy
   });
 
   await run.controller.waitForChildren(runId, [auditor.id]);
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(run.controller.get(runId)?.status, "failed");
   assert.equal(run.controller.get(runId)?.stage, "final-audit");

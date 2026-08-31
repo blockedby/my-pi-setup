@@ -1588,6 +1588,7 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `extensions/pipelines/feature-worktrees.ts`, `extensions/pipelines/feature-worktrees.test.ts`, and this record. Installed runtime state and active pipeline runs are unchanged.
 - **Verification:** Focused feature-worktree tests passed 7/7; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
 - **Pending:** PR [#82](https://github.com/blockedby/my-pi-setup/pull/82) is open against `main` for the user to merge after the preceding fix; runtime rollout is not requested.
+
 ## Operation entry: simplify plan-pipeline into a Luna planning graph
 
 - **Request:** Replace the heavyweight plan-pipeline with the agreed planning-specific Luna-only discover, synthesize, complete graph and support explicit optional plan output.
@@ -1627,6 +1628,7 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** `~/.pipi/agent/settings.json`, GitHub issue #84, untracked `docs/plans/pipeline-stage-wallclock-limits.md`, and this record. Installed package binaries, credentials, model overrides, submodule pins, and the running pipeline process were unchanged.
 - **Verification:** `pipeline_list` showed exactly one real `pipeline-1` run despite duplicate command registrations. Settings now contain only the managed MCP adapter, canonical repository, and canonical pi-codex package roots; `bun scripts/check-pipi-install.mjs` passes. The plan artifact validated successfully, its focused contract tests passed 5/5, and `gh issue create` returned issue #84.
 - **Pending:** Restart Pipi after this active run/session so extensions reload once, then run a fresh plan-pipeline if an execution test of the Luna-only graph is still desired. The installer/checker should separately be hardened against stale duplicate local repository package roots.
+
 ## Operation entry: implement collision-safe canonical pipeline names and retained namespaces
 
 - **Request:** Implement collision-safe human-readable names and retained Git namespaces for all four Pipi pipelines, including strict admission, canonical IDs, pre-discovery conflict handling, artifact-safe feature commits, and exact handoff paths; do not install, reload, deploy, push, or mutate external state.
@@ -1674,3 +1676,43 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths or values:** Canonical `main`, managed runtime/settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, browser/MCP assets, Herdr integration, and this record. Pipi remains 0.84.3; credentials, model overrides, submodule pins, regular Pi state, and unrelated local `docs/plans/` work are unchanged.
 - **Verification:** Post-rebase verification passed 64 installer/script tests, 325 extension tests, 22 file-search tests, TypeScript, formatting, exact submodules, and `git diff --check`. PR #85 is merged at `fbc3b5f`; local `main` equals `origin/main`. `bun run install:pipi -- --skip-repository-dependencies` installed 233 isolated packages with Bun 1.4.0; `bun run check:pipi-install` verified Pipi 0.84.3, branded launcher/resume behavior, MCP 2.15.0, install policy, model overrides, and Herdr integration. `/home/kcnc/.local/bin/pipi --version` reports 0.84.3, and package sources contain only the canonical checkout plus expected MCP and pi-codex packages.
 - **Pending:** Reload or restart sessions created before this rollout so they load the required `pipeline_name` contract and canonical run-ID behavior.
+
+## Operation entry: implement per-stage pipeline wallclock limits
+
+- **Request:** Implement GitHub issue `blockedby/my-pi-setup#84`: configurable per-stage wallclock warnings and hard limits for all four Pipi pipeline graphs, with deterministic monotonic timing, bounded cooperative partials, limited handoffs, and preserved graph/Git invariants.
+- **Action:** Added canonical `pipeline_run.wallclock_limit` admission (30-second through 24-hour inclusive, 30-minute default), controller-owned monotonic stage epochs with exact 80% warnings and 100% limited settlement, root-independent bounded cleanup, late-session disposal guards, the constrained session-bound `pipeline_execution_finish` tool, bounded provenance-only partial output, and timing/limitation projections across inspection, list, dashboard, cancellation, and handoff surfaces. Documented the detailed contract and kept README guidance user-facing.
+- **Affected paths or values:** `extensions/pipelines/{domain,wallclock,controller,session,index,inspection,dashboard}.ts`, `extensions/pipelines/wallclock.test.ts`, `README.md`, `docs/pipelines-v1-design.md`, and this record. No installed runtime, authentication data, model overrides, submodule pins, GitHub state, or external delivery state was changed.
+- **Verification:** Focused pipeline tests passed 97/97 with `TMPDIR` set to the disposable worktree directory; TypeScript checking passed using the existing repository dependency cache. Repository dependency bootstrap was attempted but registry access was refused, so the full deterministic suite, formatter, submodule, installer, and diff checks remain pending in a Git-capable prepared worktree.
+- **Pending:** Run the repository-declared full deterministic, formatting, exact-submodule, installer, and `git diff --check` verification after dependency/bootstrap access is restored; no runtime rollout or reload was requested.
+
+## Operation entry: remediate per-stage wallclock audit findings
+
+- **Request:** Resolve the independent post-promotion audit findings for GitHub issue #84 without changing graph topology, authority, promotion, or delivery state.
+- **Action:** Bound controller terminal cleanup with the injected scheduler and delay limited handoff delivery until cleanup diagnostics are captured; map feature implementation and audit synthesis sessions to their actual build/audit-resolve stages; guard audit-segment spawning after asynchronous synthesis creation; and pass the controller-assigned agent identity into session factories so cooperative finish tokens are exact-session bound. Added agent-tree identity regression coverage.
+- **Affected paths or values:** `extensions/pipelines/controller.ts`, `extensions/pipelines/session.ts`, `extensions/shared/agent-tree/{control,domain}.ts`, focused tests, and this record. Installed runtime, credentials, model overrides, submodule pins, feature refs, external services, and delivery state are unchanged.
+- **Verification:** Focused controller, wallclock, session, and agent-tree tests passed 65/65; `bun run check`, `bun run format:check`, and `git diff --check` passed. Full deterministic, exact-submodule, and installer verification remain pending for the final audit workspace.
+- **Pending:** Run the controller-owned final audit and all repository-declared final verification; no runtime rollout or reload is requested.
+
+## Operation entry: resolve final wallclock audit findings
+
+- **Request:** Resolve every concrete finding delivered by the controller-owned final audit for issue #84 without starting another audit or changing delivery state.
+- **Action:** Chained failed-run handoff delivery after bounded idempotent cleanup, excluded failed/cancelled sessions from limited fallback partials, expanded canonical seconds admission through the inclusive 24-hour boundary, and anchored the initial stage epoch to the admitted wallclock timestamp. Added parser/schema boundary coverage and agent-tree identity coverage.
+- **Affected paths or values:** `extensions/pipelines/{controller,wallclock,wallclock.test}.ts`, `extensions/pipelines/controller.test.ts`, `extensions/shared/agent-tree.test.ts`, and this record. No runtime installation, credentials, model overrides, submodule pins, feature refs, external services, or delivery state changed.
+- **Verification:** All pipeline and agent-tree deterministic tests passed 179/179; `bun run check`, `bun run format:check`, and `git diff --check` passed. The final audit also recorded an installer fixture failure under ambient `BROWSER_CHROME_NODE`; full repository verification is rerun separately with that environment override removed.
+- **Pending:** Run the final repository-declared deterministic suite, submodule and installer checks, then complete the pipeline with one resolution record for each final finding ID.
+
+## Operation entry: verify remediated pipeline wallclock implementation
+
+- **Request:** Complete the repository-declared verification for the remediated issue #84 wallclock implementation without rollout or external delivery actions.
+- **Action:** Prepared the repository dependency cache and reran focused pipeline/agent-tree tests plus the deterministic installer, extension, and file-search suites with the ambient fake-Bun browser override removed. Ran TypeScript, formatting, exact-submodule, installer-state, and committed-diff whitespace checks.
+- **Affected paths or values:** Verification covered the current feature branch and its existing source/docs/test changes; no installed runtime, credentials, model overrides, submodule pins, feature refs, external services, or delivery state changed.
+- **Verification:** `bun run install:dependencies` completed with no dependency changes; focused pipeline/agent-tree tests passed 179/179; `env -u BROWSER_CHROME_NODE bun run test:deterministic` passed 64 installer, 331 extension, and 22 file-search tests; `bun run check`, `bun run format:check`, `bun run check:submodules`, `bun run check:pipi-install`, `git diff --check`, and `git diff origin/main..HEAD --check` passed. No live model/backend run was used.
+- **Pending:** None for repository verification; reload/runtime rollout and GitHub delivery remain intentionally unrequested.
+
+## Operation entry: remove the implicit wallclock budget
+
+- **Request:** Remove the unrequested 30-minute default. Wallclock timing must be selected explicitly by the caller for a run rather than chosen by an agent or controller; defer further per-agent or per-stage limit design decisions.
+- **Action:** Changed omitted `pipeline_run.wallclock_limit` to disable wallclock timing entirely. Only an explicit caller-supplied duration activates stage timers, 80% warnings, cooperative finish, and hard limitation. Removed the default constant and updated public tool guidance, controller projections, documentation, and deterministic coverage. Existing explicit duration grammar and safety range remain unchanged pending a separate product decision.
+- **Affected paths or values:** `extensions/pipelines/{wallclock,controller,index,domain}.ts`, `extensions/pipelines/wallclock.test.ts`, `README.md`, `docs/pipelines-v1-design.md`, and this record. PR #86 remains open; no merge, installation, reload, credentials, model overrides, submodule pins, or external runtime state changed.
+- **Verification:** Focused wallclock/controller tests passed 59/59 and prove that a run without `wallclock_limit` has no stage timing or wallclock projection, while explicit and invalid duration contracts remain covered. Fresh `env -u BROWSER_CHROME_NODE bun run test:deterministic` passed 64 installer/script tests, 332 extension tests, and 22 file-search tests; TypeScript, formatting, exact-submodule validation, and `git diff --check` passed.
+- **Pending:** The user will decide later whether limits should support distinct per-agent or per-stage budgets; do not infer or add those policies now.

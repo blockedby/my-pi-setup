@@ -1,4 +1,12 @@
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
+import type {
+  PipelineStageTiming,
+  PipelineWallclockState,
+} from "./wallclock.ts";
+export type {
+  PipelineStageTiming,
+  PipelineWallclockState,
+} from "./wallclock.ts";
 export {
   assertPipelineName,
   isCanonicalPipelineRunId,
@@ -316,7 +324,31 @@ export interface PipelineCompletionFacts {
 }
 
 export type PipelineRunStatus =
-  "starting" | "running" | "completed" | "failed" | "cancelled";
+  "starting" | "running" | "completed" | "failed" | "cancelled" | "limited";
+
+export interface PipelineExecutionPartial {
+  readonly sessionId: string;
+  readonly role: string;
+  readonly stage: PipelineStage;
+  readonly epoch: number;
+  readonly summary?: string;
+  readonly output?: string;
+  readonly truncated: boolean;
+  readonly atMs: number;
+}
+
+export interface PipelineWallclockLimitation {
+  readonly reason: "stage-deadline";
+  readonly stage: PipelineStage;
+  readonly epoch: number;
+  readonly limitMs: number;
+  readonly warningAtMs: number;
+  readonly deadlineAtMs: number;
+  readonly elapsedMs: number;
+  readonly validatedProgress: ReadonlyArray<string>;
+  readonly unresolvedItems: ReadonlyArray<string>;
+  readonly partials: ReadonlyArray<PipelineExecutionPartial>;
+}
 
 export interface PipelineRunSnapshot {
   readonly id: string;
@@ -326,6 +358,19 @@ export interface PipelineRunSnapshot {
   readonly status: PipelineRunStatus;
   readonly startedAt: number;
   readonly finishedAt?: number;
+  /** Civil timestamps are display metadata; wallclock is monotonic authority. */
+  readonly wallclockLimitMs?: number;
+  /** Convenience projections mirror the nested monotonic state for consumers. */
+  readonly runElapsedMs?: number;
+  readonly stageElapsedMs?: number;
+  readonly remainingMs?: number;
+  readonly warningReached?: boolean;
+  readonly warningAtMs?: number;
+  readonly deadlineAtMs?: number;
+  readonly wallclock?: PipelineWallclockState;
+  readonly stageTiming?: PipelineStageTiming;
+  readonly limitation?: PipelineWallclockLimitation;
+  readonly partials?: ReadonlyArray<PipelineExecutionPartial>;
   readonly error?: string;
   readonly rootId?: string;
   readonly completion?: PipelineCompletionFacts;
@@ -343,6 +388,8 @@ export interface PipelineRunRequest {
   readonly audit?: AuditPipelineInput;
   /** Required explicitly for plan-pipeline; null means terminal-only delivery. */
   readonly planPath?: string | null;
+  /** Caller-selected canonical duration; omission disables wallclock timing. */
+  readonly wallclockLimit?: string;
 }
 
 export type PipelineCommitRole = PipelineChildRole | "pipeline-root";
@@ -381,6 +428,9 @@ export interface PipelineHandoff {
   readonly status: Exclude<PipelineRunStatus, "starting" | "running">;
   readonly facts: PipelineCompletionFacts;
   readonly error?: string;
+  readonly wallclock?: PipelineWallclockState;
+  readonly limitation?: PipelineWallclockLimitation;
+  readonly partials?: ReadonlyArray<PipelineExecutionPartial>;
 }
 
 export function modelForRole(role: PipelineChildRole) {
