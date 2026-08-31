@@ -97,6 +97,7 @@ import {
 import {
   defaultFeatureGitOperations,
   type FeatureCallerWorktree,
+  type FeatureCommitResult,
   type FeatureTemporaryWorktree,
   type FeatureGitOperations,
   type FeatureWorktreeLifecycle,
@@ -362,7 +363,12 @@ export interface PipelineControllerOptions {
       token: string,
     ) => void,
     discoveryToolAllowed?: (runId: string, role: string) => boolean,
-    featureCommit?: (runId: string, role: string, workingDir: string) => string,
+    featureCommit?: (
+      runId: string,
+      role: string,
+      workingDir: string,
+      paths: ReadonlyArray<string>,
+    ) => FeatureCommitResult,
     executionFinish?: (
       runId: string,
       role: string,
@@ -517,8 +523,8 @@ export class PipelineController {
             run.featureDiscoveryBootstrapped,
           );
         },
-        (runId, role, workingDir) =>
-          this.commitFeatureWorktree(runId, role, workingDir),
+        (runId, role, workingDir, paths) =>
+          this.commitFeatureWorktree(runId, role, workingDir, paths),
         (runId, role, token, value) =>
           this.submitExecutionFinish(runId, role, token, value),
         (runId, role, token, sessionId) =>
@@ -1748,8 +1754,11 @@ export class PipelineController {
     const comparisonInput: ReadonlyArray<FeatureCandidateComparisonInput> =
       frozenCandidates.map(({ candidate, handoff }) => ({
         role: candidate.role,
-        handoff,
+        // Keep selection's handoff view canonical as well. The model's
+        // reported path list remains available only through bounded warnings.
+        handoff: { ...handoff, changedPaths: [...candidate.changedPaths] },
         changedPaths: candidate.changedPaths,
+        warnings: candidate.warnings,
         boundedDiff: candidate.boundedDiff,
         immutableCommit: candidate.headCommit,
         worktreeReference: candidate.path,
@@ -3340,6 +3349,7 @@ export class PipelineController {
     runId: string,
     role: string,
     workingDir: string,
+    paths: ReadonlyArray<string>,
   ) {
     const run = this.requireActiveRun(runId);
     if (run.definition !== FEATURE_PIPELINE_ID || !run.featureLifecycle) {
@@ -3350,7 +3360,7 @@ export class PipelineController {
         "Only controller-owned feature candidates/synthesis may commit here.",
       );
     }
-    return run.featureLifecycle.commitAssignedWorktree(role, workingDir);
+    return run.featureLifecycle.commitAssignedWorktree(role, workingDir, paths);
   }
 
   gitStatus(runId: string) {

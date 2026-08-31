@@ -245,6 +245,7 @@ class FakeFeatureLifecycle implements FeatureWorktreeLifecycle {
       ...worktree,
       headCommit: handoff.candidateHeadCommit,
       changedPaths: handoff.changedPaths,
+      warnings: [],
       boundedDiff: {
         text: `diff --git a/${handoff.changedPaths[0]} b/${handoff.changedPaths[0]}`,
         truncated: false,
@@ -289,9 +290,16 @@ class FakeFeatureLifecycle implements FeatureWorktreeLifecycle {
     };
   }
 
-  commitAssignedWorktree(role: string, _workingDir: string) {
+  commitAssignedWorktree(
+    role: string,
+    _workingDir: string,
+    _paths: ReadonlyArray<string>,
+  ) {
     const candidate = candidateRoleFromSpec(role);
-    return candidate ? CANDIDATE_COMMITS[candidate] : FINAL_SYNTHESIS_COMMIT;
+    const head = candidate
+      ? CANDIDATE_COMMITS[candidate]
+      : FINAL_SYNTHESIS_COMMIT;
+    return { head, changedPaths: [] };
   }
 
   validateSynthesis(

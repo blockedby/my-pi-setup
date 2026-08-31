@@ -44,6 +44,7 @@ test("implementation synthesis keeps the registered commit tool across selection
     runId: string;
     role: string;
     workingDir: string;
+    paths: ReadonlyArray<string>;
   }> = [];
   let session:
     | Awaited<
@@ -98,9 +99,12 @@ test("implementation synthesis keeps the registered commit tool across selection
       },
       rootTools: () => [],
       definitionForRun: () => FEATURE_PIPELINE_ID,
-      featureCommit(runId, role, workingDir) {
-        commitCalls.push({ runId, role, workingDir });
-        return "commit-pipeline-lifecycle-test";
+      featureCommit(runId, role, workingDir, paths) {
+        commitCalls.push({ runId, role, workingDir, paths });
+        return {
+          head: "commit-pipeline-lifecycle-test",
+          changedPaths: paths,
+        };
       },
     });
 
@@ -142,7 +146,7 @@ test("implementation synthesis keeps the registered commit tool across selection
     assertNoModelTraffic();
     const result = await commitTool.execute(
       "pipeline-lifecycle-commit-call",
-      {},
+      { paths: ["src/selected.ts"] },
       undefined,
       undefined,
       { cwd: fixture.cwd } as unknown as ExtensionContext,
@@ -150,12 +154,14 @@ test("implementation synthesis keeps the registered commit tool across selection
 
     assert.deepEqual(result.details, {
       head: "commit-pipeline-lifecycle-test",
+      changedPaths: ["src/selected.ts"],
     });
     assert.deepEqual(commitCalls, [
       {
         runId: "run-pipeline-lifecycle-test",
         role: FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
         workingDir: fixture.cwd,
+        paths: ["src/selected.ts"],
       },
     ]);
     assert.equal(session.isStreaming, false);

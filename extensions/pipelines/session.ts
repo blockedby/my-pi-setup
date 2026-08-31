@@ -60,6 +60,7 @@ import {
   FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
 } from "./feature-best-of-three.ts";
 import { createFeatureToolBoundary } from "./feature-sandbox.ts";
+import type { FeatureCommitResult } from "./feature-worktrees.ts";
 import type {
   AgentNodeSpec,
   AgentTreeSessionEvent,
@@ -105,7 +106,8 @@ interface PipelineSessionFactoryOptions {
     runId: string,
     role: string,
     workingDir: string,
-  ) => string;
+    paths: ReadonlyArray<string>,
+  ) => FeatureCommitResult;
   /** Controller-owned, session-bound cooperative partial settlement. */
   readonly executionFinish?: (
     runId: string,
@@ -630,15 +632,23 @@ export function createPipelineSessionFactory(
             name: "pipeline_feature_commit",
             label: "Commit Feature Candidate State",
             description:
-              "Ask the feature-pipeline controller to create an ordinary commit from all current changes in this assigned worktree. The controller validates ownership; agents cannot perform branch/worktree/history operations directly.",
-            parameters: Type.Object({}, { additionalProperties: false }),
-            async execute() {
-              const head = options.featureCommit?.(
+              "Ask the feature-pipeline controller to create an ordinary commit from exactly the explicit repository-relative paths in paths. It supports additions, modifications, and deletions, returns the immutable HEAD and canonical Git paths, and never stages all current changes. Tracked or staged leftovers fail finalization; only bounded untracked leftovers in a controller-owned candidate or synthesis worktree may be discarded before validation. The controller validates ownership; agents cannot perform branch/worktree/history operations directly.",
+            parameters: Type.Object(
+              {
+                paths: Type.Array(Type.String({ maxLength: 4 * 1024 }), {
+                  maxItems: 256,
+                }),
+              },
+              { additionalProperties: false },
+            ),
+            async execute(_toolCallId, params) {
+              const result = options.featureCommit?.(
                 spec.scopeId ?? "",
                 spec.role,
                 spec.cwd,
+                params.paths,
               );
-              if (!head) {
+              if (!result) {
                 throw new Error(
                   "Controller feature commit authority is unavailable.",
                 );
@@ -647,10 +657,10 @@ export function createPipelineSessionFactory(
                 content: [
                   {
                     type: "text",
-                    text: `Controller committed assigned worktree state at ${head}.`,
+                    text: `Controller committed the explicit paths at immutable HEAD ${result.head}. Canonical Git paths: ${result.changedPaths.join(", ") || "none"}.`,
                   },
                 ],
-                details: { head },
+                details: result,
               };
             },
           })

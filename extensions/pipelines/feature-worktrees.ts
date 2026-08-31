@@ -12,6 +12,10 @@ const GIT_OUTPUT_LIMIT = 512 * 1024;
 const CANDIDATE_DIFF_LIMIT = 48 * 1024;
 const SYNTHESIS_DIFF_LIMIT = 128 * 1024;
 const SYNTHESIS_CHANGED_PATH_LIMIT = 64;
+const FEATURE_COMMIT_PATH_LIMIT = 256;
+const FEATURE_COMMIT_PATHSPEC_LIMIT = 128 * 1024;
+const UNTRACKED_CLEANUP_PATH_LIMIT = 512;
+const MAX_PATH_BYTES = 4 * 1024;
 
 export interface FeatureCallerWorktree {
   readonly workingDir: string;
@@ -29,9 +33,23 @@ export interface FeatureTemporaryWorktree {
   readonly baseCommit: string;
 }
 
+export interface FeatureCommitResult {
+  readonly head: string;
+  readonly changedPaths: ReadonlyArray<string>;
+}
+
+export interface FeatureCandidateWarning {
+  readonly category: "candidate-report-changed-paths-mismatch";
+  readonly reportedPathCount: number;
+  readonly canonicalPathCount: number;
+  readonly reportedOnlyPathCount: number;
+  readonly canonicalOnlyPathCount: number;
+}
+
 export interface FrozenFeatureCandidate extends FeatureTemporaryWorktree {
   readonly headCommit: string;
   readonly changedPaths: ReadonlyArray<string>;
+  readonly warnings: ReadonlyArray<FeatureCandidateWarning>;
   readonly boundedDiff: {
     readonly text: string;
     readonly truncated: boolean;
@@ -71,7 +89,11 @@ export interface FeatureWorktreeLifecycle {
   createSynthesisWorktree(
     primary: FrozenFeatureCandidate,
   ): FeatureSynthesisWorktree;
-  commitAssignedWorktree(role: string, workingDir: string): string;
+  commitAssignedWorktree(
+    role: string,
+    workingDir: string,
+    paths: ReadonlyArray<string>,
+  ): FeatureCommitResult;
   validateSynthesis(
     worktree: FeatureSynthesisWorktree,
     provenance: FeatureSynthesisProvenance,
@@ -91,7 +113,7 @@ export interface FeatureGitOperations {
   ): FeatureWorktreeLifecycle;
 }
 
-function git(
+function gitRaw(
   cwd: string,
   args: ReadonlyArray<string>,
   maxBuffer = GIT_OUTPUT_LIMIT,
@@ -101,7 +123,15 @@ function git(
     encoding: "utf8",
     maxBuffer,
     stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+  });
+}
+
+function git(
+  cwd: string,
+  args: ReadonlyArray<string>,
+  maxBuffer = GIT_OUTPUT_LIMIT,
+) {
+  return gitRaw(cwd, args, maxBuffer).trim();
 }
 
 function boundedDiagnostic(error: unknown) {
@@ -117,10 +147,27 @@ function requireGit(cwd: string, args: ReadonlyArray<string>, label: string) {
   }
 }
 
+function requireGitRaw(
+  cwd: string,
+  args: ReadonlyArray<string>,
+  label: string,
+) {
+  try {
+    return gitRaw(cwd, args);
+  } catch (error) {
+    throw new Error(`${label}: ${boundedDiagnostic(error)}`);
+  }
+}
+
 function cleanStatus(workingDir: string) {
   return requireGit(
     workingDir,
-    ["status", "--porcelain=v1", "--untracked-files=all"],
+    [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=normal",
+      "--ignored=matching",
+    ],
     "Unable to inspect worktree cleanliness",
   );
 }
@@ -339,22 +386,83 @@ function requireAncestor(
   }
 }
 
+function nulSeparatedPaths(value: string) {
+  return value.split("\0").filter(Boolean);
+}
+
 function readChangedPaths(cwd: string, from: string, to: string) {
-  const value = requireGit(
-    cwd,
-    ["diff", "--name-only", "--no-renames", `${from}..${to}`, "--"],
-    "Unable to inspect changed paths",
+  return nulSeparatedPaths(
+    requireGitRaw(
+      cwd,
+      [
+        "--literal-pathspecs",
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        `${from}..${to}`,
+        "--",
+      ],
+      "Unable to inspect changed paths",
+    ),
   );
-  return value ? value.split("\n").filter(Boolean) : [];
 }
 
 function readStagedPaths(cwd: string) {
-  const value = requireGit(
-    cwd,
-    ["diff", "--cached", "--name-only", "--no-renames", "--"],
-    "Unable to inspect staged paths",
+  return nulSeparatedPaths(
+    requireGitRaw(
+      cwd,
+      [
+        "--literal-pathspecs",
+        "diff",
+        "--cached",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        "--",
+      ],
+      "Unable to inspect staged paths",
+    ),
   );
-  return value ? value.split("\n").filter(Boolean) : [];
+}
+
+function readCommittedTreePaths(cwd: string, commit: string) {
+  return nulSeparatedPaths(
+    requireGitRaw(
+      cwd,
+      ["--literal-pathspecs", "ls-tree", "-r", "--name-only", "-z", commit],
+      "Unable to inspect committed feature tree",
+    ),
+  );
+}
+
+interface WorktreeStatusEntry {
+  readonly status: string;
+  readonly filePath: string;
+}
+
+function readStatusEntries(cwd: string) {
+  const entries = nulSeparatedPaths(
+    requireGitRaw(
+      cwd,
+      [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--ignored=traditional",
+      ],
+      "Unable to inspect worktree status",
+    ),
+  );
+  return entries.flatMap((entry): ReadonlyArray<WorktreeStatusEntry> => {
+    if (entry.length < 4) return [];
+    return [{ status: entry.slice(0, 2), filePath: entry.slice(3) }];
+  });
+}
+
+function isUntrackedStatus(status: string) {
+  return status === "??" || status === "!!";
 }
 
 function pathHasExternalSymlink(cwd: string, filePath: string) {
@@ -402,6 +510,7 @@ const generatedDirectoryNames = new Set([
   ".cache",
   ".pi",
   ".pi-subagents",
+  ".worktrees",
 ]);
 const generatedRootDirectoryNames = new Set([
   "bin",
@@ -420,11 +529,8 @@ function isGeneratedArtifactPath(filePath: string) {
   );
 }
 
-function readIgnoredStagedPaths(
-  cwd: string,
-  stagedPaths: ReadonlyArray<string>,
-) {
-  return stagedPaths.filter((filePath) => {
+function readIgnoredPaths(cwd: string, paths: ReadonlyArray<string>) {
+  return paths.filter((filePath) => {
     try {
       execFileSync("git", ["check-ignore", "--no-index", "--", filePath], {
         cwd,
@@ -435,6 +541,91 @@ function readIgnoredStagedPaths(
       return false;
     }
   });
+}
+
+function hasExactGitPath(
+  cwd: string,
+  args: ReadonlyArray<string>,
+  filePath: string,
+) {
+  return nulSeparatedPaths(
+    requireGitRaw(cwd, args, "Unable to inspect Git paths"),
+  ).some((entry) => {
+    const separator = entry.indexOf("\t");
+    return separator >= 0 && entry.slice(separator + 1) === filePath;
+  });
+}
+
+function hasExactTrackedPath(cwd: string, filePath: string) {
+  return (
+    hasExactGitPath(
+      cwd,
+      ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", filePath],
+      filePath,
+    ) ||
+    hasExactGitPath(
+      cwd,
+      ["--literal-pathspecs", "ls-tree", "-r", "-z", "HEAD", "--", filePath],
+      filePath,
+    )
+  );
+}
+
+function symlinkTargetEscapes(cwd: string, filePath: string, target: string) {
+  const absolutePath = path.resolve(cwd, filePath);
+  const targetPath = path.isAbsolute(target)
+    ? path.resolve(target)
+    : path.resolve(path.dirname(absolutePath), target);
+  const relativeTarget = path.relative(cwd, targetPath);
+  return (
+    path.isAbsolute(relativeTarget) ||
+    relativeTarget.startsWith(`..${path.sep}`) ||
+    pathHasExternalSymlink(cwd, relativeTarget)
+  );
+}
+
+function gitSymlinkTarget(
+  cwd: string,
+  args: ReadonlyArray<string>,
+  filePath: string,
+  objectIndex: number,
+) {
+  const entry = nulSeparatedPaths(
+    requireGitRaw(cwd, args, "Unable to inspect tracked deletion path"),
+  ).find((item) => {
+    const separator = item.indexOf("\t");
+    return separator >= 0 && item.slice(separator + 1) === filePath;
+  });
+  if (!entry) return undefined;
+  const separator = entry.indexOf("\t");
+  const metadata = entry.slice(0, separator).split(/\s+/);
+  if (metadata[0] !== "120000" || !metadata[objectIndex]) return undefined;
+  return requireGitRaw(
+    cwd,
+    ["cat-file", "blob", metadata[objectIndex]!],
+    "Unable to inspect tracked symlink target",
+  );
+}
+
+function trackedDeletedSymlinkEscapes(cwd: string, filePath: string) {
+  const targets = [
+    gitSymlinkTarget(
+      cwd,
+      ["--literal-pathspecs", "ls-tree", "-r", "-z", "HEAD", "--", filePath],
+      filePath,
+      2,
+    ),
+    gitSymlinkTarget(
+      cwd,
+      ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", filePath],
+      filePath,
+      1,
+    ),
+  ];
+  return targets.some(
+    (target) =>
+      target !== undefined && symlinkTargetEscapes(cwd, filePath, target),
+  );
 }
 
 export function rollbackOwnedFeatureBranches(
@@ -482,6 +673,25 @@ function equalUniquePathSets(
     reportedSet.size === actualSet.size &&
     [...reportedSet].every((item) => actualSet.has(item))
   );
+}
+
+function candidateReportWarning(
+  reported: ReadonlyArray<string>,
+  canonicalPaths: ReadonlyArray<string>,
+): FeatureCandidateWarning {
+  const reportedSet = new Set(reported);
+  const canonicalSet = new Set(canonicalPaths);
+  return {
+    category: "candidate-report-changed-paths-mismatch",
+    reportedPathCount: reported.length,
+    canonicalPathCount: canonicalPaths.length,
+    reportedOnlyPathCount: [...reportedSet].filter(
+      (item) => !canonicalSet.has(item),
+    ).length,
+    canonicalOnlyPathCount: [...canonicalSet].filter(
+      (item) => !reportedSet.has(item),
+    ).length,
+  };
 }
 
 function selectionAugmentationKey(value: {
@@ -607,20 +817,376 @@ function boundedDiff(cwd: string, from: string, to: string, limit: number) {
   return { text: `${payload}${marker}`, truncated: true, bytes };
 }
 
+function isHostControlledPath(filePath: string) {
+  return filePath.split("/").some((part) => part === ".git");
+}
+
+function invalidRelativePath(filePath: string) {
+  if (
+    !filePath ||
+    filePath === "." ||
+    filePath.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/.test(filePath) ||
+    filePath.startsWith(":") ||
+    filePath.includes("\\") ||
+    filePath.includes("\0") ||
+    filePath.endsWith("/") ||
+    path.posix.normalize(filePath) !== filePath
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function pathspecBytes(paths: ReadonlyArray<string>) {
+  return paths.reduce(
+    (total, filePath) =>
+      total +
+      (typeof filePath === "string"
+        ? Buffer.byteLength(filePath, "utf8")
+        : MAX_PATH_BYTES + 1) +
+      1,
+    0,
+  );
+}
+
+function validateExplicitCommitPaths(
+  workingDir: string,
+  paths: ReadonlyArray<string>,
+  candidateRole: FeatureCandidateRole | undefined,
+) {
+  if (!Array.isArray(paths)) {
+    throw new Error("Feature commit paths must be an array.");
+  }
+  const pathLimit = candidateRole
+    ? FEATURE_COMMIT_PATH_LIMIT
+    : SYNTHESIS_CHANGED_PATH_LIMIT;
+  if (paths.length > pathLimit) {
+    throw new Error(
+      `Feature commit path list exceeds the bounded maximum of ${pathLimit} paths.`,
+    );
+  }
+  if (candidateRole && paths.length === 0) {
+    throw new Error(
+      "Feature candidate commits require at least one explicit path.",
+    );
+  }
+  if (pathspecBytes(paths) > FEATURE_COMMIT_PATHSPEC_LIMIT) {
+    throw new Error(
+      `Feature commit pathspecs exceed the bounded maximum of ${FEATURE_COMMIT_PATHSPEC_LIMIT} UTF-8 bytes.`,
+    );
+  }
+  const duplicates = paths.filter(
+    (filePath, index) => paths.indexOf(filePath) !== index,
+  );
+  if (duplicates.length > 0) {
+    throw new Error(
+      `Feature commit paths must be unique; duplicate path: ${duplicates[0]}.`,
+    );
+  }
+  const invalid = paths.filter((filePath) => {
+    if (typeof filePath !== "string") return true;
+    const relative = path.relative(
+      workingDir,
+      path.resolve(workingDir, filePath),
+    );
+    return (
+      Buffer.byteLength(filePath, "utf8") > MAX_PATH_BYTES ||
+      invalidRelativePath(filePath) ||
+      path.isAbsolute(filePath) ||
+      path.isAbsolute(relative) ||
+      relative.startsWith(`..${path.sep}`)
+    );
+  });
+  if (invalid.length > 0) {
+    throw new Error(
+      `Feature commit rejected unsafe/outside repository-relative paths: ${invalid.slice(0, 16).join(", ")}.`,
+    );
+  }
+  const generated = paths.filter(isGeneratedArtifactPath);
+  const hostControlled = paths.filter(isHostControlledPath);
+  const ignored = readIgnoredPaths(workingDir, paths);
+  if (generated.length > 0) {
+    throw new Error(
+      `Feature commit rejected generated paths: ${generated.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (hostControlled.length > 0) {
+    throw new Error(
+      `Feature commit rejected host-controlled paths: ${hostControlled.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (ignored.length > 0) {
+    throw new Error(
+      `Feature commit rejected ignored paths: ${ignored.slice(0, 16).join(", ")}.`,
+    );
+  }
+  const escaped = paths.filter(
+    (filePath) =>
+      pathHasExternalSymlink(workingDir, filePath) ||
+      trackedDeletedSymlinkEscapes(workingDir, filePath),
+  );
+  if (escaped.length > 0) {
+    throw new Error(
+      `Feature commit rejected paths escaping the assigned worktree through symlinks: ${escaped.slice(0, 16).join(", ")}.`,
+    );
+  }
+  const missing = paths.filter((filePath) => {
+    const absolutePath = path.resolve(workingDir, filePath);
+    if (fs.existsSync(absolutePath)) {
+      try {
+        if (fs.lstatSync(absolutePath).isDirectory()) return true;
+      } catch {
+        return true;
+      }
+      return false;
+    }
+    return !hasExactTrackedPath(workingDir, filePath);
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      `Feature commit paths must name existing files or tracked deletions: ${missing.slice(0, 16).join(", ")}.`,
+    );
+  }
+  return [...paths];
+}
+
+function classifyUnsafeCommittedPaths(
+  workingDir: string,
+  paths: ReadonlyArray<string>,
+) {
+  const generated = paths.filter(isGeneratedArtifactPath);
+  const hostControlled = paths.filter(isHostControlledPath);
+  const ignored = readIgnoredPaths(workingDir, paths);
+  const escaped = paths.filter((filePath) =>
+    pathHasExternalSymlink(workingDir, filePath),
+  );
+  return {
+    generated: [...new Set(generated)],
+    hostControlled: [...new Set(hostControlled)],
+    ignored: [...new Set(ignored)],
+    escaped,
+  };
+}
+
+function assertCommittedPathsSafe(
+  workingDir: string,
+  paths: ReadonlyArray<string>,
+  label: string,
+) {
+  const unsafe = classifyUnsafeCommittedPaths(workingDir, paths);
+  if (unsafe.generated.length > 0) {
+    throw new Error(
+      `${label} rejected generated paths in committed diff: ${unsafe.generated.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.hostControlled.length > 0) {
+    throw new Error(
+      `${label} rejected host-controlled paths in committed diff: ${unsafe.hostControlled.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.ignored.length > 0) {
+    throw new Error(
+      `${label} rejected ignored paths in committed diff: ${unsafe.ignored.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.escaped.length > 0) {
+    throw new Error(
+      `${label} rejected paths escaping the assigned worktree through symlinks in committed diff: ${unsafe.escaped.slice(0, 16).join(", ")}.`,
+    );
+  }
+}
+
+function assertCommittedTreeSafe(
+  workingDir: string,
+  commit: string,
+  label: string,
+) {
+  const treePaths = readCommittedTreePaths(workingDir, commit);
+  const unsafe = classifyUnsafeCommittedPaths(workingDir, treePaths);
+  if (unsafe.generated.length > 0) {
+    throw new Error(
+      `${label} rejected generated paths in committed tree: ${unsafe.generated.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.hostControlled.length > 0) {
+    throw new Error(
+      `${label} rejected host-controlled paths in committed tree: ${unsafe.hostControlled.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.ignored.length > 0) {
+    throw new Error(
+      `${label} rejected ignored paths in committed tree: ${unsafe.ignored.slice(0, 16).join(", ")}.`,
+    );
+  }
+  if (unsafe.escaped.length > 0) {
+    throw new Error(
+      `${label} rejected paths escaping the assigned worktree through symlinks in committed tree: ${unsafe.escaped.slice(0, 16).join(", ")}.`,
+    );
+  }
+}
+
+function unstageAllPaths(workingDir: string) {
+  const staged = readStagedPaths(workingDir);
+  if (staged.length === 0) return;
+  requireGit(
+    workingDir,
+    ["--literal-pathspecs", "reset", "--quiet", "--", ...staged],
+    "Unable to unstage rejected feature paths",
+  );
+}
+
+function removeOwnedUntrackedEntry(
+  root: string,
+  absolute: string,
+  budget: { remaining: number },
+) {
+  let stats: fs.Stats;
+  try {
+    stats = fs.lstatSync(absolute);
+  } catch {
+    return;
+  }
+  if (budget.remaining <= 0) {
+    throw new Error(
+      `Untracked cleanup exceeded the bounded entry limit of ${UNTRACKED_CLEANUP_PATH_LIMIT}.`,
+    );
+  }
+  budget.remaining -= 1;
+  if (stats.isSymbolicLink()) {
+    fs.unlinkSync(absolute);
+    return;
+  }
+  if (!isWithinPath(root, comparablePath(absolute))) {
+    throw new Error("Untracked cleanup path escapes the owned worktree.");
+  }
+  if (!stats.isDirectory()) {
+    fs.unlinkSync(absolute);
+    return;
+  }
+  for (const entry of fs.readdirSync(absolute)) {
+    removeOwnedUntrackedEntry(root, path.join(absolute, entry), budget);
+  }
+  try {
+    fs.rmdirSync(absolute);
+  } catch (error) {
+    throw new Error(
+      `Unable to remove owned untracked directory: ${boundedDiagnostic(error)}`,
+    );
+  }
+}
+
+function removeEmptyOwnedAncestors(
+  root: string,
+  start: string,
+  budget: { remaining: number },
+) {
+  let current = start;
+  while (current !== root && isWithinPath(root, current)) {
+    let stats: fs.Stats;
+    try {
+      stats = fs.lstatSync(current);
+    } catch {
+      current = path.dirname(current);
+      continue;
+    }
+    if (!stats.isDirectory() || stats.isSymbolicLink()) break;
+    if (fs.readdirSync(current).length > 0) break;
+    removeOwnedUntrackedEntry(root, current, budget);
+    current = path.dirname(current);
+  }
+}
+
+function removeOwnedUntrackedPath(
+  workingDir: string,
+  filePath: string,
+  budget: { remaining: number },
+) {
+  const root = canonical(workingDir);
+  const withoutTrailingSlash = filePath.replace(/\/$/, "");
+  if (
+    !withoutTrailingSlash ||
+    invalidRelativePath(withoutTrailingSlash) ||
+    !isWithinPath(root, path.resolve(root, withoutTrailingSlash))
+  ) {
+    throw new Error(
+      `Untracked cleanup path is outside the owned worktree: ${filePath}.`,
+    );
+  }
+  const absolute = path.resolve(root, withoutTrailingSlash);
+  removeOwnedUntrackedEntry(root, absolute, budget);
+  removeEmptyOwnedAncestors(root, path.dirname(absolute), budget);
+}
+
+function isWithinPath(root: string, candidate: string) {
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+function finalizeOwnedWorktree(
+  workingDir: string,
+  label: string,
+  allowUntrackedCleanup: boolean,
+) {
+  const statuses = readStatusEntries(workingDir);
+  const trackedOrStaged = statuses.filter(
+    ({ status }) => !isUntrackedStatus(status),
+  );
+  if (trackedOrStaged.length > 0) {
+    throw new Error(
+      `${label} has tracked/staged leftovers after its final commit: ${trackedOrStaged
+        .slice(0, 16)
+        .map(({ status, filePath }) => `${status} ${filePath}`)
+        .join(", ")}.`,
+    );
+  }
+  if (statuses.length === 0) return;
+  if (!allowUntrackedCleanup) {
+    throw new Error(
+      `${label} has untracked leftovers after its final commit: ${statuses
+        .slice(0, 16)
+        .map(({ filePath }) => filePath)
+        .join(", ")}.`,
+    );
+  }
+  if (statuses.length > UNTRACKED_CLEANUP_PATH_LIMIT) {
+    throw new Error(
+      `${label} has ${statuses.length} untracked leftovers; bounded cleanup allows at most ${UNTRACKED_CLEANUP_PATH_LIMIT}.`,
+    );
+  }
+  const cleanupBudget = { remaining: UNTRACKED_CLEANUP_PATH_LIMIT };
+  try {
+    for (const { filePath } of statuses) {
+      removeOwnedUntrackedPath(workingDir, filePath, cleanupBudget);
+    }
+  } catch (error) {
+    throw new Error(
+      `${label} untracked cleanup failed: ${boundedDiagnostic(error)}`,
+    );
+  }
+  const remaining = readStatusEntries(workingDir);
+  if (remaining.length > 0) {
+    throw new Error(
+      `${label} remained dirty after bounded untracked cleanup: ${remaining
+        .slice(0, 16)
+        .map(({ status, filePath }) => `${status} ${filePath}`)
+        .join(", ")}.`,
+    );
+  }
+}
+
 export function cleanupOwnedFeatureWorktreePaths(
   temporaryRoot: string,
   ownedPaths: ReadonlyArray<string>,
   removeWorktree: (worktreePath: string) => void,
 ) {
   const failures: string[] = [];
+  const rootPath = path.resolve(temporaryRoot);
+  const root = comparablePath(temporaryRoot);
   for (const worktreePath of [...ownedPaths].reverse()) {
-    if (
-      !path
-        .resolve(worktreePath)
-        .startsWith(`${path.resolve(temporaryRoot)}${path.sep}`)
-    ) {
-      continue;
-    }
+    const lexicalPath = path.resolve(worktreePath);
+    if (!isWithinPath(rootPath, lexicalPath)) continue;
+    const resolvedPath = comparablePath(worktreePath);
+    if (!isWithinPath(root, resolvedPath)) continue;
     try {
       removeWorktree(worktreePath);
     } catch (error) {
@@ -660,9 +1226,16 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       ".worktrees",
     );
     fs.mkdirSync(worktreeRoot, { recursive: true });
+    const resolvedWorktreeRoot = canonical(worktreeRoot);
+    const repositoryContainer = canonical(path.dirname(caller.commonGitDir));
+    if (!isWithinPath(repositoryContainer, resolvedWorktreeRoot)) {
+      throw new Error(
+        `Feature pipeline temporary worktree root must remain inside the caller repository (${resolvedWorktreeRoot} is outside ${repositoryContainer}).`,
+      );
+    }
     this.temporaryRoot = fs.mkdtempSync(
       path.join(
-        worktreeRoot,
+        resolvedWorktreeRoot,
         `pipi-feature-${branchSlug(runId).split("/").at(-1)}-`,
       ),
     );
@@ -761,9 +1334,15 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       headCommit,
       `${worktree.role} candidate ancestry is invalid`,
     );
-    if (cleanStatus(worktree.path)) {
+    finalizeOwnedWorktree(worktree.path, `${worktree.role} candidate`, true);
+    const finalizedHead = requireGit(
+      worktree.path,
+      ["rev-parse", "HEAD"],
+      `Unable to confirm ${worktree.role} candidate HEAD after cleanup`,
+    );
+    if (finalizedHead !== headCommit) {
       throw new Error(
-        `${worktree.role} candidate must commit all implementation changes.`,
+        `${worktree.role} candidate changed during finalization cleanup.`,
       );
     }
     const changedPaths = readChangedPaths(
@@ -776,9 +1355,33 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
         `${worktree.role} candidate commit contains no implementation changes.`,
       );
     }
-    if (!equalUniquePathSets(handoff.changedPaths, changedPaths)) {
+    if (changedPaths.length > FEATURE_COMMIT_PATH_LIMIT) {
       throw new Error(
-        `${worktree.role} candidate changedPaths do not match its committed diff.`,
+        `${worktree.role} candidate changed ${changedPaths.length} paths; maximum is ${FEATURE_COMMIT_PATH_LIMIT}.`,
+      );
+    }
+    assertCommittedPathsSafe(
+      worktree.path,
+      changedPaths,
+      `${worktree.role} candidate`,
+    );
+    assertCommittedTreeSafe(
+      worktree.path,
+      headCommit,
+      `${worktree.role} candidate`,
+    );
+    const warnings = equalUniquePathSets(handoff.changedPaths, changedPaths)
+      ? []
+      : [candidateReportWarning(handoff.changedPaths, changedPaths)];
+    const diff = boundedDiff(
+      worktree.path,
+      worktree.baseCommit,
+      headCommit,
+      CANDIDATE_DIFF_LIMIT,
+    );
+    if (diff.truncated) {
+      throw new Error(
+        `${worktree.role} candidate diff exceeds ${CANDIDATE_DIFF_LIMIT} UTF-8 bytes.`,
       );
     }
     this.candidateHeads.set(worktree.role, headCommit);
@@ -786,12 +1389,8 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       ...worktree,
       headCommit,
       changedPaths,
-      boundedDiff: boundedDiff(
-        worktree.path,
-        worktree.baseCommit,
-        headCommit,
-        CANDIDATE_DIFF_LIMIT,
-      ),
+      warnings,
+      boundedDiff: diff,
       frozen: true as const,
     };
   }
@@ -872,6 +1471,7 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
           baseCommit: this.caller.baseCommit,
           headCommit,
           changedPaths: [],
+          warnings: [],
           boundedDiff: { text: "", truncated: false, bytes: 0 },
           frozen: true as const,
         };
@@ -894,7 +1494,16 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
     return synthesis;
   }
 
-  commitAssignedWorktree(role: string, workingDir: string) {
+  commitAssignedWorktree(
+    role: string,
+    workingDir: string,
+    paths: ReadonlyArray<string>,
+  ): FeatureCommitResult {
+    if (this.cleaned) {
+      throw new Error(
+        "Feature commit authority is closed after lifecycle cleanup.",
+      );
+    }
     const resolved = comparablePath(workingDir);
     if (!this.ownedWorktreePaths.has(resolved)) {
       throw new Error("Feature commit path is not owned by this pipeline run.");
@@ -912,49 +1521,143 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
         "Feature commit role does not own the assigned worktree.",
       );
     }
-    requireGit(
+    const selectedPaths = validateExplicitCommitPaths(
       resolved,
-      ["add", "-A", "--"],
-      "Unable to stage feature implementation",
+      paths,
+      candidateRole,
     );
-    const stagedPaths = readStagedPaths(resolved);
-    const ignoredStagedPaths = new Set(
-      readIgnoredStagedPaths(resolved, stagedPaths),
+    const initialStagedPaths = readStagedPaths(resolved);
+    const unsafeInitial = classifyUnsafeCommittedPaths(
+      resolved,
+      initialStagedPaths,
     );
-    const generated = stagedPaths.filter(
-      (item) =>
-        ignoredStagedPaths.has(item) ||
-        isGeneratedArtifactPath(item) ||
-        pathHasExternalSymlink(resolved, item),
-    );
-    if (generated.length > 0) {
-      requireGit(
-        resolved,
-        ["reset", "--quiet", "--", ...stagedPaths],
-        "Unable to unstage generated feature artifacts",
-      );
+    if (unsafeInitial.generated.length > 0) {
       throw new Error(
-        `Feature commit contains generated or host-controlled paths: ${generated.slice(0, 16).join(", ")}.`,
+        `Feature commit rejected generated paths already staged: ${unsafeInitial.generated.slice(0, 16).join(", ")}.`,
       );
     }
-    const commitArgs = [
-      "commit",
-      "-m",
-      candidateRole
-        ? `feature-pipeline ${candidateRole.toLowerCase()} candidate`
-        : "feature-pipeline final synthesis",
-    ];
-    if (!candidateRole) commitArgs.push("--allow-empty");
-    requireGit(
-      resolved,
-      commitArgs,
-      "Unable to commit assigned feature worktree",
+    if (unsafeInitial.hostControlled.length > 0) {
+      throw new Error(
+        `Feature commit rejected host-controlled paths already staged: ${unsafeInitial.hostControlled.slice(0, 16).join(", ")}.`,
+      );
+    }
+    if (unsafeInitial.ignored.length > 0) {
+      throw new Error(
+        `Feature commit rejected ignored paths already staged: ${unsafeInitial.ignored.slice(0, 16).join(", ")}.`,
+      );
+    }
+    if (unsafeInitial.escaped.length > 0) {
+      throw new Error(
+        `Feature commit rejected paths escaping the assigned worktree through symlinks already staged: ${unsafeInitial.escaped.slice(0, 16).join(", ")}.`,
+      );
+    }
+    const unselectedStagedPaths = initialStagedPaths.filter(
+      (filePath) => !selectedPaths.includes(filePath),
     );
-    return requireGit(
+    if (unselectedStagedPaths.length > 0) {
+      throw new Error(
+        `Feature commit rejected tracked/staged residue outside explicit paths: ${unselectedStagedPaths.slice(0, 16).join(", ")}.`,
+      );
+    }
+    try {
+      if (selectedPaths.length > 0) {
+        requireGit(
+          resolved,
+          ["--literal-pathspecs", "add", "--", ...selectedPaths],
+          "Unable to stage explicit feature implementation paths",
+        );
+      }
+      const stagedPaths = readStagedPaths(resolved);
+      const unexpectedStagedPaths = stagedPaths.filter(
+        (filePath) => !selectedPaths.includes(filePath),
+      );
+      if (unexpectedStagedPaths.length > 0) {
+        throw new Error(
+          `Feature commit rejected tracked/staged residue outside explicit paths: ${unexpectedStagedPaths.slice(0, 16).join(", ")}.`,
+        );
+      }
+      const unsafe = classifyUnsafeCommittedPaths(resolved, stagedPaths);
+      if (unsafe.generated.length > 0) {
+        throw new Error(
+          `Feature commit rejected generated paths: ${unsafe.generated.slice(0, 16).join(", ")}.`,
+        );
+      }
+      if (unsafe.hostControlled.length > 0) {
+        throw new Error(
+          `Feature commit rejected host-controlled paths: ${unsafe.hostControlled.slice(0, 16).join(", ")}.`,
+        );
+      }
+      if (unsafe.ignored.length > 0) {
+        throw new Error(
+          `Feature commit rejected ignored paths: ${unsafe.ignored.slice(0, 16).join(", ")}.`,
+        );
+      }
+      if (unsafe.escaped.length > 0) {
+        throw new Error(
+          `Feature commit rejected paths escaping the assigned worktree through symlinks: ${unsafe.escaped.slice(0, 16).join(", ")}.`,
+        );
+      }
+      const commitArgs = [
+        "commit",
+        "--no-verify",
+        "-m",
+        candidateRole
+          ? `feature-pipeline ${candidateRole.toLowerCase()} candidate`
+          : "feature-pipeline final synthesis",
+      ];
+      if (!candidateRole) commitArgs.push("--allow-empty");
+      requireGit(
+        resolved,
+        commitArgs,
+        "Unable to commit assigned feature worktree",
+      );
+    } catch (error) {
+      try {
+        unstageAllPaths(resolved);
+      } catch (resetError) {
+        throw new Error(
+          `${boundedDiagnostic(error)}; unable to clean rejected feature index: ${boundedDiagnostic(resetError)}`,
+        );
+      }
+      throw error;
+    }
+    const head = requireGit(
       resolved,
       ["rev-parse", "HEAD"],
       "Unable to read committed feature HEAD",
     );
+    const from = candidateRole
+      ? this.caller.baseCommit
+      : this.synthesis?.primaryCommit;
+    if (!from) {
+      throw new Error("Feature synthesis base commit is unavailable.");
+    }
+    const changedPaths = readChangedPaths(resolved, from, head);
+    const changedPathLimit = candidateRole
+      ? FEATURE_COMMIT_PATH_LIMIT
+      : SYNTHESIS_CHANGED_PATH_LIMIT;
+    if (changedPaths.length > changedPathLimit) {
+      throw new Error(
+        `${candidateRole ? "Feature candidate" : "Feature synthesis"} changed ${changedPaths.length} paths; maximum is ${changedPathLimit}.`,
+      );
+    }
+    assertCommittedPathsSafe(
+      resolved,
+      changedPaths,
+      candidateRole ? `${candidateRole} candidate` : "Feature synthesis",
+    );
+    const diff = boundedDiff(
+      resolved,
+      from,
+      head,
+      candidateRole ? CANDIDATE_DIFF_LIMIT : SYNTHESIS_DIFF_LIMIT,
+    );
+    if (diff.truncated) {
+      throw new Error(
+        `${candidateRole ? "Feature candidate" : "Feature synthesis"} diff exceeds ${candidateRole ? CANDIDATE_DIFF_LIMIT : SYNTHESIS_DIFF_LIMIT} UTF-8 bytes.`,
+      );
+    }
+    return { head, changedPaths };
   }
 
   validateSynthesis(
@@ -993,16 +1696,22 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       finalCommit,
       "Synthesis ancestry is invalid",
     );
-    if (cleanStatus(worktree.path)) {
-      throw new Error(
-        "Synthesis worktree must be clean after its final commit.",
-      );
+    finalizeOwnedWorktree(worktree.path, "Synthesis worktree", true);
+    const finalizedCommit = requireGit(
+      worktree.path,
+      ["rev-parse", "HEAD"],
+      "Unable to confirm final synthesis commit after cleanup",
+    );
+    if (finalizedCommit !== finalCommit) {
+      throw new Error("Synthesis commit changed during finalization cleanup.");
     }
     const changedPaths = readChangedPaths(
       worktree.path,
       worktree.primaryCommit,
       finalCommit,
     );
+    assertCommittedPathsSafe(worktree.path, changedPaths, "Synthesis worktree");
+    assertCommittedTreeSafe(worktree.path, finalCommit, "Synthesis worktree");
     if (changedPaths.length > SYNTHESIS_CHANGED_PATH_LIMIT) {
       throw new Error(
         `Bounded augmentation changed ${changedPaths.length} paths; maximum is ${SYNTHESIS_CHANGED_PATH_LIMIT}.`,
@@ -1017,11 +1726,6 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
     if (diff.truncated) {
       throw new Error(
         `Bounded augmentation diff exceeds ${SYNTHESIS_DIFF_LIMIT} UTF-8 bytes.`,
-      );
-    }
-    if (!equalUniquePathSets(provenance.changedPaths, changedPaths)) {
-      throw new Error(
-        "Synthesis changedPaths do not match its augmentation diff.",
       );
     }
     validateAugmentationAttribution(

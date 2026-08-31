@@ -30,7 +30,12 @@ function git(cwd: string, args: ReadonlyArray<string>) {
 function fixture({
   trackedGeneratedPath = false,
   trackedSymlink = false,
-}: { trackedGeneratedPath?: boolean; trackedSymlink?: boolean } = {}) {
+  deletablePath = false,
+}: {
+  trackedGeneratedPath?: boolean;
+  trackedSymlink?: boolean;
+  deletablePath?: boolean;
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-best-three-git-"));
   const primary = path.join(root, "primary");
   const caller = path.join(root, "caller");
@@ -45,6 +50,9 @@ function fixture({
   }
   if (trackedSymlink) {
     fs.symlinkSync("base.txt", path.join(primary, "tracked-link"));
+  }
+  if (deletablePath) {
+    fs.writeFileSync(path.join(primary, "obsolete.txt"), "obsolete\n");
   }
   git(primary, ["add", "."]);
   git(primary, ["commit", "-qm", "baseline"]);
@@ -104,10 +112,12 @@ function commitCandidate(
 ) {
   const changedPath = `${worktree.role.toLowerCase()}.txt`;
   fs.writeFileSync(path.join(worktree.path, changedPath), `${worktree.role}\n`);
-  const head = lifecycle.commitAssignedWorktree(
+  const commit = lifecycle.commitAssignedWorktree(
     `candidate-${worktree.role.toLowerCase()}`,
     worktree.path,
+    [changedPath],
   );
+  const head = commit.head;
   const handoff: FeatureCandidateHandoff = {
     reportType: "feature-implementation-candidate-v1",
     role: worktree.role,
@@ -205,7 +215,8 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
     const finalCommit = lifecycle.commitAssignedWorktree(
       "implementation-synthesis",
       synthesis.path,
-    );
+      [],
+    ).head;
     const provenance: FeatureSynthesisProvenance = {
       reportType: "feature-implementation-synthesis-v1",
       primaryCandidate: primary.role,
@@ -386,15 +397,20 @@ test("feature commits reject generated dependency symlinks before commit", () =>
     fs.writeFileSync(path.join(minimal.path, "implementation.txt"), "ok\n");
     fs.symlinkSync("/tmp", path.join(minimal.path, "node_modules"));
     assert.throws(
-      () => lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path),
-      /generated or host-controlled paths/,
+      () =>
+        lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path, [
+          "implementation.txt",
+          "node_modules",
+        ]),
+      /generated paths/,
     );
     assert.equal(git(minimal.path, ["diff", "--cached", "--name-only"]), "");
     fs.rmSync(path.join(minimal.path, "node_modules"));
     const head = lifecycle.commitAssignedWorktree(
       "candidate-minimal",
       minimal.path,
-    );
+      ["implementation.txt"],
+    ).head;
     assert.equal(
       git(minimal.path, ["ls-tree", "--name-only", head, "--", "node_modules"]),
       "",
@@ -444,11 +460,161 @@ test("feature commits permit legitimate nested paths and in-repository symlinks"
     const head = lifecycle.commitAssignedWorktree(
       "candidate-minimal",
       minimal.path,
-    );
+      [
+        "implementation.txt",
+        "src/bin/tool.ts",
+        "docs/tmp/example.md",
+        "src/link.txt",
+      ],
+    ).head;
     assert.equal(
       git(minimal.path, ["ls-tree", "-r", "--name-only", head]),
       "base.txt\ndocs/tmp/example.md\nimplementation.txt\nsrc/bin/tool.ts\nsrc/link.txt",
     );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("explicit feature paths commit additions, modifications, deletions, and exclude untracked artifacts", () => {
+  const repo = fixture({ deletablePath: true });
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "explicit-path-staging-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    const callerSentinel = path.join(repo.caller, "caller-sentinel.txt");
+    const outsideSentinel = path.join(repo.root, "outside-sentinel.txt");
+    fs.writeFileSync(callerSentinel, "caller\n");
+    fs.writeFileSync(outsideSentinel, "outside\n");
+    fs.writeFileSync(path.join(minimal.path, "base.txt"), "modified\n");
+    fs.rmSync(path.join(minimal.path, "obsolete.txt"));
+    fs.writeFileSync(path.join(minimal.path, "selected.txt"), "selected\n");
+    fs.mkdirSync(path.join(minimal.path, ".cache", "vite"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(minimal.path, ".cache", "vite", "artifact"),
+      "cache\n",
+    );
+
+    const result = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+      ["base.txt", "obsolete.txt", "selected.txt"],
+    );
+    assert.deepEqual(
+      new Set(result.changedPaths),
+      new Set(["base.txt", "obsolete.txt", "selected.txt"]),
+    );
+    assert.equal(
+      git(minimal.path, ["ls-tree", "-r", "--name-only", result.head]).includes(
+        ".cache/vite/artifact",
+      ),
+      false,
+    );
+    assert.match(git(minimal.path, ["status", "--porcelain"]), /\.cache/);
+
+    const frozen = lifecycle.freezeCandidate(minimal, {
+      reportType: "feature-implementation-candidate-v1",
+      role: minimal.role,
+      approachSummary: "Explicit paths",
+      changedPaths: [...result.changedPaths],
+      checks: ["fixture verification passed"],
+      assumptions: [],
+      tradeoffs: ["Bounded fixture tradeoff"],
+      unresolvedIssues: [],
+      worktreePath: minimal.path,
+      branchRef: minimal.branchRef,
+      baseCommit: minimal.baseCommit,
+      candidateHeadCommit: result.head,
+    });
+    assert.equal(fs.existsSync(path.join(minimal.path, ".cache")), false);
+    assert.equal(fs.readFileSync(callerSentinel, "utf8"), "caller\n");
+    assert.equal(fs.readFileSync(outsideSentinel, "utf8"), "outside\n");
+    assert.deepEqual(frozen.changedPaths, result.changedPaths);
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("explicit feature commits cannot be expanded by repository hooks", () => {
+  const repo = fixture();
+  try {
+    const hooksPath = path.join(repo.root, "hooks");
+    fs.mkdirSync(hooksPath);
+    fs.writeFileSync(
+      path.join(hooksPath, "pre-commit"),
+      "#!/bin/sh\nprintf 'hook\n' > hook-artifact.txt\ngit add -- hook-artifact.txt\n",
+      { mode: 0o755 },
+    );
+    fs.chmodSync(path.join(hooksPath, "pre-commit"), 0o755);
+    git(repo.primary, ["config", "core.hooksPath", hooksPath]);
+
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "explicit-path-hook-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(path.join(minimal.path, "selected.txt"), "selected\n");
+    const result = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+      ["selected.txt"],
+    );
+
+    assert.equal(
+      git(minimal.path, [
+        "ls-tree",
+        "--name-only",
+        result.head,
+        "--",
+        "hook-artifact.txt",
+      ]),
+      "",
+    );
+    assert.equal(
+      fs.existsSync(path.join(minimal.path, "hook-artifact.txt")),
+      false,
+    );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("owned untracked cleanup bounds nested artifact contents", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "bounded-untracked-cleanup-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    const handoff = commitCandidate(minimal, lifecycle);
+    const cachePath = path.join(minimal.path, ".cache", "nested");
+    fs.mkdirSync(cachePath, { recursive: true });
+    for (let index = 0; index < 513; index += 1) {
+      fs.writeFileSync(
+        path.join(cachePath, `artifact-${index}.tmp`),
+        "cache\n",
+      );
+    }
+
+    assert.throws(
+      () => lifecycle.freezeCandidate(minimal, handoff),
+      /513 untracked leftovers/,
+    );
+    assert.equal(fs.existsSync(cachePath), true);
     lifecycle.cleanup();
   } finally {
     repo.cleanup();
@@ -473,8 +639,13 @@ test("feature commits reject tracked generated paths and retargeted symlinks", (
     fs.symlinkSync("/tmp", path.join(minimal.path, "tracked-link"));
 
     assert.throws(
-      () => lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path),
-      /generated or host-controlled paths/,
+      () =>
+        lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path, [
+          "implementation.txt",
+          "node_modules/lock.json",
+          "tracked-link",
+        ]),
+      /generated paths/,
     );
     assert.equal(git(minimal.path, ["diff", "--cached", "--name-only"]), "");
     lifecycle.cleanup();
@@ -483,7 +654,236 @@ test("feature commits reject tracked generated paths and retargeted symlinks", (
   }
 });
 
-test("candidate and synthesis changed-path handoffs reject duplicates and omissions", () => {
+test("feature commits reject deletion of tracked external symlinks", () => {
+  const repo = fixture({ trackedSymlink: true });
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "deleted-external-symlink-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    const link = path.join(minimal.path, "tracked-link");
+    fs.rmSync(link);
+    fs.symlinkSync("/tmp", link);
+    git(minimal.path, ["add", "--", "tracked-link"]);
+    git(minimal.path, ["commit", "-qm", "unsafe symlink fixture"]);
+    fs.rmSync(link);
+
+    assert.throws(
+      () =>
+        lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path, [
+          "tracked-link",
+        ]),
+      /escaping the assigned worktree through symlinks/,
+    );
+    assert.equal(git(minimal.path, ["diff", "--cached", "--name-only"]), "");
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("feature commits reject removed tracked directories as pathspecs", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "removed-tracked-directory-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    const directory = path.join(minimal.path, "tracked-directory");
+    fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, "file.txt"), "tracked\n");
+    git(minimal.path, ["add", "--", "tracked-directory/file.txt"]);
+    git(minimal.path, ["commit", "-qm", "tracked directory fixture"]);
+    fs.rmSync(directory, { recursive: true });
+
+    assert.throws(
+      () =>
+        lifecycle.commitAssignedWorktree("candidate-minimal", minimal.path, [
+          "tracked-directory",
+        ]),
+      /existing files or tracked deletions/,
+    );
+    assert.equal(git(minimal.path, ["diff", "--cached", "--name-only"]), "");
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("candidate freeze rejects unsafe content already present in its committed tree", () => {
+  const repo = fixture({ trackedGeneratedPath: true });
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "committed-tree-safety-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(path.join(minimal.path, "selected.txt"), "selected\n");
+    const result = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+      ["selected.txt"],
+    );
+    assert.throws(
+      () =>
+        lifecycle.freezeCandidate(minimal, {
+          reportType: "feature-implementation-candidate-v1",
+          role: minimal.role,
+          approachSummary: "Unsafe committed tree",
+          changedPaths: [...result.changedPaths],
+          checks: ["fixture"],
+          assumptions: [],
+          tradeoffs: ["fixture"],
+          unresolvedIssues: [],
+          worktreePath: minimal.path,
+          branchRef: minimal.branchRef,
+          baseCommit: minimal.baseCommit,
+          candidateHeadCommit: result.head,
+        }),
+      /generated paths in committed tree/,
+    );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("finalization rejects tracked or staged residue after an explicit commit", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "tracked-residue-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(path.join(minimal.path, "selected.txt"), "selected\n");
+    const result = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+      ["selected.txt"],
+    );
+    fs.writeFileSync(path.join(minimal.path, "base.txt"), "dirty\n");
+    git(minimal.path, ["add", "base.txt"]);
+    assert.throws(
+      () =>
+        lifecycle.freezeCandidate(minimal, {
+          reportType: "feature-implementation-candidate-v1",
+          role: minimal.role,
+          approachSummary: "Residue",
+          changedPaths: [...result.changedPaths],
+          checks: ["fixture"],
+          assumptions: [],
+          tradeoffs: ["fixture"],
+          unresolvedIssues: [],
+          worktreePath: minimal.path,
+          branchRef: minimal.branchRef,
+          baseCommit: minimal.baseCommit,
+          candidateHeadCommit: result.head,
+        }),
+      /tracked\/staged leftovers/,
+    );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("repeated explicit commits preserve prior paths without absorbing residue", () => {
+  const repo = fixture();
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "repeated-explicit-commits-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(path.join(minimal.path, "first.txt"), "first\n");
+    const first = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+      ["first.txt"],
+    );
+    fs.writeFileSync(path.join(minimal.path, ".cache-artifact"), "cache\n");
+    fs.writeFileSync(path.join(minimal.path, "second.txt"), "second\n");
+    const second = lifecycle.commitAssignedWorktree(
+      "candidate-minimal",
+      minimal.path,
+      ["second.txt"],
+    );
+    assert.notEqual(first.head, second.head);
+    assert.deepEqual(second.changedPaths, ["first.txt", "second.txt"]);
+    assert.equal(
+      git(minimal.path, [
+        "ls-tree",
+        "--name-only",
+        second.head,
+        "--",
+        ".cache-artifact",
+      ]),
+      "",
+    );
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("explicit generated, ignored, duplicate, excessive, and outside paths fail closed", () => {
+  const repo = fixture();
+  const outside = path.join(repo.root, "outside.txt");
+  try {
+    const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const lifecycle = defaultFeatureGitOperations.createLifecycle(
+      caller,
+      "explicit-path-rejections-a1b2c3d4",
+    );
+    const [minimal] = lifecycle.createCandidateWorktrees();
+    assert.ok(minimal);
+    fs.writeFileSync(path.join(minimal.path, ".gitignore"), "ignored.txt\n");
+    fs.writeFileSync(path.join(minimal.path, "ignored.txt"), "ignored\n");
+    fs.writeFileSync(path.join(minimal.path, "selected.txt"), "selected\n");
+    fs.mkdirSync(path.join(minimal.path, "dist"));
+    fs.writeFileSync(path.join(minimal.path, "dist", "bundle.js"), "build\n");
+    for (const [paths, diagnostic] of [
+      [["selected.txt", "selected.txt"], /must be unique/],
+      [["../outside.txt"], /unsafe\/outside/],
+      [["dist/bundle.js"], /generated paths/],
+      [[".gitignore", "ignored.txt"], /ignored paths/],
+      [
+        Array.from({ length: 257 }, (_, index) => `path-${index}.txt`),
+        /bounded maximum/,
+      ],
+    ] as const) {
+      assert.throws(
+        () =>
+          lifecycle.commitAssignedWorktree(
+            "candidate-minimal",
+            minimal.path,
+            paths,
+          ),
+        diagnostic,
+      );
+      assert.equal(git(minimal.path, ["diff", "--cached", "--name-only"]), "");
+    }
+    assert.equal(fs.existsSync(outside), false);
+    lifecycle.cleanup();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("candidate report mismatches warn while synthesis uses Git-derived paths", () => {
   const repo = fixture();
   try {
     const caller = defaultFeatureGitOperations.preflight(repo.caller);
@@ -498,7 +898,8 @@ test("candidate and synthesis changed-path handoffs reject duplicates and omissi
     const head = lifecycle.commitAssignedWorktree(
       "candidate-minimal",
       minimal.path,
-    );
+      ["one.txt", "two.txt"],
+    ).head;
     const invalidHandoff: FeatureCandidateHandoff = {
       reportType: "feature-implementation-candidate-v1",
       role: minimal.role,
@@ -513,15 +914,17 @@ test("candidate and synthesis changed-path handoffs reject duplicates and omissi
       baseCommit: minimal.baseCommit,
       candidateHeadCommit: head,
     };
-    assert.throws(
-      () => lifecycle.freezeCandidate(minimal, invalidHandoff),
-      /changedPaths do not match/,
-    );
-
-    const validMinimal = lifecycle.freezeCandidate(minimal, {
-      ...invalidHandoff,
-      changedPaths: ["one.txt", "two.txt"],
-    });
+    const validMinimal = lifecycle.freezeCandidate(minimal, invalidHandoff);
+    assert.deepEqual(validMinimal.changedPaths, ["one.txt", "two.txt"]);
+    assert.deepEqual(validMinimal.warnings, [
+      {
+        category: "candidate-report-changed-paths-mismatch",
+        reportedPathCount: 2,
+        canonicalPathCount: 2,
+        reportedOnlyPathCount: 0,
+        canonicalOnlyPathCount: 1,
+      },
+    ]);
     const otherFrozen = worktrees
       .slice(1)
       .map((worktree) =>
@@ -532,17 +935,34 @@ test("candidate and synthesis changed-path handoffs reject duplicates and omissi
       );
     const frozen = [validMinimal, ...otherFrozen];
     lifecycle.prepareSelectionDirectory();
+    const source = frozen.find(({ role }) => role === "Robust")!;
+    const idea: FeatureSelection["augmentationCandidates"][number] = {
+      sourceRole: source.role,
+      idea: "Adopt the validated source fixture",
+      objectiveBenefit: "Preserves the exact losing-candidate content",
+      evidence: "robust.txt is present in the frozen source candidate",
+      sourcePaths: ["robust.txt"],
+    };
     const synthesis = lifecycle.createSynthesisWorktree(validMinimal);
-    fs.writeFileSync(path.join(synthesis.path, "fourth.txt"), "rewrite\n");
+    fs.copyFileSync(
+      path.join(source.path, "robust.txt"),
+      path.join(synthesis.path, "fourth.txt"),
+    );
     const finalCommit = lifecycle.commitAssignedWorktree(
       "implementation-synthesis",
       synthesis.path,
-    );
+      ["fourth.txt"],
+    ).head;
     const provenance: FeatureSynthesisProvenance = {
       reportType: "feature-implementation-synthesis-v1",
       primaryCandidate: validMinimal.role,
       primaryCommit: validMinimal.headCommit,
-      acceptedAugmentations: [],
+      acceptedAugmentations: [
+        {
+          ...idea,
+          pathMappings: [{ sourcePath: "robust.txt", finalPath: "fourth.txt" }],
+        },
+      ],
       rejectedAugmentations: [],
       changedPaths: ["fourth.txt", "fourth.txt"],
       checks: ["fixture verification passed"],
@@ -550,26 +970,13 @@ test("candidate and synthesis changed-path handoffs reject duplicates and omissi
       unresolvedIssues: [],
       finalCommit,
     };
-    assert.throws(
-      () =>
-        lifecycle.validateSynthesis(
-          synthesis,
-          provenance,
-          selectionFor(validMinimal.role),
-          frozen,
-        ),
-      /changedPaths do not match/,
+    const validated = lifecycle.validateSynthesis(
+      synthesis,
+      provenance,
+      selectionFor(validMinimal.role, [idea]),
+      frozen,
     );
-    assert.throws(
-      () =>
-        lifecycle.validateSynthesis(
-          synthesis,
-          { ...provenance, changedPaths: ["fourth.txt"] },
-          selectionFor(validMinimal.role),
-          frozen,
-        ),
-      /must be attributed exactly once/,
-    );
+    assert.deepEqual(validated.changedPaths, ["fourth.txt"]);
     lifecycle.cleanup();
   } finally {
     repo.cleanup();
@@ -634,7 +1041,8 @@ test("synthesis accepts only fully attributed validated losing-candidate augment
     const unrelatedCommit = lifecycle.commitAssignedWorktree(
       "implementation-synthesis",
       synthesis.path,
-    );
+      ["fourth.txt"],
+    ).head;
     const unrelatedProvenance: FeatureSynthesisProvenance = {
       reportType: "feature-implementation-synthesis-v1",
       primaryCandidate: primary.role,
@@ -671,7 +1079,8 @@ test("synthesis accepts only fully attributed validated losing-candidate augment
     const finalCommit = lifecycle.commitAssignedWorktree(
       "implementation-synthesis",
       synthesis.path,
-    );
+      ["fourth.txt", "robust.txt"],
+    ).head;
     const provenance: FeatureSynthesisProvenance = {
       reportType: "feature-implementation-synthesis-v1",
       primaryCandidate: primary.role,
