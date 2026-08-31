@@ -238,6 +238,7 @@ test("selection input is bounded and contains compact candidate evidence rather 
     role,
     handoff: handoff(role),
     changedPaths: handoff(role).changedPaths,
+    warnings: [],
     boundedDiff: { text: "bounded diff", truncated: false, bytes: 12 },
     immutableCommit: handoff(role).candidateHeadCommit,
     worktreeReference: handoff(role).worktreePath,

@@ -55,6 +55,37 @@ test("candidate tools cannot read or mutate sibling worktrees and bash sees only
       command:
         "printf changed > own.txt; printf leaked > ../candidate-robust/leak.txt || true",
     });
+    const runtimeResult = await execute(tool(boundary, "bash"), {
+      command:
+        "printf '%s\\n' $TMPDIR $TMP $TEMP $XDG_CACHE_HOME; touch $TMPDIR/probe $XDG_CACHE_HOME/probe",
+    });
+    const runtimePaths = runtimeResult.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("")
+      .trim()
+      .split(/\r?\n/);
+    assert.equal(runtimePaths.length, 4);
+    assert.equal(
+      runtimePaths.every((item) => item.includes("/.pipi-runtime/")),
+      true,
+    );
+    assert.equal(
+      runtimePaths.every((item) => !item.startsWith(candidateA)),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(
+        path.join(root, ".pipi-runtime", "candidate-minimal", "tmp", "probe"),
+      ),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(
+        path.join(root, ".pipi-runtime", "candidate-minimal", "cache", "probe"),
+      ),
+      true,
+    );
     assert.equal(
       fs.readFileSync(path.join(candidateA, "own.txt"), "utf8"),
       "changed",

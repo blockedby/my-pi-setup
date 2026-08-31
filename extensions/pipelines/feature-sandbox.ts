@@ -100,11 +100,30 @@ function visibleRoots(mode: FeatureSandboxMode, tempRoot: string, cwd: string) {
   ];
 }
 
+interface FeatureRuntimeDirectories {
+  readonly root: string;
+  readonly temp: string;
+  readonly cache: string;
+}
+
+function createFeatureRuntimeDirectories(tempRoot: string, cwd: string) {
+  const root = path.join(tempRoot, ".pipi-runtime", path.basename(cwd));
+  const directories = {
+    root,
+    temp: path.join(root, "tmp"),
+    cache: path.join(root, "cache"),
+  } satisfies FeatureRuntimeDirectories;
+  fs.mkdirSync(directories.temp, { recursive: true });
+  fs.mkdirSync(directories.cache, { recursive: true });
+  return directories;
+}
+
 function sandboxCommand(
   command: string,
   mode: FeatureSandboxMode,
   tempRoot: string,
   cwd: string,
+  runtime: FeatureRuntimeDirectories,
 ) {
   const roots = visibleRoots(mode, tempRoot, cwd);
   const args = [
@@ -127,6 +146,12 @@ function sandboxCommand(
   }
   const gitDir = commonGitDir(tempRoot, cwd);
   if (gitDir) args.push("--tmpfs", gitDir);
+  args.push("--dir", runtime.root);
+  args.push("--bind", runtime.root, runtime.root);
+  args.push("--setenv", "TMPDIR", runtime.temp);
+  args.push("--setenv", "TMP", runtime.temp);
+  args.push("--setenv", "TEMP", runtime.temp);
+  args.push("--setenv", "XDG_CACHE_HOME", runtime.cache);
   args.push("--chdir", cwd, "--", "/bin/bash", "-lc", command);
   return `/usr/bin/bwrap ${args.map(shellQuote).join(" ")}`;
 }
@@ -137,12 +162,13 @@ export function createFeatureToolBoundary(options: {
 }) {
   const cwd = comparableExistingPath(options.cwd);
   const tempRoot = comparableExistingPath(path.dirname(cwd));
+  const runtime = createFeatureRuntimeDirectories(tempRoot, cwd);
   let mode: FeatureSandboxMode = options.mode;
   const localBash = createLocalBashOperations();
   const bashOperations: BashOperations = {
     async exec(command, _requestedCwd, execution) {
       const result = await localBash.exec(
-        sandboxCommand(command, mode, tempRoot, cwd),
+        sandboxCommand(command, mode, tempRoot, cwd, runtime),
         "/",
         execution,
       );
