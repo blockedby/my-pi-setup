@@ -359,7 +359,7 @@ export function buildPipelineRows(
 }
 
 export async function cancelPipelineRow(
-  controller: PipelineController,
+  controller: Pick<PipelineController, "get" | "cancelRun" | "cancelChild">,
   row: PipelineRow,
 ) {
   if (row.kind === "run") {
@@ -443,7 +443,7 @@ export function glyphStatusForPipelineRow(row: PipelineRow) {
 
 function statusGlyph(
   status: AgentNodeSnapshot["status"] | "limited",
-  theme: Theme,
+  theme: Pick<Theme, "fg">,
 ) {
   if (status === "done" || status === "idle") return theme.fg("success", "■");
   if (status === "error" || status === "cancelled")
@@ -451,11 +451,47 @@ function statusGlyph(
   return theme.fg("warning", "■");
 }
 
-class PipelineDashboard implements Component {
-  private readonly tui: TUI;
-  private readonly theme: Theme;
-  private readonly keybindings: KeybindingsManager;
-  private readonly controller: PipelineController;
+// Compute sibling continuations from the complete tree, before viewport slicing.
+export function pipelineRowPrefixes(
+  rows: ReadonlyArray<Pick<PipelineRow, "depth">>,
+) {
+  const laterSibling = new Map<number, boolean>();
+  const nextAtDepth = new Map<number, number>();
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const depth = rows[index]!.depth;
+    laterSibling.set(index, nextAtDepth.has(depth));
+    for (const level of nextAtDepth.keys()) {
+      if (level > depth) nextAtDepth.delete(level);
+    }
+    nextAtDepth.set(depth, index);
+  }
+  const ancestors = new Map<number, boolean>();
+  return rows.map((row, index) => {
+    const continues = laterSibling.get(index) ?? false;
+    ancestors.set(row.depth, continues);
+    if (row.depth === 0) return "";
+    let prefix = "";
+    for (let depth = 1; depth < row.depth; depth++) {
+      prefix += ancestors.get(depth) ? "│  " : "   ";
+    }
+    return prefix + (continues ? "├─ " : "└─ ");
+  });
+}
+
+type DashboardHost = {
+  terminal: Pick<TUI["terminal"], "rows">;
+  requestRender: TUI["requestRender"];
+};
+type DashboardController = Pick<
+  PipelineController,
+  "list" | "get" | "subscribe" | "cancelRun" | "cancelChild"
+>;
+
+export class PipelineDashboard implements Component {
+  private readonly tui: DashboardHost;
+  private readonly theme: Pick<Theme, "fg" | "bold">;
+  private readonly keybindings: Pick<KeybindingsManager, "matches">;
+  private readonly controller: DashboardController;
   private readonly selection: PipelineSelection;
   private readonly expandedRunIds: Set<string>;
   private readonly done: (value: string | null) => void;
@@ -464,10 +500,10 @@ class PipelineDashboard implements Component {
   private closed = false;
 
   constructor(
-    tui: TUI,
-    theme: Theme,
-    keybindings: KeybindingsManager,
-    controller: PipelineController,
+    tui: DashboardHost,
+    theme: Pick<Theme, "fg" | "bold">,
+    keybindings: Pick<KeybindingsManager, "matches">,
+    controller: DashboardController,
     selection: PipelineSelection,
     expandedRunIds: Set<string>,
     done: (value: string | null) => void,
@@ -572,11 +608,12 @@ class PipelineDashboard implements Component {
       Math.max(0, rows.length - height),
     );
     const visible = rows.slice(start, start + height);
+    const prefixes = pipelineRowPrefixes(rows);
     const lines = visible.map((row, offset) => {
       const index = start + offset;
       const marker =
         index === this.selection.index ? this.theme.fg("accent", "❯") : " ";
-      const branch = row.depth === 0 ? "" : `${"  ".repeat(row.depth - 1)}└─ `;
+      const branch = this.theme.fg("dim", prefixes[index] ?? "");
       const glyphStatus = glyphStatusForPipelineRow(row);
       const glyph = glyphStatus
         ? `${statusGlyph(glyphStatus, this.theme)} `

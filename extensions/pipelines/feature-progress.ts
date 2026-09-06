@@ -68,53 +68,96 @@ export function featureExecutionRows(progress: FeatureProgress) {
   }> = [];
   const byId = new Map(progress.tasks.map((task) => [task.id, task]));
   const emitted = new Set<string>();
-  let forkNumber = 0;
-  function taskRow(task: TaskSnapshot, depth: number) {
+  function taskRow(task: TaskSnapshot, depth: number, prefix = "") {
     emitted.add(task.id);
     rows.push({
       key: task.id,
       kind: "task",
       taskId: task.id,
       depth,
-      label: featureTaskLabel(task),
+      label: prefix + featureTaskLabel(task),
       status: task.status,
     });
   }
-  function visit(tree: ExecutionTree, depth: number) {
+  function complete(tree: ExecutionTree): boolean {
+    if (tree.kind === "task") {
+      const status = byId.get(tree.taskId)?.status;
+      return status === "validated" || status === "satisfied_without_changes";
+    }
+    const children = tree.kind === "sequence" ? tree.steps : tree.branches;
+    return children.length > 0 && children.every(complete);
+  }
+  // Flatten sequence wrappers without turning parallel branches into serial steps.
+  function steps(tree: ExecutionTree): ExecutionTree[] {
+    return tree.kind === "sequence" ? tree.steps.flatMap(steps) : [tree];
+  }
+  function sequence(tree: ExecutionTree, depth: number, scope = "") {
+    let previous: string | undefined;
+    for (const [index, step] of steps(tree).entries()) {
+      const number = scope
+        ? `${scope}.${index + 1}`
+        : String(index + 1).padStart(2, "0");
+      visit(step, depth, number, previous);
+      previous = number;
+    }
+  }
+  function visit(
+    tree: ExecutionTree,
+    depth: number,
+    number: string,
+    previous?: string,
+  ) {
+    const prefix = `${number} ${previous ? `after ${previous}: ` : ""}`;
     if (tree.kind === "task") {
       const task = byId.get(tree.taskId);
-      if (task) taskRow(task, depth);
+      if (task) taskRow(task, depth, prefix);
       else
         rows.push({
           key: tree.taskId,
           kind: "task",
           taskId: tree.taskId,
           depth,
-          label: `${tree.taskId} · waiting`,
+          label: `${prefix}${tree.taskId} · waiting`,
           status: "waiting",
         });
       return;
     }
     if (tree.kind === "sequence") {
-      for (const step of tree.steps) visit(step, depth);
+      sequence(tree, depth, number);
       return;
     }
-    const id = ++forkNumber;
     rows.push({
-      key: `fork-${id}`,
+      key: `parallel:${number}`,
       kind: "boundary",
       depth,
-      label: `fork ${id}`,
+      label: `${prefix}parallel [${tree.branches.filter(complete).length}/${tree.branches.length} branches]`,
     });
-    for (const branch of tree.branches) visit(branch, depth + 1);
-    rows.push({
-      key: `join-${id}`,
-      kind: "boundary",
-      depth,
-      label: `join ${id}`,
-    });
+    for (const [index, branch] of tree.branches.entries()) {
+      // Alphabetic branch addresses remain unambiguous beyond Z (AA, AB, ...).
+      let letter = "";
+      for (
+        let value = index + 1;
+        value > 0;
+        value = Math.floor((value - 1) / 26)
+      ) {
+        letter = String.fromCharCode(65 + ((value - 1) % 26)) + letter;
+      }
+      const scope = `${number}.${letter}`;
+      const branchSteps = steps(branch);
+      if (branchSteps.length === 1) {
+        visit(branchSteps[0]!, depth + 1, scope);
+      } else {
+        rows.push({
+          key: `sequence:${scope}`,
+          kind: "boundary",
+          depth: depth + 1,
+          label: `${letter}: sequence`,
+        });
+        sequence(branch, depth + 2, scope);
+      }
+    }
   }
-  visit(progress.tree, 3);
+  sequence(progress.tree, 3);
   for (const task of progress.tasks) {
     if (!emitted.has(task.id) && task.kind !== "final-review") taskRow(task, 3);
   }

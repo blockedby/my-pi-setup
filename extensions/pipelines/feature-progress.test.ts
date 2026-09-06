@@ -125,7 +125,15 @@ test("execution projection preserves fork structure, waiting tasks and provision
       ["d", 3, "waiting"],
     ],
   );
-  assert.equal(rows.filter((row) => row.kind === "boundary").length, 3);
+  assert.equal(rows.filter((row) => row.kind === "boundary").length, 2);
+  assert.equal(
+    rows.find((row) => row.key === "parallel:02")?.label,
+    "02 after 01: parallel [1/2 branches]",
+  );
+  assert.equal(
+    rows.find((row) => row.taskId === "d")?.label,
+    "03 after 02: d · waiting",
+  );
   assert.equal(featureTaskGlyph("validated"), "done");
   assert.equal(featureTaskGlyph("provisional"), "running");
   assert.equal(featureTaskGlyph("waiting"), undefined);
