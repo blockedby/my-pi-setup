@@ -107,7 +107,7 @@ interface PipelineSessionFactoryOptions {
     token: string,
   ) => void;
   readonly discoveryToolAllowed?: (runId: string, role: string) => boolean;
-  /** Phase-bound host authority for dynamic feature tasks and final Sol review. */
+  /** Phase-bound host authority for dynamic feature tasks and final Astra review. */
   readonly featureTaskHost?: (
     runId: string,
     role: string,

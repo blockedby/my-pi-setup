@@ -27,7 +27,7 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 | Pipeline                 | Use it when you need                                                                                             |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
 | `small-feature-pipeline` | One focused implementation, parallel review, and a fix pass                                                      |
-| `feature-pipeline`       | A broader feature with Sol planning, parallel Luna tasks, final review, and audit                                        |
+| `feature-pipeline`       | A broader feature with Astra planning, parallel Luna tasks, final review, and audit                                        |
 | `plan-pipeline`          | A repository-grounded implementation plan instead of code, returned directly or saved to a chosen workspace path |
 | `audit-pipeline`         | A read-only initial or closure audit with no remediation                                                         |
 

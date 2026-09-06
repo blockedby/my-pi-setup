@@ -286,16 +286,18 @@ test("plan pipeline renders six discovery agents and xhigh synthesis under its t
   );
 });
 
-test("feature planning and review stages expose Sol sessions", () => {
+test("feature planning and review stages expose Astra sessions", () => {
   const root = agent("root-1", {
     role: FEATURE_FINALIZER_ROLE,
-    thinkingLevel: "xhigh",
+    model: "openai-codex/gpt-6-astra",
+    thinkingLevel: "low",
   });
   const candidates = FEATURE_PLAN_ROLES.map((role, index) =>
     agent(`plan-${index}`, {
       parentId: root.id,
       role,
-      thinkingLevel: "medium",
+      model: "openai-codex/gpt-6-astra",
+      thinkingLevel: "low",
       createdAt: index + 2,
     }),
   );

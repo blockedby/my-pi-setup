@@ -32,6 +32,7 @@ export const PIPELINE_DEFINITION_IDS = [
 ] as const;
 export type PipelineDefinitionId = (typeof PIPELINE_DEFINITION_IDS)[number];
 
+export const ASTRA_MODEL = "openai-codex/gpt-6-astra";
 export const SOL_MODEL = "openai-codex/gpt-5.6-sol";
 export const LUNA_MODEL = "openai-codex/gpt-5.6-luna";
 export const TERRA_MODEL = "openai-codex/gpt-5.6-terra";
@@ -227,7 +228,7 @@ export interface PipelineDefinition {
   readonly id: PipelineDefinitionId;
   readonly title: string;
   readonly rootTitle: string;
-  readonly rootModel: typeof SOL_MODEL | typeof LUNA_MODEL;
+  readonly rootModel: typeof ASTRA_MODEL | typeof LUNA_MODEL;
   readonly childRoles: ReadonlyArray<PipelineChildRole>;
 }
 
@@ -236,7 +237,7 @@ export const PIPELINE_DEFINITIONS: ReadonlyArray<PipelineDefinition> = [
     id: FEATURE_PIPELINE_ID,
     title: "Feature pipeline",
     rootTitle: "Feature pipeline canonical planner and final reviewer",
-    rootModel: SOL_MODEL,
+    rootModel: ASTRA_MODEL,
     childRoles: FEATURE_PIPELINE_CHILD_ROLES,
   },
   {
@@ -473,7 +474,7 @@ export interface PipelineHandoff {
 export function modelForRole(role: PipelineChildRole) {
   if (role === FINAL_AUDIT_ROLE) return TERRA_MODEL;
   if (FEATURE_PLAN_ROLES.some((candidate) => candidate === role)) {
-    return SOL_MODEL;
+    return ASTRA_MODEL;
   }
   return LUNA_MODEL;
 }

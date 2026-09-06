@@ -28,7 +28,7 @@ import {
   PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
   PLAN_PIPELINE_SYNTHESIS_ROLE,
-  SOL_MODEL,
+  ASTRA_MODEL,
   type PlanPipelineDiscoveryRole,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
@@ -1907,19 +1907,19 @@ export class PipelineController {
     const reviewHostProxy = {
       diff: (request?: Parameters<FeatureTaskToolHost["diff"]>[0]) => {
         if (!run.featureReviewRuntime) {
-          throw new Error("Final Sol review is not active.");
+          throw new Error("Final Astra review is not active.");
         }
         return run.featureReviewRuntime.host.diff(request);
       },
       check: (request: Parameters<FeatureTaskToolHost["check"]>[0]) => {
         if (!run.featureReviewRuntime) {
-          throw new Error("Final Sol review is not active.");
+          throw new Error("Final Astra review is not active.");
         }
         return run.featureReviewRuntime.host.check(request);
       },
       finalize: (request: Parameters<FeatureTaskToolHost["finalize"]>[0]) => {
         if (!run.featureReviewRuntime) {
-          throw new Error("Final Sol review is not active.");
+          throw new Error("Final Astra review is not active.");
         }
         return run.featureReviewRuntime.host.finalize(request);
       },
@@ -1934,8 +1934,8 @@ export class PipelineController {
         run.id,
         "Canonical plan, graph, and final review",
       ),
-      model: SOL_MODEL,
-      thinkingLevel: "xhigh",
+      model: ASTRA_MODEL,
+      thinkingLevel: "low",
       cwd: run.request.workingDir,
       prompt: "Controller-deferred feature canonical planning.",
       persistent: true,
@@ -1971,8 +1971,8 @@ export class PipelineController {
           role,
           attempt: 1,
           title: scopedSessionTitle(run.id, titleForRole(role)),
-          model: SOL_MODEL,
-          thinkingLevel: "medium",
+          model: ASTRA_MODEL,
+          thinkingLevel: "low",
           cwd: run.request.workingDir,
           prompt: buildFeatureCandidatePlanPrompt(
             role,
@@ -2289,7 +2289,7 @@ export class PipelineController {
     ) {
       throw new Error(
         reviewer?.error ??
-          "Final Sol review session failed before finalization.",
+          "Final Astra review session failed before finalization.",
       );
     }
     const reviewSnapshot = run.featureReviewRuntime.snapshot();
@@ -2308,7 +2308,9 @@ export class PipelineController {
       review.status !== "validated" &&
       review.status !== "satisfied_without_changes"
     ) {
-      throw new Error("Final Sol review ended without validated finalization.");
+      throw new Error(
+        "Final Astra review ended without validated finalization.",
+      );
     }
     this.persistFeatureArtifact(run, "sol-review.json", review);
     this.updateFeaturePlanning(run, { review: "accepted" });
@@ -3761,7 +3763,7 @@ export class PipelineController {
               this.agentsFor(runId).find((candidate) => candidate.role === role)
                 ?.finalText ?? "",
             ]),
-            "Sol remediation instruction:",
+            "Remediation instruction:",
             text,
           ].join("\n")
         : text;
@@ -4110,7 +4112,7 @@ export class PipelineController {
         name: "pipeline_child_wait",
         label: "Wait for Pipeline Children",
         description:
-          "Wait for known children, return their reports in this Sol context, and atomically enter the next stage when the full current-stage fan-in is valid.",
+          "Wait for known children, return their reports in this coordinator context, and atomically enter the next stage when the full current-stage fan-in is valid.",
         parameters: Type.Object({
           ids: Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
         }),

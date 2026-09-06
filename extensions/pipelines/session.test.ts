@@ -15,7 +15,7 @@ import {
   LUNA_MODEL,
   PLAN_PIPELINE_ID,
   PLAN_PIPELINE_SYNTHESIS_ROLE,
-  SOL_MODEL,
+  ASTRA_MODEL,
 } from "./domain.ts";
 import { createPipelineSessionFactory } from "./session.ts";
 
@@ -34,7 +34,7 @@ async function createFixture() {
   return { root, cwd, agentDir };
 }
 
-test("persistent Sol finalizer gains its pre-registered task tools only after mutation is enabled", async () => {
+test("persistent Astra finalizer gains its pre-registered task tools only after mutation is enabled", async () => {
   const fixture = await createFixture();
   let sdkSession: AgentSession | undefined;
   let session:
@@ -52,7 +52,7 @@ test("persistent Sol finalizer gains its pre-registered task tools only after mu
       provider: "feature-finalizer-lifecycle-test-provider",
       models: [
         {
-          id: "gpt-5.6-sol",
+          id: "gpt-6-astra",
           name: "Feature Finalizer Lifecycle Test",
           reasoning: true,
           input: ["text"],
@@ -66,7 +66,7 @@ test("persistent Sol finalizer gains its pre-registered task tools only after mu
       modelRegistry: {
         find(provider, id) {
           assert.equal(provider, "openai-codex");
-          assert.equal(id, "gpt-5.6-sol");
+          assert.equal(id, "gpt-6-astra");
           return fauxProvider!.getModel();
         },
       },
@@ -142,8 +142,8 @@ test("persistent Sol finalizer gains its pre-registered task tools only after mu
       role: FEATURE_FINALIZER_ROLE,
       attempt: 1,
       title: "Persistent feature finalizer",
-      model: SOL_MODEL,
-      thinkingLevel: "xhigh",
+      model: ASTRA_MODEL,
+      thinkingLevel: "low",
       cwd: fixture.cwd,
       prompt: "",
       persistent: true,
@@ -151,6 +151,7 @@ test("persistent Sol finalizer gains its pre-registered task tools only after mu
     });
 
     assert.ok(sdkSession);
+    assert.equal(sdkSession.thinkingLevel, "low");
     assert.deepEqual(session.activeTools, [
       "read",
       "bash",

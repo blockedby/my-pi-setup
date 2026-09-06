@@ -143,7 +143,7 @@ test("feature inspection exposes factual execution state without full capsules o
   assert.deepEqual(projectPipelineCheck(run()).featureGraph, projected);
 });
 
-test("dashboard tasks are individually selectable and share the persistent Sol review target", () => {
+test("dashboard tasks are individually selectable and share the persistent final review target", () => {
   const snapshot = run();
   const rows = buildPipelineRows([snapshot], new Set([snapshot.id]));
   assert.deepEqual(

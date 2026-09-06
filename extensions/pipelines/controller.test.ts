@@ -34,6 +34,7 @@ import {
   PLAN_PIPELINE_SYNTHESIS_ROLE,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
+  ASTRA_MODEL,
   SOL_MODEL,
   TERRA_MODEL,
   childContextPolicyFor,
@@ -1649,7 +1650,7 @@ test("feature audit handoff admits only canonical requirements and final impleme
   );
 });
 
-test("feature controller accepts corrected Sol plans, persists artifacts, executes the graph, and reuses the finalizer for review", async () => {
+test("feature controller accepts corrected Astra plans, persists artifacts, executes the graph, and reuses the finalizer for review", async () => {
   const expectedDiffBase = execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: implementationWorkingDir(),
     encoding: "utf8",
@@ -1707,8 +1708,8 @@ test("feature controller accepts corrected Sol plans, persists artifacts, execut
     (session) => session.spec.role === FEATURE_FINALIZER_ROLE,
   );
   assert.equal(finalizers.length, 1);
-  assert.equal(finalizers[0]?.spec.model, SOL_MODEL);
-  assert.equal(finalizers[0]?.spec.thinkingLevel, "xhigh");
+  assert.equal(finalizers[0]?.spec.model, ASTRA_MODEL);
+  assert.equal(finalizers[0]?.spec.thinkingLevel, "low");
   assert.equal(finalizers[0]?.mutationEnabled, 1);
   const reviewTask = snapshot?.featureGraph?.tasks.find(
     (task) => task.kind === "final-review",
@@ -1722,8 +1723,10 @@ test("feature controller accepts corrected Sol plans, persists artifacts, execut
   const robustPlanner = run.sessions.find(
     (session) => session.spec.role === "feature-plan-robust",
   );
-  assert.equal(minimalPlanner?.spec.model, SOL_MODEL);
-  assert.equal(minimalPlanner?.spec.thinkingLevel, "medium");
+  assert.equal(minimalPlanner?.spec.model, ASTRA_MODEL);
+  assert.equal(minimalPlanner?.spec.thinkingLevel, "low");
+  assert.equal(robustPlanner?.spec.model, ASTRA_MODEL);
+  assert.equal(robustPlanner?.spec.thinkingLevel, "low");
   assert.equal(minimalPlanner?.sends.length, 1);
   assert.equal(robustPlanner?.sends.length, 0);
   assert.equal(finalizers[0]?.sends.length, 4);
@@ -2000,7 +2003,11 @@ test("feature discovery tool payload is bound to its session and consumed only a
   );
   assert.equal(planners.length, 2);
   assert.equal(
-    planners.every((planner) => planner.spec.model === SOL_MODEL),
+    planners.every(
+      (planner) =>
+        planner.spec.model === ASTRA_MODEL &&
+        planner.spec.thinkingLevel === "low",
+    ),
     true,
   );
   await run.controller.dispose();
@@ -3122,7 +3129,7 @@ test("a settled child can be retried in its existing session", async () => {
   await run.controller.dispose();
 });
 
-test("persistent Sol session survives idle remediation turns", async () => {
+test("persistent Luna session survives idle remediation turns", async () => {
   const run = harness();
   const runId = run.controller.start(request());
   await settleInitialization();

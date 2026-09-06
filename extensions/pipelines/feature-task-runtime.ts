@@ -887,7 +887,7 @@ export function createFeatureReviewRuntime(options: {
   let expected: string | undefined;
   const signal = options.signal ?? new AbortController().signal;
   const unavailable = () => {
-    throw new Error("Final Sol review is not active.");
+    throw new Error("Final Astra review is not active.");
   };
   const host: FeatureTaskToolHost = {
     diff: (request) => runtime?.host.diff(request) ?? unavailable(),
@@ -898,7 +898,7 @@ export function createFeatureReviewRuntime(options: {
     host,
     begin(expectedHead: string) {
       if (runtime || expected)
-        throw new Error("Final Sol review already began.");
+        throw new Error("Final Astra review already began.");
       const target = createFeatureRootTaskGitTarget(
         options.workingDir,
         options.knownResidualPaths,

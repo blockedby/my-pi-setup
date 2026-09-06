@@ -110,7 +110,7 @@ const PIPELINE_RUN_COMMON_PROPERTIES = {
   git_commit: Type.Optional(
     Type.Boolean({
       description:
-        "feature-pipeline hard-requires explicit true, Linux bubblewrap, and a dedicated clean attached linked worktree; controller-owned Luna tasks, final Sol review, and later audit remediation may make scoped ordinary commits. small-feature also requires a caller-prepared linked worktree but keeps commit permission optional for its persistent implementer. Plan/audit reject true. Never permits push, delivery merge, history rewrite, deployment, or arbitrary branch/worktree operations.",
+        "feature-pipeline hard-requires explicit true, Linux bubblewrap, and a dedicated clean attached linked worktree; controller-owned Luna tasks, final Astra review, and later audit remediation may make scoped ordinary commits. small-feature also requires a caller-prepared linked worktree but keeps commit permission optional for its persistent implementer. Plan/audit reject true. Never permits push, delivery merge, history rewrite, deployment, or arbitrary branch/worktree operations.",
     }),
   ),
   audit: Type.Optional(
@@ -360,7 +360,7 @@ export default function pipelines(pi: ExtensionAPI) {
     name: "pipeline_run",
     label: "Run Pipeline",
     description:
-      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name and return its canonical name-plus-eight-hex run id immediately. feature-pipeline runs five discovery tracks, two independent Sol/medium plans, one persistent Sol/xhigh canonical plan and execution graph, fresh Luna/high implementation tasks on controller-owned branches, final review by the same Sol session, then the existing independent audit flow. It requires git_commit=true, a prepared linked working_dir, an absolute existing worktree_root, and an explicit ordered worktree_prepare array. plan-pipeline requires plan_path; small-feature keeps optional commit permission; plan/audit reject commit permission.",
+      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name and return its canonical name-plus-eight-hex run id immediately. feature-pipeline runs five discovery tracks, two independent Astra/low plans, one persistent Astra/low canonical plan and execution graph, fresh Luna/high implementation tasks on controller-owned branches, final review by the same Astra session, then the existing independent audit flow. It requires git_commit=true, a prepared linked working_dir, an absolute existing worktree_root, and an explicit ordered worktree_prepare array. plan-pipeline requires plan_path; small-feature keeps optional commit permission; plan/audit reject commit permission.",
     promptSnippet:
       "Start a background implementation, planning, or Luna audit pipeline",
     promptGuidelines: [
