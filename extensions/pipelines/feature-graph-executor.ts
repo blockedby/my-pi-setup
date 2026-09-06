@@ -20,6 +20,7 @@ import {
   createFeatureTaskWorktreeLifecycle,
   type FeatureTaskBranch,
   type FeatureTaskWorktreeLifecycle,
+  type FeatureTrackedResidualState,
 } from "./feature-task-worktrees.ts";
 
 const MAX_TASK_ATTEMPTS = 4;
@@ -96,6 +97,8 @@ export interface FeatureGraphExecutionSnapshot {
 export interface FeatureGraphExecutionResult extends FeatureGraphExecutionSnapshot {
   readonly status: "completed" | "failed" | "cancelled";
   readonly head: string;
+  readonly rootResidualPaths?: ReadonlyArray<string>;
+  readonly rootTrackedResiduals?: ReadonlyArray<FeatureTrackedResidualState>;
   readonly error?: string;
   /** Call only after the entire feature pipeline, including review/audit, succeeds. */
   cleanupCompleted(): ReadonlyArray<string>;
@@ -557,6 +560,7 @@ export async function executeFeatureGraph(
         }
         for (const filePath of value.residualPaths) residualPaths.add(filePath);
         const branchResiduals = branchResidualPaths.get(branch.branchId)!;
+        branchResiduals.clear();
         for (const filePath of value.residualPaths)
           branchResiduals.add(filePath);
         publish();
@@ -628,6 +632,7 @@ export async function executeFeatureGraph(
         }
         for (const filePath of value.residualPaths) residualPaths.add(filePath);
         const branchResiduals = branchResidualPaths.get(input.branch.branchId)!;
+        branchResiduals.clear();
         for (const filePath of value.residualPaths)
           branchResiduals.add(filePath);
         publish();
@@ -953,9 +958,22 @@ export async function executeFeatureGraph(
         : "failed";
   updateBranch("root", lifecycle.branch("root"));
   const finalSnapshot = snapshot();
+  const rootBranch = lifecycle.branch("root");
+  const rootEvidence = lifecycle.inspect("root", rootBranch.head, 1);
+  const recordedRootResiduals = branchResidualPaths.get("root") ?? new Set();
+  const rootResidualPaths = [
+    ...new Set([
+      ...rootBranch.trackedResidualPaths,
+      ...rootEvidence.untracked.filter((filePath) =>
+        recordedRootResiduals.has(filePath),
+      ),
+    ]),
+  ].sort();
   return {
     status,
     head: lifecycle.branch("root").head,
+    rootResidualPaths,
+    rootTrackedResiduals: rootBranch.trackedResiduals,
     ...finalSnapshot,
     ...(terminalError ? { error: terminalError } : {}),
     cleanupCompleted() {

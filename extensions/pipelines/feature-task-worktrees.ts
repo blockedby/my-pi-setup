@@ -1,6 +1,7 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { isSafeRepositoryRelativePath } from "./feature-planning.ts";
 
@@ -22,6 +23,18 @@ export interface FeatureTaskBranch {
   readonly preparationAttempts: number;
   readonly prepared: boolean;
   readonly preparationBaseline: ReadonlyArray<string>;
+  readonly trackedResidualPaths: ReadonlyArray<string>;
+  readonly trackedResiduals: ReadonlyArray<FeatureTrackedResidualState>;
+}
+
+export interface FeatureTrackedResidualState {
+  readonly path: string;
+  readonly fingerprint: string;
+}
+
+export interface FeatureDiffPageRequest {
+  readonly offset?: number;
+  readonly fingerprint?: string;
 }
 
 export interface FeatureTaskGitDiff {
@@ -34,7 +47,9 @@ export interface FeatureTaskGitDiff {
   readonly text: string;
   readonly truncated: boolean;
   readonly bytes: number;
-  readonly fingerprint?: string;
+  readonly offset: number;
+  readonly nextOffset?: number;
+  readonly fingerprint: string;
 }
 
 export interface FeatureTaskCommitResult {
@@ -49,7 +64,15 @@ export interface FeatureTaskGitTarget {
   readonly branch: string;
   readonly worktree: string;
   head(): string;
-  inspect(baseCommit: string, maxBytes?: number): FeatureTaskGitDiff;
+  inspect(
+    baseCommit: string,
+    maxBytes?: number,
+    request?: FeatureDiffPageRequest,
+  ): FeatureTaskGitDiff;
+  trackedResidualPaths?(): ReadonlyArray<string>;
+  assertRecordedResidualsUnchanged?(
+    excludedPaths?: ReadonlyArray<string>,
+  ): void;
   commit(
     baseCommit: string,
     commitPaths: ReadonlyArray<string>,
@@ -90,6 +113,7 @@ export interface FeatureTaskWorktreeLifecycle {
     branchId: string,
     baseCommit: string,
     maxBytes?: number,
+    request?: FeatureDiffPageRequest,
   ): FeatureTaskGitDiff;
   commit(
     branchId: string,
@@ -127,8 +151,15 @@ interface MutableBranch {
   preparationAttempts: number;
   prepared: boolean;
   preparationBaseline: string[];
+  trackedResiduals: Map<string, string>;
   removed: boolean;
   cherryPickSource?: string;
+}
+
+interface TrackedResidualOwner {
+  readonly id: string;
+  readonly worktree: string;
+  trackedResiduals: Map<string, string>;
 }
 
 function diagnostic(error: unknown) {
@@ -290,6 +321,10 @@ function toSnapshot(branch: MutableBranch): FeatureTaskBranch {
     preparationAttempts: branch.preparationAttempts,
     prepared: branch.prepared,
     preparationBaseline: [...branch.preparationBaseline],
+    trackedResidualPaths: [...branch.trackedResiduals.keys()].sort(),
+    trackedResiduals: [...branch.trackedResiduals]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([path, fingerprint]) => ({ path, fingerprint })),
   };
 }
 
@@ -393,20 +428,229 @@ function assertNoEscapingSymlink(cwd: string, filePath: string) {
   }
 }
 
-function boundedDiff(cwd: string, base: string, maxBytes: number) {
-  const full = requireGitRaw(
+function readByte(file: number, offset: number) {
+  const value = Buffer.allocUnsafe(1);
+  return fs.readSync(file, value, 0, 1, offset) === 1 ? value[0] : undefined;
+}
+
+function readUtf8Page(
+  file: number,
+  offset: number,
+  bytes: number,
+  maxBytes: number,
+) {
+  const first = readByte(file, offset);
+  if (first !== undefined && (first & 0xc0) === 0x80) {
+    throw new Error(`Diff offset ${offset} is not a UTF-8 page boundary.`);
+  }
+  const requestedEnd = Math.min(bytes, offset + maxBytes);
+  let nextOffset = requestedEnd;
+  if (nextOffset < bytes && (readByte(file, nextOffset)! & 0xc0) === 0x80) {
+    while (
+      nextOffset > offset &&
+      (readByte(file, nextOffset)! & 0xc0) === 0x80
+    ) {
+      nextOffset -= 1;
+    }
+    // A page smaller than one code point may exceed maxBytes by at most three
+    // bytes so the returned cursor always makes progress.
+    if (nextOffset === offset) {
+      nextOffset = requestedEnd;
+      while (
+        nextOffset < bytes &&
+        (readByte(file, nextOffset)! & 0xc0) === 0x80
+      ) {
+        nextOffset += 1;
+      }
+    }
+  }
+  const page = Buffer.allocUnsafe(nextOffset - offset);
+  let read = 0;
+  while (read < page.length) {
+    const count = fs.readSync(
+      file,
+      page,
+      read,
+      page.length - read,
+      offset + read,
+    );
+    if (count === 0) throw new Error("Diff spool page ended early.");
+    read += count;
+  }
+  return { text: page.toString("utf8"), nextOffset };
+}
+
+function boundedGitOutput(
+  cwd: string,
+  args: ReadonlyArray<string>,
+  label: string,
+  maxBytes: number,
+  request: FeatureDiffPageRequest = {},
+) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("Diff page size must be a positive safe integer.");
+  }
+  const offset = request.offset ?? 0;
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new Error("Diff offset must be a nonnegative safe integer.");
+  }
+  if (offset > 0 && !request.fingerprint) {
+    throw new Error("A diff fingerprint is required for continuation pages.");
+  }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-diff-"));
+  const outputPath = path.join(directory, "diff");
+  const output = fs.openSync(outputPath, "wx+");
+  try {
+    const result = spawnSync(
+      "git",
+      ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args],
+      {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: GIT_OUTPUT_LIMIT,
+        stdio: ["ignore", output, "pipe"],
+      },
+    );
+    if (result.error || result.status !== 0) {
+      const detail = result.error
+        ? diagnostic(result.error)
+        : (result.stderr ?? "").replace(/\s+/g, " ").slice(0, DIAGNOSTIC_LIMIT);
+      throw new Error(`${label}: ${detail || `Git exited ${result.status}`}`);
+    }
+    const bytes = fs.fstatSync(output).size;
+    const fingerprintHash = createHash("sha256");
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    while (position < bytes) {
+      const count = fs.readSync(
+        output,
+        chunk,
+        0,
+        Math.min(chunk.length, bytes - position),
+        position,
+      );
+      if (count === 0) throw new Error(`${label}: diff spool ended early.`);
+      fingerprintHash.update(chunk.subarray(0, count));
+      position += count;
+    }
+    const fingerprint = fingerprintHash.digest("hex");
+    if (request.fingerprint && request.fingerprint !== fingerprint) {
+      throw new Error(
+        "Diff changed since the requested page cursor was issued.",
+      );
+    }
+    if (offset > bytes) {
+      throw new Error(`Diff offset ${offset} exceeds ${bytes} bytes.`);
+    }
+    const page = readUtf8Page(output, offset, bytes, maxBytes);
+    return {
+      text: page.text,
+      truncated: page.nextOffset < bytes,
+      bytes,
+      offset,
+      ...(page.nextOffset < bytes ? { nextOffset: page.nextOffset } : {}),
+      fingerprint,
+    };
+  } finally {
+    fs.closeSync(output);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function boundedDiff(
+  cwd: string,
+  base: string,
+  maxBytes: number,
+  request?: FeatureDiffPageRequest,
+) {
+  return boundedGitOutput(
     cwd,
     ["diff", "--no-ext-diff", "--binary", base, "--"],
     "Unable to inspect task diff",
+    maxBytes,
+    request,
   );
-  const bytes = Buffer.byteLength(full, "utf8");
-  const fingerprint = createHash("sha256").update(full).digest("hex");
-  if (bytes <= maxBytes) {
-    return { text: full, truncated: false, bytes, fingerprint };
+}
+
+function currentTrackedPaths(cwd: string) {
+  return [...new Set([...readStaged(cwd), ...readTracked(cwd)])].sort();
+}
+
+function trackedPathFingerprint(cwd: string, filePath: string) {
+  const staged = boundedGitOutput(
+    cwd,
+    [
+      "--literal-pathspecs",
+      "diff",
+      "--cached",
+      "--no-ext-diff",
+      "--binary",
+      "HEAD",
+      "--",
+      filePath,
+    ],
+    `Unable to fingerprint cleanup residual ${filePath}`,
+    1,
+  ).fingerprint;
+  const worktree = boundedGitOutput(
+    cwd,
+    [
+      "--literal-pathspecs",
+      "diff",
+      "--no-ext-diff",
+      "--binary",
+      "--",
+      filePath,
+    ],
+    `Unable to fingerprint cleanup residual ${filePath}`,
+    1,
+  ).fingerprint;
+  return createHash("sha256")
+    .update(staged)
+    .update("\0")
+    .update(worktree)
+    .digest("hex");
+}
+
+function recordTrackedResiduals(branch: TrackedResidualOwner) {
+  branch.trackedResiduals = new Map(
+    currentTrackedPaths(branch.worktree).map((filePath) => [
+      filePath,
+      trackedPathFingerprint(branch.worktree, filePath),
+    ]),
+  );
+}
+
+function assertRecordedResidualsUnchanged(
+  branch: TrackedResidualOwner,
+  excludedPaths: ReadonlySet<string> = new Set(),
+) {
+  const actual = new Set(currentTrackedPaths(branch.worktree));
+  for (const [filePath, fingerprint] of branch.trackedResiduals) {
+    if (excludedPaths.has(filePath)) continue;
+    if (!actual.has(filePath)) {
+      branch.trackedResiduals.delete(filePath);
+      continue;
+    }
+    if (trackedPathFingerprint(branch.worktree, filePath) !== fingerprint) {
+      throw new Error(
+        `Recorded cleanup residual changed outside controller ownership: ${filePath}.`,
+      );
+    }
   }
-  let text = full.slice(0, maxBytes);
-  while (Buffer.byteLength(text, "utf8") > maxBytes) text = text.slice(0, -1);
-  return { text, truncated: true, bytes, fingerprint };
+  return actual;
+}
+
+function verifyTrackedResiduals(branch: TrackedResidualOwner) {
+  const actual = assertRecordedResidualsUnchanged(branch);
+  const unexpected = [...actual].filter(
+    (filePath) => !branch.trackedResiduals.has(filePath),
+  );
+  if (unexpected.length > 0) {
+    throw new Error(
+      `Feature graph tracked drift exists on branch ${branch.id}: ${unexpected.join(", ")}.`,
+    );
+  }
 }
 
 function removeUntrackedPath(
@@ -560,6 +804,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       preparationBaseline: [
         ...new Set([...readUntracked(workingDir), ...readIgnored(workingDir)]),
       ],
+      trackedResiduals: new Map(),
       removed: false,
     };
     if (
@@ -595,8 +840,11 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
           throw new Error("Task branch drifted outside controller ownership.");
         return readHead(branch.worktree);
       },
-      inspect: (baseCommit, maxBytes) =>
-        this.inspect(branchId, baseCommit, maxBytes),
+      inspect: (baseCommit, maxBytes, request) =>
+        this.inspect(branchId, baseCommit, maxBytes, request),
+      trackedResidualPaths: () => [...branch.trackedResiduals.keys()].sort(),
+      assertRecordedResidualsUnchanged: (excludedPaths) =>
+        assertRecordedResidualsUnchanged(branch, new Set(excludedPaths ?? [])),
       commit: (baseCommit, commitPaths, message) =>
         this.commit(branchId, baseCommit, commitPaths, message),
       amend: (provisionalCommit, commitPaths) =>
@@ -627,14 +875,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
         `Feature graph HEAD drift on ${branch.id}: expected ${requiredHead}, found ${actualHead}.`,
       );
     }
-    if (
-      readStaged(branch.worktree).length > 0 ||
-      readTracked(branch.worktree).length > 0
-    ) {
-      throw new Error(
-        `Feature graph tracked drift exists on branch ${branch.id}.`,
-      );
-    }
+    verifyTrackedResiduals(branch);
     branch.head = actualHead;
     return toSnapshot(branch);
   }
@@ -688,6 +929,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       preparationAttempts: 0,
       prepared: false,
       preparationBaseline: [],
+      trackedResiduals: new Map(),
       removed: false,
     };
     this.mutableBranches.set(id, child);
@@ -730,12 +972,17 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
     return toSnapshot(branch);
   }
 
-  inspect(branchId: string, baseCommit: string, maxBytes = 256 * 1024) {
+  inspect(
+    branchId: string,
+    baseCommit: string,
+    maxBytes = 256 * 1024,
+    request?: FeatureDiffPageRequest,
+  ) {
     const branch = this.mutable(branchId);
     if (readBranch(branch.worktree) !== branch.branch)
       throw new Error("Task branch drifted outside controller ownership.");
     const head = readHead(branch.worktree);
-    const diff = boundedDiff(branch.worktree, baseCommit, maxBytes);
+    const diff = boundedDiff(branch.worktree, baseCommit, maxBytes, request);
     return {
       baseToHead: changedBetween(branch.worktree, baseCommit, head),
       tracked: readTracked(branch.worktree),
@@ -761,14 +1008,32 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       throw new Error(
         "Task Git branch or HEAD drifted outside controller ownership.",
       );
-    const stagedBefore = readStaged(branch.worktree);
     const changed = new Set([
-      ...stagedBefore,
+      ...readStaged(branch.worktree),
       ...readTracked(branch.worktree),
       ...readUntracked(branch.worktree),
     ]);
     assertSafeCommitPaths(branch.worktree, commitPaths, changed);
     const selected = new Set(commitPaths);
+    assertRecordedResidualsUnchanged(branch, selected);
+    const inheritedStaged = readStaged(branch.worktree).filter(
+      (filePath) =>
+        branch.trackedResiduals.has(filePath) && !selected.has(filePath),
+    );
+    if (inheritedStaged.length > 0) {
+      requireGit(
+        branch.worktree,
+        [
+          "--literal-pathspecs",
+          "restore",
+          "--staged",
+          "--",
+          ...inheritedStaged,
+        ],
+        "Unable to isolate recorded cleanup residuals from task staging",
+      );
+    }
+    const stagedBefore = readStaged(branch.worktree);
     const unrelatedStaged = stagedBefore.filter(
       (filePath) => !selected.has(filePath),
     );
@@ -806,6 +1071,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       branch.worktree,
       branch.preparationBaseline,
     );
+    recordTrackedResiduals(branch);
     return { commit, changedPaths, ...cleanup };
   }
 
@@ -870,6 +1136,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       );
       const integratedCommit = readHead(parent.worktree);
       parent.head = integratedCommit;
+      recordTrackedResiduals(parent);
       return { status: "picked", integratedCommit } as const;
     } catch (error) {
       const conflicts = readConflicts(parent.worktree);
@@ -950,10 +1217,15 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
         "Unable to inspect continued cherry-pick",
       ),
     );
+    const cleanup = cleanupAfterCommit(
+      parent.worktree,
+      parent.preparationBaseline,
+    );
+    recordTrackedResiduals(parent);
     return {
       commit,
       changedPaths,
-      ...cleanupAfterCommit(parent.worktree, parent.preparationBaseline),
+      ...cleanup,
     };
   }
 
@@ -1012,14 +1284,52 @@ export function createFeatureTaskWorktreeLifecycle(options: {
   return new GitFeatureTaskWorktreeLifecycle(options);
 }
 
-export function createFeatureRootTaskGitTarget(workingDir: string) {
+export function createFeatureRootTaskGitTarget(
+  workingDir: string,
+  knownResidualPaths: ReadonlyArray<string> = [],
+  knownTrackedResiduals: ReadonlyArray<FeatureTrackedResidualState> = [],
+) {
   const worktree = canonical(workingDir);
   const branch = readBranch(worktree);
   let expectedHead = readHead(worktree);
+  const suppliedTrackedResiduals = new Map(
+    knownTrackedResiduals.map(({ path: filePath, fingerprint }) => [
+      filePath,
+      fingerprint,
+    ]),
+  );
+  const residualOwner: TrackedResidualOwner = {
+    id: "root-review",
+    worktree,
+    trackedResiduals: new Map(suppliedTrackedResiduals),
+  };
+  verifyTrackedResiduals(residualOwner);
   const preparationBaseline = [
     ...readUntracked(worktree),
     ...readIgnored(worktree),
   ];
+  const isolateRecordedStaging = (commitPaths: ReadonlyArray<string>) => {
+    const selected = new Set(commitPaths);
+    assertRecordedResidualsUnchanged(residualOwner, selected);
+    const inheritedStaged = readStaged(worktree).filter(
+      (filePath) =>
+        residualOwner.trackedResiduals.has(filePath) && !selected.has(filePath),
+    );
+    if (inheritedStaged.length > 0) {
+      requireGit(
+        worktree,
+        [
+          "--literal-pathspecs",
+          "restore",
+          "--staged",
+          "--",
+          ...inheritedStaged,
+        ],
+        "Unable to isolate recorded cleanup residuals from final-review staging",
+      );
+    }
+    return { selected, stagedBefore: readStaged(worktree) };
+  };
   return {
     branchId: "root",
     branch,
@@ -1031,15 +1341,26 @@ export function createFeatureRootTaskGitTarget(workingDir: string) {
         );
       return readHead(worktree);
     },
-    inspect: (baseCommit: string, maxBytes?: number) => ({
+    inspect: (
+      baseCommit: string,
+      maxBytes?: number,
+      request?: FeatureDiffPageRequest,
+    ) => ({
       baseToHead: changedBetween(worktree, baseCommit, readHead(worktree)),
       tracked: readTracked(worktree),
       staged: readStaged(worktree),
       untracked: readUntracked(worktree),
       ignored: readIgnored(worktree),
       conflictPaths: readConflicts(worktree),
-      ...boundedDiff(worktree, baseCommit, maxBytes ?? 256 * 1024),
+      ...boundedDiff(worktree, baseCommit, maxBytes ?? 256 * 1024, request),
     }),
+    trackedResidualPaths: () =>
+      [...residualOwner.trackedResiduals.keys()].sort(),
+    assertRecordedResidualsUnchanged: (excludedPaths) =>
+      assertRecordedResidualsUnchanged(
+        residualOwner,
+        new Set(excludedPaths ?? []),
+      ),
     commit: (
       baseCommit: string,
       commitPaths: ReadonlyArray<string>,
@@ -1058,14 +1379,13 @@ export function createFeatureRootTaskGitTarget(workingDir: string) {
           "Final review base commit does not match controller-owned HEAD.",
         );
       }
-      const stagedBefore = readStaged(worktree);
       const changed = new Set([
-        ...stagedBefore,
+        ...readStaged(worktree),
         ...readTracked(worktree),
         ...readUntracked(worktree),
       ]);
       assertSafeCommitPaths(worktree, commitPaths, changed);
-      const selected = new Set(commitPaths);
+      const { selected, stagedBefore } = isolateRecordedStaging(commitPaths);
       const unrelatedStaged = stagedBefore.filter(
         (filePath) => !selected.has(filePath),
       );
@@ -1094,10 +1414,12 @@ export function createFeatureRootTaskGitTarget(workingDir: string) {
       );
       const commit = readHead(worktree);
       expectedHead = commit;
+      const cleanup = cleanupAfterCommit(worktree, preparationBaseline);
+      recordTrackedResiduals(residualOwner);
       return {
         commit,
         changedPaths: changedBetween(worktree, baseCommit, commit),
-        ...cleanupAfterCommit(worktree, preparationBaseline),
+        ...cleanup,
       };
     },
     amend: (provisionalCommit: string, commitPaths: ReadonlyArray<string>) => {
@@ -1113,14 +1435,13 @@ export function createFeatureRootTaskGitTarget(workingDir: string) {
         ["rev-parse", `${provisionalCommit}^`],
         "Unable to resolve final-review provisional parent",
       );
-      const stagedBefore = readStaged(worktree);
       const changed = new Set([
-        ...stagedBefore,
+        ...readStaged(worktree),
         ...readTracked(worktree),
         ...readUntracked(worktree),
       ]);
       assertSafeCommitPaths(worktree, commitPaths, changed);
-      const selected = new Set(commitPaths);
+      const { selected, stagedBefore } = isolateRecordedStaging(commitPaths);
       const unrelatedStaged = stagedBefore.filter(
         (filePath) => !selected.has(filePath),
       );
@@ -1149,10 +1470,12 @@ export function createFeatureRootTaskGitTarget(workingDir: string) {
       );
       const commit = readHead(worktree);
       expectedHead = commit;
+      const cleanup = cleanupAfterCommit(worktree, preparationBaseline);
+      recordTrackedResiduals(residualOwner);
       return {
         commit,
         changedPaths: changedBetween(worktree, parent, commit),
-        ...cleanupAfterCommit(worktree, preparationBaseline),
+        ...cleanup,
       };
     },
     continueCherryPick: (_commitPaths: ReadonlyArray<string>) => {

@@ -700,6 +700,265 @@ test("cleanup residual warnings remain observable without invalidating a verifie
   }
 });
 
+test("recorded tracked cleanup residuals survive a linear task and fork join", async () => {
+  const repo = fixture();
+  try {
+    const first = graphTask("residual-source");
+    const second = graphTask("linear-nochange", [first.id]);
+    const left = graphTask("residual-left", [second.id]);
+    const right = graphTask("residual-right", [second.id]);
+    const executionGraph = graph([first, second, left, right]);
+    const tree = {
+      kind: "sequence",
+      steps: [
+        { kind: "task", taskId: first.id },
+        { kind: "task", taskId: second.id },
+        {
+          kind: "fork",
+          branches: [
+            { kind: "task", taskId: left.id },
+            { kind: "task", taskId: right.id },
+          ],
+        },
+      ],
+    } satisfies ExecutionTree;
+    let observedInheritedResidual = false;
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      runCheck: passingCheck,
+      async runSession(input) {
+        if (input.task!.id === first.id) {
+          fs.writeFileSync(path.join(input.cwd, "shared.txt"), "retained\n");
+          fs.writeFileSync(path.join(input.cwd, `${first.id}.txt`), "done\n");
+          fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o400);
+          fs.chmodSync(input.cwd, 0o500);
+          try {
+            const finalized = await input.tools.finalize({
+              commitPaths: [`${first.id}.txt`],
+              summary:
+                "Committed the task while reporting failed tracked cleanup.",
+            });
+            assert.equal(finalized.validated, true);
+            assert.ok(finalized.residualPaths.includes("shared.txt"));
+          } finally {
+            fs.chmodSync(input.cwd, 0o700);
+            fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o600);
+          }
+          return { status: "settled", sessionId: first.id };
+        }
+        if (input.task!.id === second.id) {
+          const evidence = await input.tools.diff();
+          observedInheritedResidual =
+            evidence.knownResidualPaths.includes("shared.txt");
+          const finalized = await input.tools.finalize({
+            commitPaths: [],
+            summary: "Accepted the unchanged recorded cleanup residual.",
+          });
+          assert.equal(finalized.status, "satisfied_without_changes");
+          return { status: "settled", sessionId: second.id };
+        }
+        const filePath = `${input.task!.id}.txt`;
+        fs.writeFileSync(path.join(input.cwd, filePath), "done\n");
+        await input.tools.finalize({
+          commitPaths: [filePath],
+          summary: `Implemented ${input.task!.id} on its isolated branch.`,
+        });
+        return { status: "settled", sessionId: input.task!.id };
+      },
+    });
+
+    assert.equal(result.status, "completed", result.error ?? "graph failed");
+    assert.equal(observedInheritedResidual, true);
+    assert.ok(result.rootResidualPaths?.includes("shared.txt"));
+    assert.equal(result.rootTrackedResiduals?.[0]?.path, "shared.txt");
+    assert.ok(result.warnings.some((warning) => warning.includes("restore")));
+    assert.equal(
+      fs.readFileSync(path.join(repo.workingDir, "shared.txt"), "utf8"),
+      "retained\n",
+    );
+  } finally {
+    fs.chmodSync(repo.workingDir, 0o700);
+    repo.cleanup();
+  }
+});
+
+test("same-path drift after a recorded cleanup residual fails closed", async () => {
+  const repo = fixture();
+  try {
+    const first = graphTask("residual-before-drift");
+    const second = graphTask("must-not-run", [first.id]);
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([first, second]),
+      tree: {
+        kind: "sequence",
+        steps: [
+          { kind: "task", taskId: first.id },
+          { kind: "task", taskId: second.id },
+        ],
+      },
+      runCheck: passingCheck,
+      async runSession(input) {
+        assert.equal(input.task!.id, first.id);
+        fs.writeFileSync(path.join(input.cwd, "shared.txt"), "retained\n");
+        fs.writeFileSync(path.join(input.cwd, `${first.id}.txt`), "done\n");
+        fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o400);
+        fs.chmodSync(input.cwd, 0o500);
+        try {
+          const finalized = await input.tools.finalize({
+            commitPaths: [`${first.id}.txt`],
+            summary: "Created the recorded tracked cleanup residual.",
+          });
+          assert.equal(finalized.validated, true);
+        } finally {
+          fs.chmodSync(input.cwd, 0o700);
+          fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o600);
+        }
+        fs.appendFileSync(
+          path.join(input.cwd, "shared.txt"),
+          "external drift\n",
+        );
+        return { status: "settled", sessionId: first.id };
+      },
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(result.error ?? "", /recorded cleanup residual changed/i);
+    assert.equal(
+      result.tasks.find(({ id }) => id === second.id)?.status,
+      "waiting",
+    );
+  } finally {
+    fs.chmodSync(repo.workingDir, 0o700);
+    repo.cleanup();
+  }
+});
+
+test("restoring a recorded tracked residual to HEAD permits no-change finalization", async () => {
+  const repo = fixture();
+  try {
+    const first = graphTask("residual-to-restore");
+    const restore = graphTask("restore-residual", [first.id]);
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([first, restore]),
+      tree: {
+        kind: "sequence",
+        steps: [
+          { kind: "task", taskId: first.id },
+          { kind: "task", taskId: restore.id },
+        ],
+      },
+      runCheck: passingCheck,
+      async runSession(input) {
+        if (input.task!.id === first.id) {
+          fs.writeFileSync(path.join(input.cwd, "shared.txt"), "retained\n");
+          fs.writeFileSync(path.join(input.cwd, `${first.id}.txt`), "done\n");
+          fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o400);
+          fs.chmodSync(input.cwd, 0o500);
+          try {
+            await input.tools.finalize({
+              commitPaths: [`${first.id}.txt`],
+              summary: "Left one controller-recorded tracked cleanup residual.",
+            });
+          } finally {
+            fs.chmodSync(input.cwd, 0o700);
+            fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o600);
+          }
+          return { status: "settled", sessionId: first.id };
+        }
+        fs.writeFileSync(path.join(input.cwd, "shared.txt"), "base\n");
+        const finalized = await input.tools.finalize({
+          commitPaths: [],
+          summary: "Restored the inherited residual exactly to HEAD.",
+        });
+        assert.equal(finalized.status, "satisfied_without_changes");
+        return { status: "settled", sessionId: restore.id };
+      },
+    });
+
+    assert.equal(result.status, "completed", result.error ?? "graph failed");
+    assert.deepEqual(result.rootResidualPaths, []);
+    assert.deepEqual(result.rootTrackedResiduals, []);
+    assert.ok(result.residualPaths.includes("shared.txt"));
+    assert.ok(result.warnings.some((warning) => warning.includes("restore")));
+    assert.equal(git(repo.workingDir, ["status", "--porcelain"]), "");
+  } finally {
+    fs.chmodSync(repo.workingDir, 0o700);
+    repo.cleanup();
+  }
+});
+
+test("a later task may explicitly commit a recorded residual path", async () => {
+  const repo = fixture();
+  try {
+    const first = graphTask("residual-to-repair");
+    const repair = graphTask("explicit-residual-repair", [first.id]);
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([first, repair]),
+      tree: {
+        kind: "sequence",
+        steps: [
+          { kind: "task", taskId: first.id },
+          { kind: "task", taskId: repair.id },
+        ],
+      },
+      runCheck: passingCheck,
+      async runSession(input) {
+        if (input.task!.id === first.id) {
+          fs.writeFileSync(path.join(input.cwd, "shared.txt"), "retained\n");
+          fs.writeFileSync(path.join(input.cwd, `${first.id}.txt`), "done\n");
+          fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o400);
+          fs.chmodSync(input.cwd, 0o500);
+          try {
+            await input.tools.finalize({
+              commitPaths: [`${first.id}.txt`],
+              summary: "Left one controller-recorded tracked cleanup residual.",
+            });
+          } finally {
+            fs.chmodSync(input.cwd, 0o700);
+            fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o600);
+          }
+          return { status: "settled", sessionId: first.id };
+        }
+        fs.writeFileSync(path.join(input.cwd, "shared.txt"), "repaired\n");
+        const finalized = await input.tools.finalize({
+          commitPaths: ["shared.txt"],
+          summary:
+            "Explicitly repaired and committed the inherited residual path.",
+        });
+        assert.equal(finalized.validated, true);
+        return { status: "settled", sessionId: repair.id };
+      },
+    });
+
+    assert.equal(result.status, "completed", result.error ?? "graph failed");
+    assert.deepEqual(result.rootResidualPaths, []);
+    assert.equal(
+      fs.readFileSync(path.join(repo.workingDir, "shared.txt"), "utf8"),
+      "repaired\n",
+    );
+  } finally {
+    fs.chmodSync(repo.workingDir, 0o700);
+    repo.cleanup();
+  }
+});
+
 test("join conflicts continue the active cherry-pick and preserve source to integrated provenance", async () => {
   const repo = fixture();
   try {

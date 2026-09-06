@@ -10,7 +10,9 @@ import { isSafeRepositoryRelativePath } from "./feature-planning.ts";
 import { runFeatureSandboxCommand } from "./feature-sandbox.ts";
 import {
   createFeatureRootTaskGitTarget,
+  type FeatureDiffPageRequest,
   type FeatureTaskGitTarget,
+  type FeatureTrackedResidualState,
 } from "./feature-task-worktrees.ts";
 
 const TASK_CAPSULE_LIMIT = 192 * 1024;
@@ -112,6 +114,9 @@ export interface FeatureTaskCapsule {
       readonly text: string;
       readonly truncated: boolean;
       readonly bytes: number;
+      readonly offset: number;
+      readonly nextOffset?: number;
+      readonly fingerprint: string;
     };
   };
 }
@@ -135,6 +140,9 @@ export interface FeatureTaskDiffResult {
     readonly text: string;
     readonly truncated: boolean;
     readonly bytes: number;
+    readonly offset: number;
+    readonly nextOffset?: number;
+    readonly fingerprint: string;
   };
 }
 
@@ -150,7 +158,7 @@ export interface FeatureTaskFinalizeResult {
 }
 
 export interface FeatureTaskToolHost {
-  diff(): Promise<FeatureTaskDiffResult>;
+  diff(request?: FeatureDiffPageRequest): Promise<FeatureTaskDiffResult>;
   check(request: { readonly checkId: string }): Promise<FeatureCheckResult>;
   finalize(request: {
     readonly commitPaths: ReadonlyArray<string>;
@@ -278,12 +286,20 @@ function currentMeaningfulPaths(
   preparationBaseline: ReadonlySet<string>,
   residualPaths: ReadonlySet<string>,
 ) {
+  target.assertRecordedResidualsUnchanged?.();
   const diff = target.inspect(baseCommit);
+  const trackedResidualPaths = new Set(target.trackedResidualPaths?.() ?? []);
+  const staged = diff.staged.filter(
+    (filePath) => !trackedResidualPaths.has(filePath),
+  );
+  const tracked = diff.tracked.filter(
+    (filePath) => !trackedResidualPaths.has(filePath),
+  );
   const untracked = diff.untracked.filter(
     (filePath) =>
       !preparationBaseline.has(filePath) && !residualPaths.has(filePath),
   );
-  return [...new Set([...diff.staged, ...diff.tracked, ...untracked])].sort();
+  return [...new Set([...staged, ...tracked, ...untracked])].sort();
 }
 
 function internalTask(options: {
@@ -336,6 +352,7 @@ export function createFeatureTaskRuntime(options: {
   readonly graph: FeatureExecutionGraph;
   readonly target: FeatureTaskGitTarget;
   readonly taskBaseCommit: string;
+  readonly diffBaseCommit?: string;
   readonly completedDependencies?: ReadonlyArray<FeatureCompletedDependency>;
   readonly nextTasks?: ReadonlyArray<{
     readonly taskId: string;
@@ -420,11 +437,14 @@ export function createFeatureTaskRuntime(options: {
     return value;
   };
 
-  const diff = async (): Promise<FeatureTaskDiffResult> => {
+  const diff = async (
+    request?: FeatureDiffPageRequest,
+  ): Promise<FeatureTaskDiffResult> => {
     assertActive();
-    const evidence = options.target.inspect(options.taskBaseCommit);
+    const diffBaseCommit = options.diffBaseCommit ?? options.taskBaseCommit;
+    const evidence = options.target.inspect(diffBaseCommit, undefined, request);
     return {
-      taskBaseCommit: options.taskBaseCommit,
+      taskBaseCommit: diffBaseCommit,
       currentHead: options.target.head(),
       currentBranch: options.target.branch,
       worktree: options.target.worktree,
@@ -444,6 +464,11 @@ export function createFeatureTaskRuntime(options: {
         text: evidence.text,
         truncated: evidence.truncated,
         bytes: evidence.bytes,
+        offset: evidence.offset,
+        ...(evidence.nextOffset === undefined
+          ? {}
+          : { nextOffset: evidence.nextOffset }),
+        fingerprint: evidence.fingerprint,
       },
     };
   };
@@ -479,7 +504,9 @@ export function createFeatureTaskRuntime(options: {
     assertActive();
     const after = options.target.inspect(options.taskBaseCommit);
     const trackedChanged =
-      (before.fingerprint ?? before.text) !== (after.fingerprint ?? after.text);
+      before.fingerprint !== after.fingerprint ||
+      before.staged.join("\0") !== after.staged.join("\0") ||
+      before.tracked.join("\0") !== after.tracked.join("\0");
     const changedPaths = [
       ...new Set([
         ...after.staged,
@@ -574,9 +601,7 @@ export function createFeatureTaskRuntime(options: {
         state.provisionalCommit = commitResult.commit;
         state.status = "provisional";
         state.warnings.push(...commitResult.warnings);
-        state.residualPaths = [
-          ...new Set([...state.residualPaths, ...commitResult.residualPaths]),
-        ].sort();
+        state.residualPaths = [...new Set(commitResult.residualPaths)].sort();
       }
       state.summary = request.summary.trim();
       state.error = undefined;
@@ -763,6 +788,11 @@ export function createFeatureTaskRuntime(options: {
                     text: diff.text,
                     truncated: diff.truncated,
                     bytes: diff.bytes,
+                    offset: diff.offset,
+                    ...(diff.nextOffset === undefined
+                      ? {}
+                      : { nextOffset: diff.nextOffset }),
+                    fingerprint: diff.fingerprint,
                   };
                 })(),
               }
@@ -849,6 +879,9 @@ export function createFeatureReviewRuntime(options: {
   readonly onSnapshot?: (snapshot: FeatureTaskSnapshot) => void;
   readonly canonicalPlan?: FeatureCanonicalPlan;
   readonly graph?: FeatureExecutionGraph;
+  readonly diffBaseCommit?: string;
+  readonly knownResidualPaths?: ReadonlyArray<string>;
+  readonly knownTrackedResiduals?: ReadonlyArray<FeatureTrackedResidualState>;
 }) {
   let runtime: FeatureTaskRuntime | undefined;
   let expected: string | undefined;
@@ -856,16 +889,21 @@ export function createFeatureReviewRuntime(options: {
   const unavailable = () => {
     throw new Error("Final Sol review is not active.");
   };
+  const host: FeatureTaskToolHost = {
+    diff: (request) => runtime?.host.diff(request) ?? unavailable(),
+    check: (request) => runtime?.host.check(request) ?? unavailable(),
+    finalize: (request) => runtime?.host.finalize(request) ?? unavailable(),
+  };
   const review = {
-    host: {
-      diff: () => runtime?.host.diff() ?? unavailable(),
-      check: (request) => runtime?.host.check(request) ?? unavailable(),
-      finalize: (request) => runtime?.host.finalize(request) ?? unavailable(),
-    },
+    host,
     begin(expectedHead: string) {
       if (runtime || expected)
         throw new Error("Final Sol review already began.");
-      const target = createFeatureRootTaskGitTarget(options.workingDir);
+      const target = createFeatureRootTaskGitTarget(
+        options.workingDir,
+        options.knownResidualPaths,
+        options.knownTrackedResiduals,
+      );
       if (target.head() !== expectedHead) {
         throw new Error(
           `Final review expected HEAD ${expectedHead}, found ${target.head()}.`,
@@ -903,10 +941,12 @@ export function createFeatureReviewRuntime(options: {
         graph,
         target,
         taskBaseCommit: expectedHead,
+        diffBaseCommit: options.diffBaseCommit,
         checks: options.checks,
         runCheck: options.runCheck,
         signal,
         preparationBaseline: target.inspect(expectedHead).untracked,
+        knownResidualPaths: options.knownResidualPaths,
         onSnapshot: options.onSnapshot,
       });
       runtime.beginAttempt(1);
@@ -925,7 +965,7 @@ export function createFeatureReviewRuntime(options: {
           worktree: options.workingDir,
           checks: [],
           warnings: [],
-          residualPaths: [],
+          residualPaths: [...new Set(options.knownResidualPaths ?? [])].sort(),
         }
       );
     },

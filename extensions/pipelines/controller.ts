@@ -101,6 +101,7 @@ import {
   type FeaturePlanCandidateRole,
 } from "./feature-planning.ts";
 import { validateAndCompileFeatureExecutionGraph } from "./feature-graph.ts";
+import { buildFeatureAuditHandoff } from "./feature-audit-handoff.ts";
 import {
   createFeatureReviewRuntime,
   executeFeatureGraph,
@@ -1904,11 +1905,11 @@ export class PipelineController {
     }
 
     const reviewHostProxy = {
-      diff: () => {
+      diff: (request?: Parameters<FeatureTaskToolHost["diff"]>[0]) => {
         if (!run.featureReviewRuntime) {
           throw new Error("Final Sol review is not active.");
         }
-        return run.featureReviewRuntime.host.diff();
+        return run.featureReviewRuntime.host.diff(request);
       },
       check: (request: Parameters<FeatureTaskToolHost["check"]>[0]) => {
         if (!run.featureReviewRuntime) {
@@ -2164,6 +2165,9 @@ export class PipelineController {
       signal: run.featureAbortController.signal,
       canonicalPlan,
       graph: executionGraph,
+      diffBaseCommit: run.baseSha,
+      knownResidualPaths: execution.rootResidualPaths,
+      knownTrackedResiduals: execution.rootTrackedResiduals,
       onSnapshot: (reviewSnapshot) => {
         if (!run.featureGraph) return;
         const projectedReview = {
@@ -2332,12 +2336,7 @@ export class PipelineController {
     await this.startDeferred(
       run,
       auditRoot.id,
-      buildFeaturePipelinePrompt(
-        run.request,
-        canonicalPlan,
-        executionGraph,
-        review.summary ?? "Final review validated without a summary.",
-      ),
+      buildFeaturePipelinePrompt(run.request, this.featureAuditHandoff(run)),
     );
   }
 
@@ -2640,21 +2639,18 @@ export class PipelineController {
       mode: "initial" as const,
       acceptanceCriteria: [],
     };
-    const featureCanonicalPlan = run.featureCanonicalPlan;
-    const acceptanceContract =
-      run.definition === FEATURE_PIPELINE_ID && featureCanonicalPlan
-        ? JSON.stringify({
-            summary: featureCanonicalPlan.summary,
-            acceptanceCriteria: featureCanonicalPlan.acceptance,
-            contractsInvariants: featureCanonicalPlan.contracts,
-            verificationExpectations: featureCanonicalPlan.verification,
-            blockers: featureCanonicalPlan.blockers,
-          })
-        : options.acceptanceContract;
-    const assumptions =
-      run.definition === FEATURE_PIPELINE_ID && featureCanonicalPlan
-        ? []
-        : options.assumptions;
+    const git = this.auditGitIdentity(run);
+    const featureHandoff =
+      run.definition === FEATURE_PIPELINE_ID
+        ? this.featureAuditHandoff(run, git)
+        : undefined;
+    const acceptanceContract = featureHandoff
+      ? JSON.stringify({
+          acceptance: featureHandoff.acceptance,
+          invariants: featureHandoff.invariants,
+        })
+      : options.acceptanceContract;
+    const assumptions = featureHandoff?.assumptions ?? options.assumptions;
     const checks =
       run.definition === FEATURE_PIPELINE_ID
         ? run.featureSynthesisChecks
@@ -2665,9 +2661,10 @@ export class PipelineController {
       assumptions: assumptions.slice(0, 128),
       checks: checks.slice(0, 128),
       input,
-      git: this.auditGitIdentity(run),
+      git,
       purpose:
         run.definition === AUDIT_PIPELINE_ID ? "standalone" : "feature-final",
+      ...(featureHandoff ? { featureHandoff } : {}),
     };
     const segment = new AuditSegment(context);
     run.auditSegment = segment;
@@ -3390,49 +3387,33 @@ export class PipelineController {
     return this.snapshot(run);
   }
 
-  private featureAuditAdditionalContext(run: MutableRun) {
+  private featureAuditHandoff(
+    run: MutableRun,
+    git = this.auditGitIdentity(run),
+  ) {
     const canonicalPlan = run.featureCanonicalPlan;
     if (!canonicalPlan) {
       throw new Error(
         "Feature audit context is unavailable before canonical planning.",
       );
     }
-    const executionSummary = run.featureGraph
-      ? {
-          tasks: run.featureGraph.tasks.map((task) => ({
-            id: task.id,
-            kind: task.kind,
-            status: task.status,
-            attempt: task.attempt,
-            branch: task.branch,
-            validatedCommit: task.validatedCommit,
-            checks: task.checks,
-            summary: task.summary,
-            warnings: task.warnings,
-            residualPaths: task.residualPaths,
-          })),
-          branches: run.featureGraph.branches,
-          joins: run.featureGraph.joins,
-          warnings: run.featureGraph.warnings,
-          residualPaths: run.featureGraph.residualPaths,
-          artifactDir: run.featureGraph.artifactDir,
-        }
-      : undefined;
-    const context = JSON.stringify({
-      discoveryReports: this.featureDiscoveryReports(run),
+    const review = run.featureReviewRuntime?.snapshot();
+    if (!review) {
+      throw new Error(
+        "Feature audit context is unavailable before final review.",
+      );
+    }
+    return buildFeatureAuditHandoff({
       canonicalPlan,
-      executionGraph: run.featureExecutionGraph,
-      execution: executionSummary,
-      solReview: run.featureReviewRuntime?.snapshot(),
-      verificationChecks: run.featureSynthesisChecks,
-      reviewedWorkspace: run.request.workingDir,
-      reviewedState:
-        "integrated execution graph plus final Sol review and any audit remediation",
+      git,
+      reviewSummary:
+        review.summary ?? "Final review validated without a summary.",
+      reviewChecks: review.checks,
     });
-    return truncateHead(context, {
-      maxBytes: 256 * 1024,
-      maxLines: 8_000,
-    }).content;
+  }
+
+  private featureAuditAdditionalContext(run: MutableRun) {
+    return JSON.stringify(this.featureAuditHandoff(run));
   }
 
   async spawnChild(
@@ -3550,16 +3531,19 @@ export class PipelineController {
     const priorReport = priorReportRole
       ? this.agentsFor(runId).find((agent) => agent.role === priorReportRole)
       : undefined;
-    const hostContext =
+    const sanitizedFeatureAudit =
       run.definition === FEATURE_PIPELINE_ID &&
-      STATIC_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)
-        ? this.featureAuditAdditionalContext(run)
-        : additionalContext;
+      STATIC_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role);
+    const hostContext = sanitizedFeatureAudit
+      ? this.featureAuditAdditionalContext(run)
+      : additionalContext;
     const promptContext = [
       ...(priorReport && priorReportRole
         ? [`${titleForRole(priorReportRole)} report:`, priorReport.finalText]
         : []),
-      ...(contextPolicy.gitEvidence ? [this.gitEvidence(runId)] : []),
+      ...(contextPolicy.gitEvidence && !sanitizedFeatureAudit
+        ? [this.gitEvidence(runId)]
+        : []),
       hostContext,
     ]
       .filter((item) => item.trim())

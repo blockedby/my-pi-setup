@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import * as path from "node:path";
 import test from "node:test";
+import { Value } from "typebox/value";
 import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   SessionManager,
@@ -43,6 +44,7 @@ test("persistent Sol finalizer gains its pre-registered task tools only after mu
     | undefined;
   let fauxProvider: ReturnType<typeof registerFauxProvider> | undefined;
   let finalized = 0;
+  const diffRequests: unknown[] = [];
 
   try {
     fauxProvider = registerFauxProvider({
@@ -80,7 +82,8 @@ test("persistent Sol finalizer gains its pre-registered task tools only after mu
       discoverySubmit() {},
       discoveryToolAllowed: () => false,
       featureTaskHost: () => ({
-        async diff() {
+        async diff(request) {
+          diffRequests.push(request);
           return {
             taskBaseCommit: "base",
             currentHead: "head",
@@ -95,7 +98,13 @@ test("persistent Sol finalizer gains its pre-registered task tools only after mu
             knownResidualPaths: [],
             preparationBaseline: [],
             previousChecks: [],
-            diff: { text: "", truncated: false, bytes: 0 },
+            diff: {
+              text: "",
+              truncated: false,
+              bytes: 0,
+              offset: 0,
+              fingerprint: "a".repeat(64),
+            },
           };
         },
         async check({ checkId }) {
@@ -170,6 +179,29 @@ test("persistent Sol finalizer gains its pre-registered task tools only after mu
     ]) {
       assert.equal(session.activeTools.includes(tool), false);
     }
+
+    const diff = sdkSession.getToolDefinition("pipeline_task_diff");
+    assert.ok(diff);
+    const pageRequest = { offset: 262144, fingerprint: "a".repeat(64) };
+    assert.equal(Value.Check(diff.parameters, pageRequest), true);
+    assert.equal(Value.Check(diff.parameters, {}), true);
+    for (const invalid of [
+      { offset: -1 },
+      { offset: 0.5 },
+      { offset: Number.MAX_SAFE_INTEGER + 1 },
+      { fingerprint: "invalid" },
+      { unexpected: true },
+    ]) {
+      assert.equal(Value.Check(diff.parameters, invalid), false);
+    }
+    await diff.execute(
+      "feature-finalizer-diff-page",
+      pageRequest,
+      undefined,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
+    );
+    assert.deepEqual(diffRequests, [pageRequest]);
 
     const finalize = sdkSession.getToolDefinition("pipeline_task_finalize");
     assert.ok(finalize);

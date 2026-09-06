@@ -326,10 +326,20 @@ export function createFeatureTaskHostTools(host: FeatureTaskToolHost) {
       name: "pipeline_task_diff",
       label: "Inspect Feature Task Diff",
       description:
-        "Inspect the controller-bounded current task or final-review diff and Git state.",
-      parameters: Type.Object({}, { additionalProperties: false }),
-      async execute() {
-        const details = await host.diff();
+        "Inspect the current task or final-review diff and Git state. Each response contains a bounded page; use its nextOffset and fingerprint to read subsequent pages of the same diff until nextOffset is absent.",
+      parameters: Type.Object(
+        {
+          offset: Type.Optional(
+            Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+          ),
+          fingerprint: Type.Optional(
+            Type.String({ pattern: "^[0-9a-f]{64}$" }),
+          ),
+        },
+        { additionalProperties: false },
+      ),
+      async execute(_toolCallId, params) {
+        const details = await host.diff(params);
         return {
           content: [{ type: "text", text: safeJson(details) }],
           details,

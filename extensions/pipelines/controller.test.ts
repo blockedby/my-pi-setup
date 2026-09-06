@@ -41,6 +41,10 @@ import {
   type PipelineHandoff,
 } from "./domain.ts";
 import { FEATURE_DISCOVERY_COVERAGE } from "./discovery-report.ts";
+import {
+  buildFeatureAuditHandoff,
+  validateFeatureAuditHandoff,
+} from "./feature-audit-handoff.ts";
 import { planDiscoveryCoverage } from "./plan-discovery-report.ts";
 import {
   FEATURE_CANDIDATE_ROLES,
@@ -444,6 +448,8 @@ function harness(
   const lifecycles: FakeFeatureLifecycle[] = [];
   const featureExecutionSignals: AbortSignal[] = [];
   const featureReviewSignals: AbortSignal[] = [];
+  const featureReviewDiffBases: Array<string | undefined> = [];
+  const featureReviewKnownResidualPaths: ReadonlyArray<string>[] = [];
   let agentSequence = 0;
   let runSequence = 0;
   let featureCleanupCompleted = 0;
@@ -672,7 +678,7 @@ function harness(
         branches: [],
         joins: [],
         warnings: [],
-        residualPaths: [],
+        residualPaths: ["child-only-residual.log"],
       };
       input.onSnapshot?.(snapshot);
       return {
@@ -683,7 +689,14 @@ function harness(
         branches: [],
         joins: [],
         warnings: [],
-        residualPaths: [],
+        residualPaths: ["child-only-residual.log"],
+        rootResidualPaths: ["root-review-residual.log"],
+        rootTrackedResiduals: [
+          {
+            path: "root-review-residual.log",
+            fingerprint: "a".repeat(64),
+          },
+        ],
         cleanupCompleted() {
           featureCleanupCompleted++;
           return [];
@@ -692,6 +705,16 @@ function harness(
     },
     createFeatureReviewRuntime(input) {
       if (input.signal) featureReviewSignals.push(input.signal);
+      featureReviewDiffBases.push(input.diffBaseCommit);
+      featureReviewKnownResidualPaths.push([
+        ...(input.knownResidualPaths ?? []),
+      ]);
+      assert.deepEqual(input.knownTrackedResiduals, [
+        {
+          path: "root-review-residual.log",
+          fingerprint: "a".repeat(64),
+        },
+      ]);
       let began = false;
       const snapshot = () => ({
         id: "final-review",
@@ -763,6 +786,8 @@ function harness(
     artifactRoot,
     featureExecutionSignals,
     featureReviewSignals,
+    featureReviewDiffBases,
+    featureReviewKnownResidualPaths,
     get featureCleanupCompleted() {
       return featureCleanupCompleted;
     },
@@ -1529,7 +1554,106 @@ test("feature admission requires explicit worktree root and preparation before s
   await run.controller.dispose();
 });
 
+test("feature audit handoff admits only canonical requirements and final implementation evidence", () => {
+  const evidence = { state: "available" as const, value: "captured evidence" };
+  const handoff = buildFeatureAuditHandoff({
+    canonicalPlan: featureCanonicalPlan(),
+    git: {
+      baseSha: BASE_COMMIT,
+      headSha: FINAL_SYNTHESIS_COMMIT,
+      worktreeLabel: "WORKTREE",
+      workingDir: implementationWorkingDir(),
+      branch: "feature/test",
+      status: evidence,
+      baseIsAncestor: "yes",
+      commits: evidence,
+      committedDiff: evidence,
+      dirtyDiff: evidence,
+      combinedDiff: { state: "available", value: "final base-relative diff" },
+    },
+    reviewSummary: "The final implementation passed Sol review.",
+    reviewChecks: [
+      {
+        checkId: "review-check",
+        command: "bun test",
+        cwd: ".",
+        purpose: "Validate the feature",
+        required: true,
+        status: "passed",
+        exitCode: 0,
+        stdout: "tests passed",
+        stderr: "",
+        changedPaths: [],
+        startedAt: 1,
+        finishedAt: 2,
+      },
+    ],
+  });
+
+  assert.deepEqual(validateFeatureAuditHandoff(handoff), []);
+  assert.deepEqual(Object.keys(handoff).sort(), [
+    "acceptance",
+    "assumptions",
+    "baseRelativeDiff",
+    "currentGit",
+    "finalSolSummary",
+    "invariants",
+    "reportType",
+    "risks",
+    "verification",
+  ]);
+  assert.equal(handoff.baseRelativeDiff.value, "final base-relative diff");
+  assert.equal(handoff.verification.results[0]?.status, "passed");
+
+  for (const forbidden of [
+    "candidatePlans",
+    "discoveryReports",
+    "executionGraph",
+    "tasks",
+    "taskSummaries",
+    "branches",
+    "joins",
+    "artifactDir",
+    "retryHistory",
+    "conflictResolutionDiscussions",
+    "plannerAttribution",
+    "solReviewSnapshot",
+  ]) {
+    assert.notDeepEqual(
+      validateFeatureAuditHandoff({ ...handoff, [forbidden]: {} }),
+      [],
+      forbidden,
+    );
+  }
+  assert.notDeepEqual(
+    validateFeatureAuditHandoff({
+      ...handoff,
+      verification: {
+        ...handoff.verification,
+        results: [
+          {
+            ...handoff.verification.results[0],
+            attempts: [{ sessionId: "x" }],
+          },
+        ],
+      },
+    }),
+    [],
+  );
+  assert.notDeepEqual(
+    validateFeatureAuditHandoff({
+      ...handoff,
+      currentGit: { ...handoff.currentGit, commits: ["process commit"] },
+    }),
+    [],
+  );
+});
+
 test("feature controller accepts corrected Sol plans, persists artifacts, executes the graph, and reuses the finalizer for review", async () => {
+  const expectedDiffBase = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: implementationWorkingDir(),
+    encoding: "utf8",
+  }).trim();
   const run = harness({
     malformedFeatureCandidateOnce: true,
     malformedFeatureGraphOnce: true,
@@ -1571,6 +1695,13 @@ test("feature controller accepts corrected Sol plans, persists artifacts, execut
     run.featureReviewSignals[0],
   );
   assert.equal(run.featureExecutionSignals[0]?.aborted, false);
+  assert.deepEqual(run.featureReviewDiffBases, [expectedDiffBase]);
+  assert.deepEqual(run.featureReviewKnownResidualPaths, [
+    ["root-review-residual.log"],
+  ]);
+  assert.deepEqual(snapshot?.featureGraph?.residualPaths, [
+    "child-only-residual.log",
+  ]);
 
   const finalizers = run.sessions.filter(
     (session) => session.spec.role === FEATURE_FINALIZER_ROLE,

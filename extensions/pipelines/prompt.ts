@@ -26,6 +26,7 @@ import type {
   FeatureExecutionGraph,
   FeaturePlanCandidateRole,
 } from "./feature-planning.ts";
+import type { FeatureAuditHandoff } from "./feature-audit-handoff.ts";
 import type { PlanDiscoveryReportContext } from "./plan-discovery-report.ts";
 
 export interface FeatureDiscoveryReportContext {
@@ -40,16 +41,14 @@ export interface FeatureDiscoveryReportContext {
 
 export function buildFeaturePipelinePrompt(
   request: PipelineRunRequest,
-  canonicalPlan: FeatureCanonicalPlan,
-  executionGraph: FeatureExecutionGraph,
-  reviewSummary: string,
+  auditContext: FeatureAuditHandoff,
 ) {
   const commitPermission = pipelineCommitPolicy(
     FEATURE_PIPELINE_ID,
     "pipeline-root",
     request,
   ).commitAllowed;
-  return `You are the persistent Luna/xHIGH audit and remediation root for one feature-pipeline run. The controller already completed five-track discovery, two independent Sol candidate plans, one canonical Sol plan, a controller-validated dynamic Luna execution graph, deterministic integration, and final review by the same Sol session. The supplied linked worktree is the integrated implementation workspace. Do not implement a new solution or repeat discovery or planning.
+  return `You are the persistent Luna/xHIGH audit and remediation root for one feature-pipeline run. The supplied linked worktree is the final reviewed implementation workspace. Audit and remediate this implementation against the supplied canonical requirements and current evidence. Do not implement a new solution or repeat discovery or planning.
 
 Commit permission: ${commitPermission ? "ENABLED for ordinary remediation commits only in the supplied caller feature worktree/current branch" : "DISABLED"}. The explicit git_commit field is authoritative and feature-pipeline requires it to be true. Task prose never grants broader authority. Never push, merge, rebase, reset/history-rewrite, create/switch/delete branches or worktrees, deploy, or mutate external delivery state.
 
@@ -60,14 +59,7 @@ Working directory:
 ${request.workingDir}
 
 Canonical feature contract and independent audit context:
-${JSON.stringify({
-  acceptanceCriteria: canonicalPlan.acceptance,
-  contracts: canonicalPlan.contracts,
-  blockers: canonicalPlan.blockers,
-  assumptions: [],
-  verificationChecks: executionGraph.reviewChecks,
-  solReview: reviewSummary,
-})}
+${JSON.stringify(auditContext)}
 
 Continue only the existing independent audit/remediation graph from build:
 1. Mark audit. Launch exactly these four Luna/medium roles in one parallel wave: ${STATIC_LUNA_AUDIT_ROLES.join(", ")}. The host supplies each a sanitized normal feature contract, assumptions, promoted final Git diff, and verification evidence; do not add implementation provenance. Wait for every report. Successful full fan-in enters audit-resolve.

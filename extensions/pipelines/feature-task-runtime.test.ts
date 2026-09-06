@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -371,6 +372,145 @@ test("final-review snapshots update and supplied cancellation prevents a review 
     assert.ok(snapshots.some(({ status }) => status === "waiting"));
     assert.ok(snapshots.some(({ status }) => status === "running"));
   } finally {
+    repo.cleanup();
+  }
+});
+
+test("large task diffs page to the exact tail and finalize without an output cap", async () => {
+  const repo = fixture("runtime-large-diff-c3d4e5f6");
+  try {
+    const runtime = runtimeFor(repo, passingCheck);
+    runtime.beginAttempt(1);
+    const tail = "PIPI-DIFF-TAIL-SENTINEL";
+    fs.writeFileSync(
+      path.join(repo.workingDir, "selected.txt"),
+      `${"large normal feature content\n".repeat(100_000)}${tail}\n`,
+    );
+    const expected = execFileSync(
+      "git",
+      ["diff", "--no-ext-diff", "--binary", repo.base, "--"],
+      {
+        cwd: repo.workingDir,
+        maxBuffer: 8 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    assert.ok(expected.length > 2 * 1024 * 1024);
+    const expectedFingerprint = createHash("sha256")
+      .update(expected)
+      .digest("hex");
+
+    const pages: string[] = [];
+    let request: { offset?: number; fingerprint?: string } | undefined;
+    let firstFingerprint: string | undefined;
+    while (true) {
+      const result = await runtime.host.diff(request);
+      pages.push(result.diff.text);
+      firstFingerprint ??= result.diff.fingerprint;
+      assert.equal(result.diff.bytes, expected.length);
+      assert.equal(result.diff.fingerprint, expectedFingerprint);
+      if (result.diff.nextOffset === undefined) break;
+      request = {
+        offset: result.diff.nextOffset,
+        fingerprint: result.diff.fingerprint,
+      };
+    }
+    assert.equal(pages.join(""), expected.toString("utf8"));
+    assert.ok(pages.at(-1)?.includes(tail));
+
+    fs.appendFileSync(path.join(repo.workingDir, "selected.txt"), "drift\n");
+    await assert.rejects(
+      runtime.host.diff({ offset: 1, fingerprint: firstFingerprint }),
+      /diff changed/i,
+    );
+    const finalized = await runtime.host.finalize({
+      commitPaths: ["selected.txt"],
+      summary: "Committed the normal large feature after complete inspection.",
+    });
+    assert.equal(finalized.validated, true);
+    assert.equal(finalized.status, "validated");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("final review pages from the feature base while commits remain based on execution HEAD", async () => {
+  const repo = fixture("runtime-review-base-d4e5f6a7");
+  try {
+    fs.writeFileSync(
+      path.join(repo.workingDir, "selected.txt"),
+      "implemented\n",
+    );
+    git(repo.workingDir, ["add", "selected.txt"]);
+    git(repo.workingDir, ["commit", "-qm", "feature implementation"]);
+    const executionHead = git(repo.workingDir, ["rev-parse", "HEAD"]);
+    const review = createFeatureReviewRuntime({
+      runId: "runtime-review-base-d4e5f6a7",
+      workingDir: repo.workingDir,
+      checks: [requiredCheck("review-check")],
+      runCheck: passingCheck,
+      canonicalPlan: canonicalPlan(),
+      graph: executionGraph(),
+      diffBaseCommit: repo.base,
+    });
+    review.begin(executionHead);
+
+    const evidence = await review.host.diff();
+    assert.deepEqual(evidence.baseToHead, ["selected.txt"]);
+    assert.ok(evidence.diff.text.includes("implemented"));
+    fs.writeFileSync(path.join(repo.workingDir, "generated.txt"), "reviewed\n");
+    const finalized = await review.host.finalize({
+      commitPaths: ["generated.txt"],
+      summary: "Reviewed the whole feature and added a bounded correction.",
+    });
+
+    assert.equal(finalized.validated, true);
+    assert.equal(git(repo.workingDir, ["rev-parse", "HEAD^"]), executionHead);
+    assert.equal(git(repo.workingDir, ["rev-parse", "HEAD^^"]), repo.base);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("final review rejects drift from the trusted root residual fingerprint", () => {
+  const repo = fixture("runtime-review-residual-e5f6a7b8");
+  try {
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "committed\n");
+    fs.writeFileSync(path.join(repo.workingDir, "generated.txt"), "retained\n");
+    fs.chmodSync(path.join(repo.workingDir, "generated.txt"), 0o400);
+    fs.chmodSync(repo.workingDir, 0o500);
+    let committed: ReturnType<typeof repo.target.commit>;
+    try {
+      committed = repo.target.commit(
+        repo.base,
+        ["selected.txt"],
+        "record cleanup residual",
+      );
+    } finally {
+      fs.chmodSync(repo.workingDir, 0o700);
+      fs.chmodSync(path.join(repo.workingDir, "generated.txt"), 0o600);
+    }
+    const rootState = repo.lifecycle.branch("root");
+    assert.deepEqual(rootState.trackedResidualPaths, ["generated.txt"]);
+    fs.appendFileSync(
+      path.join(repo.workingDir, "generated.txt"),
+      "same-path drift\n",
+    );
+    const review = createFeatureReviewRuntime({
+      runId: "runtime-review-residual-e5f6a7b8",
+      workingDir: repo.workingDir,
+      checks: [requiredCheck("review-check")],
+      runCheck: passingCheck,
+      knownResidualPaths: rootState.trackedResidualPaths,
+      knownTrackedResiduals: rootState.trackedResiduals,
+    });
+
+    assert.throws(
+      () => review.begin(committed.commit),
+      /recorded cleanup residual changed/i,
+    );
+  } finally {
+    fs.chmodSync(repo.workingDir, 0o700);
     repo.cleanup();
   }
 });
