@@ -1,5 +1,10 @@
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import type {
+  FeatureGraphExecutionSnapshot,
+  FeatureTaskSnapshot,
+} from "./feature-runtime.ts";
+import type { ExecutionTree } from "./feature-graph.ts";
+import type {
   PipelineStageTiming,
   PipelineWallclockState,
 } from "./wallclock.ts";
@@ -37,7 +42,9 @@ export function pipelineThinkingLevel(model: string) {
 
 export const PIPELINE_STAGES = [
   "discover",
+  "plan",
   "build",
+  "review",
   "audit",
   "audit-resolve",
   "final-audit",
@@ -80,6 +87,13 @@ export const FEATURE_PIPELINE_DISCOVERY_ROLES = [
 export type FeaturePipelineDiscoveryRole =
   (typeof FEATURE_PIPELINE_DISCOVERY_ROLES)[number];
 
+export const FEATURE_PLAN_ROLES = [
+  "feature-plan-minimal",
+  "feature-plan-robust",
+] as const;
+export type FeaturePlanRole = (typeof FEATURE_PLAN_ROLES)[number];
+export const FEATURE_FINALIZER_ROLE = "feature-plan-finalizer" as const;
+
 export const FEATURE_OUTCOME_AUDIT_ROLE = "audit-feature-outcome" as const;
 export const FEATURE_LOGIC_AUDIT_ROLE = "audit-logic-invariants" as const;
 export const FEATURE_CORRECTNESS_AUDIT_ROLE =
@@ -106,6 +120,7 @@ export type PipelineLunaAuditRole = (typeof AUDIT_SEGMENT_LUNA_ROLES)[number];
 
 export const FEATURE_PIPELINE_CHILD_ROLES = [
   ...FEATURE_PIPELINE_DISCOVERY_ROLES,
+  ...FEATURE_PLAN_ROLES,
   ...AUDIT_SEGMENT_LUNA_ROLES,
   AUDIT_SYNTHESIS_ROLE,
 ] as const;
@@ -220,10 +235,8 @@ export const PIPELINE_DEFINITIONS: ReadonlyArray<PipelineDefinition> = [
   {
     id: FEATURE_PIPELINE_ID,
     title: "Feature pipeline",
-    rootTitle: "Feature pipeline post-promotion audit and remediation root",
-    // The controller creates this fixed Luna/xHIGH root only after Best-of-3
-    // synthesis is promoted; implementation candidates are controller-owned.
-    rootModel: LUNA_MODEL,
+    rootTitle: "Feature pipeline canonical planner and final reviewer",
+    rootModel: SOL_MODEL,
     childRoles: FEATURE_PIPELINE_CHILD_ROLES,
   },
   {
@@ -375,13 +388,37 @@ export interface PipelineRunSnapshot {
   readonly rootId?: string;
   readonly completion?: PipelineCompletionFacts;
   readonly auditSegment?: import("./audit-segment.ts").AuditSegmentProgress;
+  readonly featureGraph?: FeaturePipelineGraphSnapshot;
   readonly agents: ReadonlyArray<AgentNodeSnapshot>;
+}
+
+export interface FeaturePipelinePlanningSnapshot {
+  readonly candidates: Readonly<{
+    readonly role: FeaturePlanRole;
+    readonly status: "waiting" | "running" | "accepted" | "failed";
+    readonly sessionId?: string;
+  }>[];
+  readonly canonical: "waiting" | "running" | "accepted" | "failed";
+  readonly graph: "waiting" | "running" | "accepted" | "failed";
+  readonly review: "waiting" | "running" | "accepted" | "failed";
+}
+
+export interface FeaturePipelineGraphSnapshot extends FeatureGraphExecutionSnapshot {
+  readonly tree: ExecutionTree;
+  readonly tasks: ReadonlyArray<FeatureTaskSnapshot>;
+  readonly artifactDir: string;
+  readonly canonicalSessionId?: string;
+  readonly planning: FeaturePipelinePlanningSnapshot;
 }
 
 export interface PipelineRunRequest {
   readonly pipelineName: string;
   readonly workingDir: string;
   readonly task: string;
+  /** Required absolute pre-existing parent for feature graph worktrees. */
+  readonly worktreeRoot?: string;
+  /** Required ordered child-worktree preparation commands for feature. */
+  readonly worktreePrepare?: ReadonlyArray<string>;
   readonly pipeline?: PipelineDefinitionId;
   /** Feature requires true; other definitions retain their scoped policy. */
   readonly gitCommit?: boolean;
@@ -434,7 +471,11 @@ export interface PipelineHandoff {
 }
 
 export function modelForRole(role: PipelineChildRole) {
-  return role === FINAL_AUDIT_ROLE ? TERRA_MODEL : LUNA_MODEL;
+  if (role === FINAL_AUDIT_ROLE) return TERRA_MODEL;
+  if (FEATURE_PLAN_ROLES.some((candidate) => candidate === role)) {
+    return SOL_MODEL;
+  }
+  return LUNA_MODEL;
 }
 
 export function titleForRole(role: PipelineChildRole) {

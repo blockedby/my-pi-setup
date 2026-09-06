@@ -39,6 +39,8 @@ import {
   AUDIT_SYNTHESIS_ROLE,
   EXECUTOR_AUDIT_ROLE,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
+  FEATURE_FINALIZER_ROLE,
+  FEATURE_PLAN_ROLES,
   FEATURE_PIPELINE_ID,
   LUNA_MODEL,
   PLAN_PIPELINE_DISCOVERY_ROLES,
@@ -51,16 +53,19 @@ import {
   type PipelineDefinitionId,
   type PipelineLunaAuditRole,
 } from "./domain.ts";
+import {
+  FEATURE_CANDIDATE_PLAN_SUBMISSION,
+  FEATURE_CANONICAL_PLAN_SUBMISSION,
+  FEATURE_EXECUTION_GRAPH_SUBMISSION,
+} from "./feature-planning.ts";
+import type { FeatureTaskToolHost } from "./feature-runtime.ts";
 import { featureDiscoveryReportSchema } from "./discovery-report.ts";
 import { planDiscoveryReportSchema } from "./plan-discovery-report.ts";
 import {
-  FEATURE_CANDIDATE_ROLES,
   FEATURE_DISCOVERY_SYNTHESIS_ROLE,
   FEATURE_DISCOVERY_SYNTHESIS_SCHEMA,
-  FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
 } from "./feature-best-of-three.ts";
 import { createFeatureToolBoundary } from "./feature-sandbox.ts";
-import type { FeatureCommitResult } from "./feature-worktrees.ts";
 import type {
   AgentNodeSpec,
   AgentTreeSessionEvent,
@@ -102,12 +107,11 @@ interface PipelineSessionFactoryOptions {
     token: string,
   ) => void;
   readonly discoveryToolAllowed?: (runId: string, role: string) => boolean;
-  readonly featureCommit?: (
+  /** Phase-bound host authority for dynamic feature tasks and final Sol review. */
+  readonly featureTaskHost?: (
     runId: string,
     role: string,
-    workingDir: string,
-    paths: ReadonlyArray<string>,
-  ) => FeatureCommitResult;
+  ) => FeatureTaskToolHost | undefined;
   /** Controller-owned, session-bound cooperative partial settlement. */
   readonly executionFinish?: (
     runId: string,
@@ -299,6 +303,83 @@ export function createPipelineDiscoverySynthesisSubmitTool(
   });
 }
 
+function createFeatureArtifactSubmitTool(
+  contract:
+    | typeof FEATURE_CANDIDATE_PLAN_SUBMISSION
+    | typeof FEATURE_CANONICAL_PLAN_SUBMISSION
+    | typeof FEATURE_EXECUTION_GRAPH_SUBMISSION,
+  submit: (value: unknown) => void,
+) {
+  return createTerminatingSubmissionTool({
+    name: contract.name,
+    label: "Submit Feature Planning Artifact",
+    description: contract.description,
+    parameters: contract.parameters,
+    acceptedText: "Feature planning artifact recorded. Stop this turn.",
+    submit,
+  });
+}
+
+export function createFeatureTaskHostTools(host: FeatureTaskToolHost) {
+  return [
+    defineTool({
+      name: "pipeline_task_diff",
+      label: "Inspect Feature Task Diff",
+      description:
+        "Inspect the controller-bounded current task or final-review diff and Git state.",
+      parameters: Type.Object({}, { additionalProperties: false }),
+      async execute() {
+        const details = await host.diff();
+        return {
+          content: [{ type: "text", text: safeJson(details) }],
+          details,
+        };
+      },
+    }),
+    defineTool({
+      name: "pipeline_task_check",
+      label: "Run Feature Task Check",
+      description:
+        "Run one declared check by its exact ID in the controller-selected worktree and validated relative cwd.",
+      parameters: Type.Object(
+        { checkId: Type.String({ minLength: 1, maxLength: 256 }) },
+        { additionalProperties: false },
+      ),
+      async execute(_toolCallId, params) {
+        const details = await host.check({ checkId: params.checkId });
+        return {
+          content: [{ type: "text", text: safeJson(details) }],
+          details,
+        };
+      },
+    }),
+    defineTool({
+      name: "pipeline_task_finalize",
+      label: "Finalize Feature Task",
+      description:
+        "Ask the controller to create or amend this task's one logical commit, run all required checks, and validate either the commit or an explicit no-change result.",
+      parameters: Type.Object(
+        {
+          commitPaths: Type.Array(
+            Type.String({ minLength: 1, maxLength: 4 * 1024 }),
+            { maxItems: 512 },
+          ),
+          summary: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
+        },
+        { additionalProperties: false },
+      ),
+      async execute(_toolCallId, params) {
+        const details = await host.finalize(params);
+        return {
+          content: [{ type: "text", text: safeJson(details) }],
+          details,
+          terminate: details.validated,
+        };
+      },
+    }),
+  ];
+}
+
 export const PIPELINE_EXECUTION_FINISH_PARAMETERS = Type.Object(
   {
     summary: Type.Optional(Type.String({ minLength: 1, maxLength: 8 * 1024 })),
@@ -344,14 +425,18 @@ export function pipelineSessionToolPolicy(
   isRoot: boolean,
   role: string,
 ) {
-  if (role === FEATURE_DISCOVERY_SYNTHESIS_ROLE) {
-    return readOnlyPipelineChildToolPolicy();
+  if (
+    FEATURE_PLAN_ROLES.some((candidate) => candidate === role) ||
+    role === FEATURE_FINALIZER_ROLE
+  ) {
+    // Active tool selection and the read-only sandbox phase remove mutation;
+    // this policy keeps the sandboxed bash tool available for repository reads.
+    return featureIsolatedImplementerToolPolicy();
   }
   if (
-    FEATURE_CANDIDATE_ROLES.some(
-      (candidateRole) => `candidate-${candidateRole.toLowerCase()}` === role,
-    ) ||
-    role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE
+    role.startsWith("feature-task-") ||
+    role.startsWith("feature-conflict-") ||
+    role.startsWith("feature-join-repair-")
   ) {
     return featureIsolatedImplementerToolPolicy();
   }
@@ -512,15 +597,23 @@ export function createPipelineSessionFactory(
       });
       const isRoot = !spec.parentId;
       const definition = options.definitionForRun(spec.scopeId ?? "");
-      const candidateRole = FEATURE_CANDIDATE_ROLES.find(
-        (role) => `candidate-${role.toLowerCase()}` === spec.role,
+      const featurePlanRole = FEATURE_PLAN_ROLES.find(
+        (role) => role === spec.role,
+      );
+      const isFeatureFinalizer = spec.role === FEATURE_FINALIZER_ROLE;
+      const featureTaskHost = options.featureTaskHost?.(
+        spec.scopeId ?? "",
+        spec.role,
       );
       const featureBoundary =
         definition === FEATURE_PIPELINE_ID &&
-        (candidateRole || spec.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE)
+        (featurePlanRole || isFeatureFinalizer || featureTaskHost)
           ? createFeatureToolBoundary({
               cwd: spec.cwd,
-              mode: candidateRole ? "candidate" : "selection",
+              mode:
+                isFeatureFinalizer || featurePlanRole
+                  ? "selection"
+                  : "candidate",
             })
           : undefined;
       const submissionRole = auditSubmissionRole(spec.role);
@@ -528,19 +621,19 @@ export function createPipelineSessionFactory(
         (candidate) => candidate === spec.role,
       );
       const planRole = planDiscoveryRole(spec.role);
-      const isDiscoverySynthesis =
-        spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE;
       const isPlanSynthesis =
         definition === PLAN_PIPELINE_ID &&
         isRoot &&
         spec.role === PLAN_PIPELINE_SYNTHESIS_ROLE;
       const discoveryToolAllowed =
         (definition === FEATURE_PIPELINE_ID &&
-          (discoveryRole || isDiscoverySynthesis)) ||
+          (discoveryRole || featurePlanRole || isFeatureFinalizer)) ||
         (definition === PLAN_PIPELINE_ID && (planRole || isPlanSynthesis))
           ? Boolean(
               options.discoverySubmit &&
-              options.discoveryToolAllowed?.(spec.scopeId ?? "", spec.role),
+              (featurePlanRole ||
+                isFeatureFinalizer ||
+                options.discoveryToolAllowed?.(spec.scopeId ?? "", spec.role)),
             )
           : false;
       const discoverySessionToken = discoveryToolAllowed
@@ -573,11 +666,33 @@ export function createPipelineSessionFactory(
                 planRole,
                 submitDiscoveryValue,
               )
-            : submitDiscoveryValue && isDiscoverySynthesis
-              ? createPipelineDiscoverySynthesisSubmitTool(submitDiscoveryValue)
-              : submitDiscoveryValue && isPlanSynthesis
-                ? createPipelinePlanSubmitTool(submitDiscoveryValue)
-                : undefined;
+            : submitDiscoveryValue && isPlanSynthesis
+              ? createPipelinePlanSubmitTool(submitDiscoveryValue)
+              : undefined;
+      const featureArtifactTools = submitDiscoveryValue
+        ? [
+            ...(featurePlanRole
+              ? [
+                  createFeatureArtifactSubmitTool(
+                    FEATURE_CANDIDATE_PLAN_SUBMISSION,
+                    submitDiscoveryValue,
+                  ),
+                ]
+              : []),
+            ...(isFeatureFinalizer
+              ? [
+                  createFeatureArtifactSubmitTool(
+                    FEATURE_CANONICAL_PLAN_SUBMISSION,
+                    submitDiscoveryValue,
+                  ),
+                  createFeatureArtifactSubmitTool(
+                    FEATURE_EXECUTION_GRAPH_SUBMISSION,
+                    submitDiscoveryValue,
+                  ),
+                ]
+              : []),
+          ]
+        : [];
       const auditToolAllowed =
         submissionRole &&
         options.auditSubmit &&
@@ -627,52 +742,43 @@ export function createPipelineSessionFactory(
         definition !== AUDIT_PIPELINE_ID
           ? options.rootTools(spec.scopeId ?? "")
           : undefined;
-      const featureCommitTool = featureBoundary
-        ? defineTool({
-            name: "pipeline_feature_commit",
-            label: "Commit Feature Candidate State",
-            description:
-              "Ask the feature-pipeline controller to create an ordinary commit from exactly the explicit repository-relative paths in paths. It supports additions, modifications, and deletions, returns the immutable HEAD and canonical Git paths, and never stages all current changes. Tracked or staged leftovers fail finalization; only bounded untracked leftovers in a controller-owned candidate or synthesis worktree may be discarded before validation. The controller validates ownership; agents cannot perform branch/worktree/history operations directly.",
-            parameters: Type.Object(
-              {
-                paths: Type.Array(Type.String({ maxLength: 4 * 1024 }), {
-                  maxItems: 256,
-                }),
-              },
-              { additionalProperties: false },
-            ),
-            async execute(_toolCallId, params) {
-              const result = options.featureCommit?.(
-                spec.scopeId ?? "",
-                spec.role,
-                spec.cwd,
-                params.paths,
-              );
-              if (!result) {
-                throw new Error(
-                  "Controller feature commit authority is unavailable.",
-                );
-              }
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: `Controller committed the explicit paths at immutable HEAD ${result.head}. Canonical Git paths: ${result.changedPaths.join(", ") || "none"}.`,
-                  },
-                ],
-                details: result,
-              };
-            },
-          })
-        : undefined;
+      const featureTaskTools = featureTaskHost
+        ? createFeatureTaskHostTools(featureTaskHost)
+        : [];
       const sessionTools = [
         ...(customTools ?? []),
         ...(featureBoundary?.tools ?? []),
-        ...(featureCommitTool ? [featureCommitTool] : []),
         ...(discoveryTool ? [discoveryTool] : []),
+        ...featureArtifactTools,
+        ...featureTaskTools,
         ...(auditTool ? [auditTool] : []),
         ...(executionFinishTool ? [executionFinishTool] : []),
       ];
+      const featureActiveTools = isFeatureFinalizer
+        ? [
+            "read",
+            "bash",
+            FEATURE_CANONICAL_PLAN_SUBMISSION.name,
+            FEATURE_EXECUTION_GRAPH_SUBMISSION.name,
+            ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
+          ]
+        : featurePlanRole
+          ? [
+              "read",
+              "bash",
+              FEATURE_CANDIDATE_PLAN_SUBMISSION.name,
+              ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
+            ]
+          : featureTaskHost
+            ? [
+                "read",
+                "bash",
+                "edit",
+                "write",
+                ...featureTaskTools.map(({ name }) => name),
+                ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
+              ]
+            : undefined;
       const planReadTools =
         definition === PLAN_PIPELINE_ID && !isRoot
           ? spec.role === "discover-requirements-boundaries"
@@ -721,10 +827,10 @@ export function createPipelineSessionFactory(
         ...(sessionTools.length > 0 ? { customTools: sessionTools } : {}),
         ...(featureBoundary
           ? {
-              tools: [
-                ...featureBoundary.availableToolNames,
-                ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
-              ],
+              // Register every phase-bound definition when the persistent
+              // session is created. The active set below remains the
+              // privilege boundary until enableMutation runs.
+              tools: [...new Set(sessionTools.map(({ name }) => name))],
             }
           : planReadTools
             ? { tools: planReadTools }
@@ -735,10 +841,12 @@ export function createPipelineSessionFactory(
         options.sessionCreated?.(session);
         await bindChildSessionExtensions(session);
         if (featureBoundary) {
-          session.setActiveToolsByName([
-            ...featureBoundary.initialActiveTools,
-            ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
-          ]);
+          session.setActiveToolsByName(
+            featureActiveTools ?? [
+              ...featureBoundary.initialActiveTools,
+              ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
+            ],
+          );
         }
       } catch (error) {
         await shutdownAndDisposeChildSession(session);
@@ -777,14 +885,14 @@ export function createPipelineSessionFactory(
             : session.prompt(text);
         },
         enableMutation() {
-          if (!featureBoundary) return;
+          if (!featureBoundary || !isFeatureFinalizer) return;
           featureBoundary.enableAugmentation();
           session.setActiveToolsByName([
             "read",
             "bash",
             "edit",
             "write",
-            "pipeline_feature_commit",
+            ...featureTaskTools.map(({ name }) => name),
             ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
           ]);
         },

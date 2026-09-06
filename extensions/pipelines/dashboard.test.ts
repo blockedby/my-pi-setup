@@ -16,10 +16,7 @@ import {
   type PipelineRunSnapshot,
 } from "./domain.ts";
 import { handoffText } from "./index.ts";
-import {
-  FEATURE_CANDIDATE_ROLES,
-  FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
-} from "./feature-best-of-three.ts";
+import { FEATURE_PLAN_ROLES, FEATURE_FINALIZER_ROLE } from "./domain.ts";
 
 function agent(
   id: string,
@@ -289,103 +286,64 @@ test("plan pipeline renders six discovery agents and xhigh synthesis under its t
   );
 });
 
-test("feature Best-of-3 candidates and implementation synthesis render in separate dashboard stages", () => {
+test("feature planning and review stages expose Sol sessions", () => {
   const root = agent("root-1", {
-    role: "discover-synthesis",
-    model: "openai-codex/gpt-5.6-luna",
+    role: FEATURE_FINALIZER_ROLE,
+    thinkingLevel: "xhigh",
   });
-  const candidates = FEATURE_CANDIDATE_ROLES.map((role, index) =>
-    agent(`candidate-${index + 1}`, {
+  const candidates = FEATURE_PLAN_ROLES.map((role, index) =>
+    agent(`plan-${index}`, {
       parentId: root.id,
-      role: `candidate-${role.toLowerCase()}`,
-      title: `${role} candidate`,
-      model: "openai-codex/gpt-5.6-luna",
-      thinkingLevel: "high",
+      role,
+      thinkingLevel: "medium",
       createdAt: index + 2,
     }),
   );
-  const synthesis = agent("implementation-synthesis", {
-    parentId: root.id,
-    role: FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
-    model: "openai-codex/gpt-5.6-luna",
-    thinkingLevel: "xhigh",
-    createdAt: 10,
-  });
   const run = {
-    ...pipelineRun("run-1", [root, ...candidates, synthesis]),
-    stage: "build" as const,
+    ...pipelineRun("run-1", [root, ...candidates]),
+    stage: "plan" as const,
   };
   const rows = buildPipelineRows([run], new Set([run.id]));
-  const buildAgents = rows.filter(
-    (row): row is Extract<PipelineRow, { kind: "agent" }> =>
-      row.kind === "agent" && row.key.includes(":build:"),
-  );
-  const synthesisStage = rows.find(
-    (row): row is Extract<PipelineRow, { kind: "stage" }> =>
-      row.kind === "stage" && row.stage === "synthesis",
-  );
-  const synthesisRow = rows.find(
-    (row): row is Extract<PipelineRow, { kind: "agent" }> =>
-      row.kind === "agent" && row.agentId === synthesis.id,
-  );
-
   assert.deepEqual(
-    buildAgents.map((row) => row.role),
-    FEATURE_CANDIDATE_ROLES.map((role) => `candidate-${role.toLowerCase()}`),
-  );
-  assert.equal(
-    buildAgents.every((row) => row.label.includes(" · high · running")),
-    true,
-  );
-  assert.ok(synthesisStage);
-  assert.equal(synthesisStage.label, "synthesis · running");
-  assert.equal(synthesisStage.agentId, synthesis.id);
-  assert.ok(synthesisRow);
-  assert.match(synthesisRow.key, /:synthesis:/);
-  assert.match(synthesisRow.label, / · xhigh · running$/);
-  const finalAuditIndex = rows.findIndex(
-    (row) => row.kind === "stage" && row.stage === "final-audit",
-  );
-  const finalResolveIndex = rows.findIndex(
-    (row) => row.kind === "stage" && row.stage === "final-resolve",
-  );
-  assert.equal(
     rows
-      .slice(finalAuditIndex + 1, finalResolveIndex)
-      .some((row) => row.kind === "agent" && row.role.startsWith("candidate-")),
-    false,
-  );
-});
-
-test("feature dashboard reserves a pending synthesis stage before its agent starts", () => {
-  const root = agent("root-1", { role: "discover-synthesis" });
-  const candidate = agent("candidate-1", {
-    parentId: root.id,
-    role: "candidate-minimal",
-    thinkingLevel: "high",
-  });
-  const run = {
-    ...pipelineRun("run-1", [root, candidate]),
-    stage: "build" as const,
-  };
-  const rows = buildPipelineRows([run], new Set([run.id]));
-  const stages = rows.filter(
-    (row): row is Extract<PipelineRow, { kind: "stage" }> =>
-      row.kind === "stage",
-  );
-
-  assert.deepEqual(
-    stages.slice(0, 4).map((row) => [row.stage, row.status]),
+      .filter((row) => row.kind === "stage")
+      .slice(0, 5)
+      .map((row) => [row.stage, row.status]),
     [
       ["discover", "done"],
-      ["build", "running"],
-      ["synthesis", "pending"],
+      ["plan", "running"],
+      ["build", "pending"],
+      ["review", "pending"],
       ["audit", "pending"],
     ],
   );
-  assert.equal(
-    stages.find((row) => row.stage === "synthesis")?.agentId,
-    undefined,
+  assert.deepEqual(
+    rows.flatMap((row) =>
+      row.kind === "agent" && row.key.includes(":plan:") ? [row.role] : [],
+    ),
+    FEATURE_PLAN_ROLES,
+  );
+});
+
+test("feature dashboard reserves review until graph execution completes", () => {
+  const run = {
+    ...pipelineRun("run-1", [
+      agent("root-1", { role: FEATURE_FINALIZER_ROLE }),
+    ]),
+    stage: "build" as const,
+  };
+  const stages = buildPipelineRows([run], new Set([run.id])).filter(
+    (row) => row.kind === "stage",
+  );
+  assert.deepEqual(
+    stages.slice(0, 5).map((row) => [row.stage, row.status]),
+    [
+      ["discover", "done"],
+      ["plan", "done"],
+      ["build", "running"],
+      ["review", "pending"],
+      ["audit", "pending"],
+    ],
   );
 });
 

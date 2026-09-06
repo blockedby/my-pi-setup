@@ -71,7 +71,6 @@ export function timedPipelineStage(
   if (definition === "feature-pipeline") {
     return (
       stage === "discover" ||
-      stage === "build" ||
       stage === "audit" ||
       stage === "audit-resolve" ||
       stage === "final-audit" ||

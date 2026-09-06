@@ -8,6 +8,7 @@ import {
   SMALL_FEATURE_PIPELINE_ID,
   pipelineCommitAuthorityRole,
   type FeaturePipelineDiscoveryRole,
+  type FeaturePlanRole,
   type PipelineChildRole,
   type PipelineCommitRole,
   type PlanPipelineDiscoveryRole,
@@ -19,7 +20,12 @@ import {
   FEATURE_DISCOVERY_REPORT_MAX_BYTES,
   type FeatureDiscoveryReportV2,
 } from "./discovery-report.ts";
-import type { FeatureDiscoverySynthesis } from "./feature-best-of-three.ts";
+import type {
+  FeatureCandidatePlan,
+  FeatureCanonicalPlan,
+  FeatureExecutionGraph,
+  FeaturePlanCandidateRole,
+} from "./feature-planning.ts";
 import type { PlanDiscoveryReportContext } from "./plan-discovery-report.ts";
 
 export interface FeatureDiscoveryReportContext {
@@ -34,15 +40,16 @@ export interface FeatureDiscoveryReportContext {
 
 export function buildFeaturePipelinePrompt(
   request: PipelineRunRequest,
-  discoverySynthesis: FeatureDiscoverySynthesis,
-  synthesisChecks: ReadonlyArray<string>,
+  canonicalPlan: FeatureCanonicalPlan,
+  executionGraph: FeatureExecutionGraph,
+  reviewSummary: string,
 ) {
   const commitPermission = pipelineCommitPolicy(
     FEATURE_PIPELINE_ID,
     "pipeline-root",
     request,
   ).commitAllowed;
-  return `You are the persistent Luna/xHIGH post-promotion audit and remediation root for one feature-pipeline run. The controller already completed full discovery, three isolated committed implementation candidates, read-only selection, primary-based bounded synthesis, verification, exact promotion, and temporary-worktree cleanup. The supplied dedicated clean attached linked worktree passed host preflight and is now the sole final implementation workspace. Do not implement a new solution or repeat discovery.
+  return `You are the persistent Luna/xHIGH audit and remediation root for one feature-pipeline run. The controller already completed five-track discovery, two independent Sol candidate plans, one canonical Sol plan, a controller-validated dynamic Luna execution graph, deterministic integration, and final review by the same Sol session. The supplied linked worktree is the integrated implementation workspace. Do not implement a new solution or repeat discovery or planning.
 
 Commit permission: ${commitPermission ? "ENABLED for ordinary remediation commits only in the supplied caller feature worktree/current branch" : "DISABLED"}. The explicit git_commit field is authoritative and feature-pipeline requires it to be true. Task prose never grants broader authority. Never push, merge, rebase, reset/history-rewrite, create/switch/delete branches or worktrees, deploy, or mutate external delivery state.
 
@@ -52,18 +59,14 @@ ${request.task}
 Working directory:
 ${request.workingDir}
 
-Feature contract and independent audit context (contains no candidate roles, winner identity, selection rationale, borrowed ideas, candidate commits, or other Best-of-3 provenance):
+Canonical feature contract and independent audit context:
 ${JSON.stringify({
-  featureContract: discoverySynthesis.featureContract,
-  acceptanceCriteria: discoverySynthesis.acceptanceCriteria,
-  constraints: discoverySynthesis.constraints,
-  nonGoals: discoverySynthesis.nonGoals,
-  contractsInvariants: discoverySynthesis.contractsInvariants,
-  risks: discoverySynthesis.risks,
-  unknowns: discoverySynthesis.unknowns,
-  assumptions: discoverySynthesis.assumptions,
-  verificationExpectations: discoverySynthesis.verificationExpectations,
-  synthesisChecks,
+  acceptanceCriteria: canonicalPlan.acceptance,
+  contracts: canonicalPlan.contracts,
+  blockers: canonicalPlan.blockers,
+  assumptions: [],
+  verificationChecks: executionGraph.reviewChecks,
+  solReview: reviewSummary,
 })}
 
 Continue only the existing independent audit/remediation graph from build:
@@ -73,7 +76,100 @@ Continue only the existing independent audit/remediation graph from build:
 4. Evaluate and resolve every concrete finding in that delivered synthesized final report yourself. Fix it or reject it with specific evidence and rerun appropriate checks. In pipeline_complete.final_finding_resolutions, include exactly one structured record per delivered finding ID with disposition fixed or rejected, non-empty resolution evidence, and non-empty verification evidence. Do not run another audit afterward and do not complete until the report has been delivered and every ID is resolved.
 5. Mark complete and call pipeline_complete with factual structured facts only, including every material assumption.
 
-If a pre-final Luna audit child fails, retry that same session at most once, or one replacement only when no session was created. The controller-owned final audit segment is fail-closed. Do not delegate implementation. Completion has no readiness label. Keep Best-of-3 provenance out of all audit prompts and report only final workspace facts.`;
+If a pre-final Luna audit child fails, retry that same session at most once, or one replacement only when no session was created. The controller-owned final audit segment is fail-closed. Do not delegate implementation. Completion has no readiness label. Report only final workspace facts.`;
+}
+
+export function buildFeatureCandidatePlanPrompt(
+  role: FeaturePlanRole,
+  request: PipelineRunRequest,
+  baseSha: string,
+  reports: ReadonlyArray<FeatureDiscoveryReportContext>,
+) {
+  const objective =
+    role === "feature-plan-minimal"
+      ? "Produce the smallest complete repository-native plan that meets every current requirement without trading away correctness."
+      : "Produce a correctness-first plan centered on invariants, failure and recovery behavior, regression resistance, tests, and evidence-backed maintainability.";
+  const reportRole: FeaturePlanCandidateRole =
+    role === "feature-plan-minimal" ? "Minimal" : "Robust";
+  return `You are the independent Sol/medium ${reportRole} candidate planner. ${objective}
+
+Original task:
+${request.task}
+
+Working directory:
+${request.workingDir}
+
+Identical captured base commit for both independent plans:
+${baseSha}
+
+Five controller-validated discovery reports:
+${JSON.stringify(reports)}
+
+Inspect the repository read-only when useful. Produce a complete standalone implementation proposal, with observable acceptance criteria, concrete evidence, explicit unknowns, and no task DAG. Do not edit files, perform Git operations, delegate, or communicate with other planners. Submit exactly one ${reportRole} feature-plan-candidate-v1 object through pipeline_feature_plan_candidate_submit and stop. If rejected, correct the exact reported contract errors in this same session.`;
+}
+
+export function buildFeatureCanonicalPlanPrompt(
+  request: PipelineRunRequest,
+  reports: ReadonlyArray<FeatureDiscoveryReportContext>,
+  candidates: ReadonlyArray<FeatureCandidatePlan>,
+) {
+  return `You are the persistent Sol/xhigh canonical planner for this feature. Synthesize the authoritative implementation plan from the original task, five validated discovery reports, and two independent candidate plans. You may combine their best decisions, but do not expand scope for hypothetical future needs.
+
+Original task:
+${request.task}
+
+Working directory:
+${request.workingDir}
+
+Validated discovery reports:
+${JSON.stringify(reports)}
+
+Validated candidate plans:
+${JSON.stringify(candidates)}
+
+Remain read-only. Submit exactly one complete feature-canonical-plan-v1 object through pipeline_feature_canonical_plan_submit and stop. Blockers must be empty. If rejected, correct the exact reported contract errors in this same session.`;
+}
+
+export function buildFeatureExecutionGraphPrompt(
+  canonicalPlan: FeatureCanonicalPlan,
+) {
+  return `Compile the accepted immutable canonical plan below into a small-task series-parallel execution graph for fresh Luna/high implementers. Preserve the plan; do not reopen architecture selection.
+
+Accepted canonical plan:
+${JSON.stringify(canonicalPlan)}
+
+Every task must be one coherent, independently verifiable commit and contain enough goal, repository context, conventions, precedents, invariants, exact instructions, implementation sketch, done conditions, and checks for a weak implementation agent. Intermediate commits must remain compatible with baseline checks. Do not create artificial fork or join tasks. Remain read-only. Submit exactly one feature-execution-graph-v1 object through pipeline_feature_execution_graph_submit and stop. If rejected, correct the exact graph validation errors in this same session.`;
+}
+
+export function buildFeatureFinalReviewPrompt(options: {
+  readonly request: PipelineRunRequest;
+  readonly canonicalPlan: FeatureCanonicalPlan;
+  readonly graph: FeatureExecutionGraph;
+  readonly executionSummary: string;
+  readonly gitEvidence: string;
+  readonly artifactDir: string;
+}) {
+  return `The controller completed the validated execution graph. You are the same persistent Sol/xhigh session that authored the canonical plan and graph, and now have controller-scoped write access only in the integrated working directory.
+
+Original task:
+${options.request.task}
+
+Canonical plan:
+${JSON.stringify(options.canonicalPlan)}
+
+Accepted execution graph:
+${JSON.stringify(options.graph)}
+
+Controller-recorded bounded task, branch, join, check, commit, cleanup, and residual-path summary:
+${options.executionSummary}
+
+Full diagnostic artifacts (read-only reference outside the repository):
+${options.artifactDir}
+
+Controller-captured base-relative Git evidence, including the final diff:
+${options.gitEvidence}
+
+Compare the complete implementation with the canonical acceptance criteria, inspect the current code, and run declared review checks through pipeline_task_check. Repair missing behavior or weak integration directly. Use pipeline_task_diff to inspect controller-bounded state and pipeline_task_finalize to finish. With no required changes, finalize with commitPaths: [] and a detailed summary. With changes, name exact safe repository-relative commitPaths; the controller creates or amends the single review commit. Do not run Git mutation commands, create another task graph, delegate, or broaden the accepted scope.`;
 }
 
 export function pipelineCommitPolicy(
@@ -140,19 +236,10 @@ Produce one useful, free-form Markdown implementation plan from the task and evi
 export function buildPipelinePrompt(
   definition: PipelineDefinitionId,
   request: PipelineRunRequest,
-  discoverySynthesis?:
-    FeatureDiscoverySynthesis | ReadonlyArray<PlanDiscoveryReportContext>,
-  synthesisChecks: ReadonlyArray<string> = [],
+  discoveryReports?: ReadonlyArray<PlanDiscoveryReportContext>,
 ) {
   if (definition === FEATURE_PIPELINE_ID) {
-    if (!discoverySynthesis || Array.isArray(discoverySynthesis)) {
-      return "The feature-pipeline post-promotion root is created only after validated Best-of-3 synthesis and exact promotion.";
-    }
-    return buildFeaturePipelinePrompt(
-      request,
-      discoverySynthesis as FeatureDiscoverySynthesis,
-      synthesisChecks,
-    );
+    return "The feature-pipeline session graph is activated by its controller-owned discovery, Sol planning, dynamic Luna build, Sol review, and audit transitions.";
   }
   if (definition === SMALL_FEATURE_PIPELINE_ID) {
     return buildSmallFeaturePipelinePrompt(request);
@@ -160,10 +247,7 @@ export function buildPipelinePrompt(
   if (definition === AUDIT_PIPELINE_ID) {
     return "The audit-pipeline root is activated only by the controller's incremental audit reducer.";
   }
-  return buildPlanPipelinePrompt(
-    request,
-    Array.isArray(discoverySynthesis) ? discoverySynthesis : [],
-  );
+  return buildPlanPipelinePrompt(request, discoveryReports ?? []);
 }
 
 const GITHUB_CONTEXT_DISCOVERY_INSTRUCTION =

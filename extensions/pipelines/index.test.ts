@@ -67,6 +67,8 @@ test("pipeline_run requires a strict human-readable pipeline name", () => {
     Check(PIPELINE_RUN_PARAMETERS, {
       pipeline_name: "build-approved-feature",
       task: "Build a feature",
+      worktree_root: "/repo/worktrees",
+      worktree_prepare: [],
     }),
     true,
   );
@@ -77,6 +79,8 @@ test("pipeline_run requires a strict human-readable pipeline name", () => {
         pipeline: "feature-pipeline",
         task: "Implement a feature",
         working_dir: "/repo/current-branch",
+        worktree_root: "/repo/worktrees",
+        worktree_prepare: ["bun run install:dependencies"],
         git_commit,
       }),
       true,
@@ -180,7 +184,12 @@ test("pipeline names enforce exact word, casing, separator, and length boundarie
     maxName,
   ]) {
     assert.equal(
-      Check(PIPELINE_RUN_PARAMETERS, { pipeline_name, task: "Task" }),
+      Check(PIPELINE_RUN_PARAMETERS, {
+        pipeline_name,
+        task: "Task",
+        worktree_root: "/repo/worktrees",
+        worktree_prepare: [],
+      }),
       true,
     );
     assert.doesNotThrow(() => assertPipelineName(pipeline_name));
@@ -198,7 +207,12 @@ test("pipeline names enforce exact word, casing, separator, and length boundarie
     `${maxName}x`,
   ]) {
     assert.equal(
-      Check(PIPELINE_RUN_PARAMETERS, { pipeline_name, task: "Task" }),
+      Check(PIPELINE_RUN_PARAMETERS, {
+        pipeline_name,
+        task: "Task",
+        worktree_root: "/repo/worktrees",
+        worktree_prepare: [],
+      }),
       false,
     );
     assert.throws(() => assertPipelineName(pipeline_name));
@@ -297,4 +311,83 @@ test("pipeline_run defaults to the current directory and resolves explicit works
     resolvePipelineWorkingDir("/repo", ".worktrees/feature"),
     "/repo/.worktrees/feature",
   );
+});
+
+test("feature and default launches require explicit child-worktree preparation inputs", () => {
+  for (const definition of [{}, { pipeline: "feature-pipeline" }]) {
+    const request = {
+      ...definition,
+      pipeline_name: "build-dynamic-feature",
+      task: "Implement the feature",
+      working_dir: "/repo/feature",
+      git_commit: true,
+    };
+    assert.equal(Check(PIPELINE_RUN_PARAMETERS, request), false);
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, {
+        ...request,
+        worktree_root: "/repo/worktrees",
+      }),
+      false,
+    );
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, { ...request, worktree_prepare: [] }),
+      false,
+    );
+    for (const worktree_prepare of [
+      [],
+      ["bun run install:dependencies", "bun run check"],
+    ]) {
+      assert.equal(
+        Check(PIPELINE_RUN_PARAMETERS, {
+          ...request,
+          worktree_root: "/repo/worktrees",
+          worktree_prepare,
+        }),
+        true,
+      );
+    }
+    for (const worktree_prepare of [
+      null,
+      "bun install",
+      [""],
+      Array.from({ length: 65 }, () => "true"),
+    ]) {
+      assert.equal(
+        Check(PIPELINE_RUN_PARAMETERS, {
+          ...request,
+          worktree_root: "/repo/worktrees",
+          worktree_prepare,
+        }),
+        false,
+      );
+    }
+  }
+});
+
+test("neighboring definitions reject feature-only preparation fields", () => {
+  for (const pipeline of [
+    "small-feature-pipeline",
+    "plan-pipeline",
+    "audit-pipeline",
+  ]) {
+    const request = {
+      pipeline,
+      pipeline_name: "run-neighboring-pipeline",
+      task: "Perform the requested operation",
+      ...(pipeline === "plan-pipeline" ? { plan_path: null } : {}),
+    };
+    assert.equal(Check(PIPELINE_RUN_PARAMETERS, request), true);
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, {
+        ...request,
+        worktree_root: "/repo/worktrees",
+      }),
+      false,
+    );
+    assert.equal(
+      Check(PIPELINE_RUN_PARAMETERS, { ...request, worktree_prepare: [] }),
+      false,
+    );
+  }
 });

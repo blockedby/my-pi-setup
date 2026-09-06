@@ -1,0 +1,905 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import test from "node:test";
+import type { ExecutionTree } from "./feature-graph.ts";
+import { executeFeatureGraph } from "./feature-graph-executor.ts";
+import type {
+  FeatureCanonicalPlan,
+  FeatureExecutionCheck,
+  FeatureExecutionGraph,
+  FeatureExecutionTask,
+} from "./feature-planning.ts";
+
+function git(cwd: string, args: ReadonlyArray<string>) {
+  return execFileSync("git", [...args], {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+function fixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-graph-executor-"));
+  const primary = path.join(root, "primary");
+  const workingDir = path.join(root, "caller");
+  const worktreeRoot = path.join(root, "worktrees");
+  const runId = "dynamic-graph-1234abcd";
+  fs.mkdirSync(primary);
+  fs.mkdirSync(worktreeRoot);
+  fs.mkdirSync(path.join(worktreeRoot, runId));
+  git(primary, ["init", "-q"]);
+  git(primary, ["config", "user.email", "test@example.com"]);
+  git(primary, ["config", "user.name", "Pipi Test"]);
+  fs.writeFileSync(path.join(primary, "shared.txt"), "base\n");
+  git(primary, ["add", "."]);
+  git(primary, ["commit", "-qm", "baseline"]);
+  git(primary, ["worktree", "add", "-qb", "feature/test", workingDir, "HEAD"]);
+  return {
+    root,
+    primary,
+    workingDir,
+    worktreeRoot,
+    runId,
+    cleanup() {
+      fs.rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+const baselineCheck = {
+  id: "baseline",
+  command: "verify baseline",
+  cwd: ".",
+  purpose: "The branch remains compatible.",
+  required: true,
+} satisfies FeatureExecutionCheck;
+
+const canonicalPlan = {
+  reportType: "feature-canonical-plan-v1",
+  summary:
+    "Implement the fixture feature through controller-owned graph tasks.",
+  decisions: [
+    {
+      id: "DEC-1",
+      title: "Controller ownership",
+      body: "The controller owns graph Git mutations.",
+      evidence: [{ reference: "fixture", finding: "Git state is observable." }],
+      rejectedAlternatives: [],
+    },
+  ],
+  changes: [
+    {
+      id: "CHANGE-1",
+      path: "shared.txt",
+      symbols: ["fixture"],
+      action: "modify",
+      body: "Update the fixture through bounded tasks.",
+      decisionRefs: ["DEC-1"],
+      contractRefs: ["INV-1"],
+      acceptanceRefs: ["AC-1"],
+    },
+  ],
+  contracts: [
+    {
+      id: "INV-1",
+      title: "Validated commits",
+      body: "Only validated commits are integrated.",
+      paths: ["shared.txt"],
+    },
+  ],
+  acceptance: [
+    {
+      id: "AC-1",
+      scenario: "The graph completes.",
+      expected: "Every branch is joined deterministically.",
+      verification: "Fixture assertions.",
+    },
+  ],
+  verification: [
+    {
+      id: "CHECK-1",
+      command: "verify baseline",
+      cwd: ".",
+      purpose: "Verify the fixture.",
+      proves: ["AC-1"],
+      required: true,
+    },
+  ],
+  risks: [],
+  blockers: [],
+  finalRationale: "This plan exercises controller-owned graph behavior.",
+} satisfies FeatureCanonicalPlan;
+
+function graphTask(id: string, dependsOn: ReadonlyArray<string> = []) {
+  return {
+    id,
+    objective: `Implement ${id}`,
+    branchGoal: `Complete ${id} on its assigned branch`,
+    dependsOn: [...dependsOn],
+    context: {
+      problem: `The fixture needs ${id}.`,
+      repositoryConventions: ["Use one explicit fixture path."],
+      relevantDiscovery: ["Tasks must remain independently valid."],
+      precedents: [
+        {
+          path: "shared.txt",
+          symbol: id,
+          lesson: "Use a small deterministic fixture edit.",
+        },
+      ],
+      invariants: ["Only controller-created commits advance the task."],
+    },
+    readPaths: ["shared.txt"],
+    writePaths: [`${id}.txt`],
+    instructions: [`Create ${id}.txt.`],
+    implementationSketch: `Write the bounded ${id} fixture and finalize it.`,
+    acceptanceRefs: ["AC-1"],
+    doneWhen: [`${id}.txt is committed and checks pass.`],
+    checks: [
+      {
+        id: `check-${id}`,
+        command: `verify ${id}`,
+        cwd: ".",
+        purpose: `Verify ${id}.`,
+        required: true,
+      },
+    ],
+  } satisfies FeatureExecutionTask;
+}
+
+function graph(
+  tasks: ReadonlyArray<FeatureExecutionTask>,
+  checks: ReadonlyArray<FeatureExecutionCheck> = [baselineCheck],
+) {
+  return {
+    reportType: "feature-execution-graph-v1",
+    summary: "Execute the fixture graph.",
+    baselineChecks: [...checks],
+    reviewChecks: [baselineCheck],
+    tasks: [...tasks],
+  } satisfies FeatureExecutionGraph;
+}
+
+const passingCheck = async () => ({
+  exitCode: 0,
+  stdout: "passed",
+  stderr: "",
+});
+
+test("fork branches prepare once, run without a quota queue, and join in deterministic commit order", async () => {
+  const repo = fixture();
+  try {
+    const tasks = [
+      graphTask("branch-b"),
+      graphTask("branch-d", ["branch-b"]),
+      graphTask("branch-c"),
+      graphTask("branch-e", ["branch-c"]),
+    ];
+    const executionGraph = graph(tasks);
+    const tree = {
+      kind: "fork",
+      branches: [
+        {
+          kind: "sequence",
+          steps: [
+            { kind: "task", taskId: "branch-c" },
+            { kind: "task", taskId: "branch-e" },
+          ],
+        },
+        {
+          kind: "sequence",
+          steps: [
+            { kind: "task", taskId: "branch-b" },
+            { kind: "task", taskId: "branch-d" },
+          ],
+        },
+      ],
+    } satisfies ExecutionTree;
+    const prepareCalls: string[] = [];
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      worktreePrepare: ["prepare fixture"],
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      async runCheck(input) {
+        if (input.kind === "prepare") {
+          prepareCalls.push(input.workspaceRoot);
+          fs.writeFileSync(
+            path.join(input.workspaceRoot, ".prepared"),
+            "yes\n",
+          );
+        }
+        return passingCheck();
+      },
+      async runSession(input) {
+        assert.equal(input.model, "openai-codex/gpt-5.6-luna");
+        assert.equal(input.thinkingLevel, "high");
+        const filePath = `${input.task!.id}.txt`;
+        fs.writeFileSync(path.join(input.cwd, filePath), `${input.task!.id}\n`);
+        const finalized = await input.tools.finalize({
+          commitPaths: [filePath],
+          summary: `Implemented ${input.task!.id} in its branch.`,
+        });
+        assert.equal(finalized.validated, true);
+        return {
+          status: "settled",
+          sessionId: `${input.role}-${input.attempt}`,
+        };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(prepareCalls.length, 2);
+    assert.deepEqual(
+      git(repo.workingDir, [
+        "log",
+        "--reverse",
+        "--format=%s",
+        "HEAD~4..HEAD",
+      ]).split("\n"),
+      [
+        "feature: branch-b Implement branch-b",
+        "feature: branch-d Implement branch-d",
+        "feature: branch-c Implement branch-c",
+        "feature: branch-e Implement branch-e",
+      ],
+    );
+    assert.deepEqual(
+      result.joins[0]!.commits.map(({ taskId }) => taskId),
+      ["branch-b", "branch-d", "branch-c", "branch-e"],
+    );
+    assert.equal(
+      result.branches[1]!.branch.includes("branch-1-branch-b"),
+      true,
+    );
+    assert.equal(
+      result.branches[2]!.branch.includes("branch-2-branch-c"),
+      true,
+    );
+    assert.equal(
+      git(repo.workingDir, [
+        "for-each-ref",
+        "--format=%(refname)",
+        `refs/heads/pipi-feature/${repo.runId}`,
+      ])
+        .split("\n")
+        .filter(Boolean).length,
+      2,
+    );
+    assert.deepEqual(result.cleanupCompleted(), []);
+    assert.equal(
+      git(repo.workingDir, [
+        "for-each-ref",
+        "--format=%(refname)",
+        `refs/heads/pipi-feature/${repo.runId}`,
+      ]),
+      "",
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("nested forks use actual first tasks for numbering and preserve provenance through each join", async () => {
+  const repo = fixture();
+  try {
+    const tasks = [
+      graphTask("z-start"),
+      graphTask("a-tail", ["nested-b", "nested-c"]),
+      graphTask("nested-b", ["z-start"]),
+      graphTask("nested-c", ["z-start"]),
+      graphTask("middle-root"),
+      graphTask("downstream", ["a-tail", "middle-root", "nested-b"]),
+    ];
+    const executionGraph = graph(tasks);
+    const tree = {
+      kind: "sequence",
+      steps: [
+        {
+          kind: "fork",
+          branches: [
+            {
+              kind: "sequence",
+              steps: [
+                { kind: "task", taskId: "z-start" },
+                {
+                  kind: "fork",
+                  branches: [
+                    { kind: "task", taskId: "nested-c" },
+                    { kind: "task", taskId: "nested-b" },
+                  ],
+                },
+                { kind: "task", taskId: "a-tail" },
+              ],
+            },
+            { kind: "task", taskId: "middle-root" },
+          ],
+        },
+        { kind: "task", taskId: "downstream" },
+      ],
+    } satisfies ExecutionTree;
+    let downstreamDependencies:
+      ReadonlyArray<{ taskId: string; commit: string }> | undefined;
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      worktreePrepare: [],
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      runCheck: passingCheck,
+      async runSession(input) {
+        if (input.task!.id === "downstream") {
+          downstreamDependencies =
+            input.capsule.graphContext.completedDependencies;
+        }
+        const filePath = `${input.task!.id}.txt`;
+        fs.writeFileSync(path.join(input.cwd, filePath), `${input.task!.id}\n`);
+        await input.tools.finalize({
+          commitPaths: [filePath],
+          summary: `Implemented ${input.task!.id}.`,
+        });
+        return { status: "settled", sessionId: input.role };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.deepEqual(
+      result.branches.slice(1).map(({ number, firstTaskId }) => ({
+        number,
+        firstTaskId,
+      })),
+      [
+        { number: 1, firstTaskId: "middle-root" },
+        { number: 2, firstTaskId: "z-start" },
+        { number: 3, firstTaskId: "nested-b" },
+        { number: 4, firstTaskId: "nested-c" },
+      ],
+    );
+    assert.deepEqual(
+      result.joins.map(({ id }) => id),
+      ["join-1", "join-2"],
+    );
+    assert.deepEqual(
+      result.joins
+        .find(({ id }) => id === "join-2")!
+        .commits.map(({ taskId }) => taskId),
+      ["nested-b", "nested-c"],
+    );
+    assert.deepEqual(
+      result.joins
+        .find(({ id }) => id === "join-1")!
+        .commits.map(({ taskId }) => taskId),
+      ["middle-root", "z-start", "nested-b", "nested-c", "a-tail"],
+    );
+    const nestedSource = result.joins
+      .find(({ id }) => id === "join-2")!
+      .commits.find(({ taskId }) => taskId === "nested-b")!;
+    const outerSource = result.joins
+      .find(({ id }) => id === "join-1")!
+      .commits.find(({ taskId }) => taskId === "nested-b")!;
+    assert.equal(outerSource.sourceCommit, nestedSource.integratedCommit);
+    assert.notEqual(outerSource.integratedCommit, outerSource.sourceCommit);
+    const downstreamNested = downstreamDependencies?.find(
+      ({ taskId }) => taskId === "nested-b",
+    );
+    assert.equal(downstreamNested?.commit, outerSource.integratedCommit);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("a failed provisional check is repaired by amending the same logical task commit", async () => {
+  const repo = fixture();
+  try {
+    const task = graphTask("retry-task");
+    const executionGraph = graph([task], []);
+    const tree = { kind: "task", taskId: task.id } satisfies ExecutionTree;
+    let firstCommit = "";
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      async runCheck(input) {
+        const content = fs.readFileSync(
+          path.join(input.workspaceRoot, "retry-task.txt"),
+          "utf8",
+        );
+        return {
+          exitCode: content === "fixed\n" ? 0 : 1,
+          stdout: content,
+          stderr: content === "fixed\n" ? "" : "still broken",
+        };
+      },
+      async runSession(input) {
+        fs.writeFileSync(
+          path.join(input.cwd, "retry-task.txt"),
+          input.attempt === 1 ? "broken\n" : "fixed\n",
+        );
+        const finalized = await input.tools.finalize({
+          commitPaths: ["retry-task.txt"],
+          summary: `Retry task attempt ${input.attempt}.`,
+        });
+        if (input.attempt === 1) {
+          assert.equal(finalized.validated, false);
+          firstCommit = finalized.commit!;
+        } else {
+          assert.equal(finalized.validated, true);
+          assert.notEqual(finalized.commit, firstCommit);
+        }
+        return { status: "settled", sessionId: `retry-${input.attempt}` };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(result.tasks[0]!.attempt, 2);
+    assert.deepEqual(
+      result.tasks[0]!.attempts.map(({ status }) => status),
+      ["completed", "completed"],
+    );
+    assert.equal(git(repo.workingDir, ["rev-list", "--count", "HEAD"]), "2");
+    assert.equal(
+      fs.readFileSync(path.join(repo.workingDir, "retry-task.txt"), "utf8"),
+      "fixed\n",
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("child preparation failures consume the first task budget and retry in the same worktree", async () => {
+  const repo = fixture();
+  try {
+    const task = graphTask("prepared-task");
+    const executionGraph = graph([task]);
+    const tree = {
+      kind: "fork",
+      branches: [{ kind: "task", taskId: task.id }],
+    } satisfies ExecutionTree;
+    let preparationAttempts = 0;
+    let sessionAttempts = 0;
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      worktreePrepare: ["prepare fixture"],
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      async runCheck(input) {
+        if (input.kind === "prepare") {
+          preparationAttempts += 1;
+          if (preparationAttempts === 4) {
+            fs.writeFileSync(
+              path.join(input.workspaceRoot, ".prepared"),
+              "environment\n",
+            );
+          }
+          return {
+            exitCode: preparationAttempts < 4 ? 1 : 0,
+            stdout: "",
+            stderr:
+              preparationAttempts < 4 ? "temporary preparation failure" : "",
+          };
+        }
+        return passingCheck();
+      },
+      async runSession(input) {
+        sessionAttempts += 1;
+        assert.equal(input.attempt, 4);
+        assert.equal(
+          input.capsule.graphContext.preparationBaseline.includes(".prepared"),
+          true,
+        );
+        const finalized = await input.tools.finalize({
+          commitPaths: [],
+          summary: "Dependencies already satisfy the prepared task.",
+        });
+        assert.equal(finalized.status, "satisfied_without_changes");
+        return { status: "settled", sessionId: "prepared-task-session" };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(result.tasks[0]!.status, "satisfied_without_changes");
+    assert.equal(preparationAttempts, 4);
+    assert.equal(sessionAttempts, 1);
+    assert.deepEqual(
+      result.tasks[0]!.attempts.map(({ status }) => status),
+      ["failed", "failed", "failed", "completed"],
+    );
+    assert.equal(result.branches[1]!.preparation.attempts, 4);
+    assert.equal(result.branches[1]!.preparation.complete, true);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("cancellation prevents late finalization and preserves the factual task state", async () => {
+  const repo = fixture();
+  try {
+    const task = graphTask("cancel-task");
+    const executionGraph = graph([task], []);
+    const tree = { kind: "task", taskId: task.id } satisfies ExecutionTree;
+    const controller = new AbortController();
+    const base = git(repo.workingDir, ["rev-parse", "HEAD"]);
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      signal: controller.signal,
+      runCheck: passingCheck,
+      async runSession(input) {
+        fs.writeFileSync(path.join(input.cwd, "cancel-task.txt"), "late\n");
+        controller.abort();
+        await assert.rejects(
+          input.tools.finalize({
+            commitPaths: ["cancel-task.txt"],
+            summary: "This finalization is too late.",
+          }),
+          /cancelled/,
+        );
+        return { status: "cancelled", sessionId: "cancelled-session" };
+      },
+    });
+
+    assert.equal(result.status, "cancelled");
+    assert.equal(result.tasks[0]!.status, "cancelled");
+    assert.equal(result.tasks[0]!.attempts[0]!.sessionId, "cancelled-session");
+    assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), base);
+    assert.equal(
+      fs.existsSync(path.join(repo.workingDir, "cancel-task.txt")),
+      true,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("a fourth failed attempt lets an active sibling settle and retains diagnostic branches", async () => {
+  const repo = fixture();
+  try {
+    const failing = graphTask("failing-branch");
+    const independent = graphTask("independent-branch");
+    const executionGraph = graph([failing, independent]);
+    const tree = {
+      kind: "fork",
+      branches: [
+        { kind: "task", taskId: failing.id },
+        { kind: "task", taskId: independent.id },
+      ],
+    } satisfies ExecutionTree;
+    let independentStarted = () => {};
+    const siblingActive = new Promise<void>((resolve) => {
+      independentStarted = resolve;
+    });
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      runCheck: passingCheck,
+      async runSession(input) {
+        if (input.task!.id === failing.id) {
+          await siblingActive;
+          return {
+            status: "failed",
+            sessionId: `failure-${input.attempt}`,
+            error: `attempt ${input.attempt} failed`,
+          };
+        }
+        independentStarted();
+        fs.writeFileSync(
+          path.join(input.cwd, "independent-branch.txt"),
+          "completed\n",
+        );
+        await input.tools.finalize({
+          commitPaths: ["independent-branch.txt"],
+          summary: "The independent active branch settled successfully.",
+        });
+        return { status: "settled", sessionId: "independent-session" };
+      },
+    });
+
+    assert.equal(result.status, "failed");
+    assert.equal(
+      result.tasks.find(({ id }) => id === failing.id)?.attempts.length,
+      4,
+    );
+    assert.equal(
+      result.tasks.find(({ id }) => id === independent.id)?.status,
+      "validated",
+    );
+    assert.equal(
+      git(repo.workingDir, [
+        "for-each-ref",
+        "--format=%(refname)",
+        `refs/heads/pipi-feature/${repo.runId}`,
+      ])
+        .split("\n")
+        .filter(Boolean).length,
+      2,
+    );
+    assert.equal(
+      result.branches
+        .filter(({ id }) => id !== "root")
+        .every(({ worktree }) => fs.existsSync(worktree)),
+      true,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("cleanup residual warnings remain observable without invalidating a verified commit", async () => {
+  const repo = fixture();
+  try {
+    const task = graphTask("warning-task");
+    const executionGraph = graph([task], []);
+    const tree = { kind: "task", taskId: task.id } satisfies ExecutionTree;
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      runCheck: passingCheck,
+      async runSession(input) {
+        fs.writeFileSync(path.join(input.cwd, "warning-task.txt"), "done\n");
+        fs.mkdirSync(path.join(input.cwd, "retained"));
+        for (let index = 0; index < 2_050; index++) {
+          fs.writeFileSync(
+            path.join(input.cwd, "retained", `file-${index}`),
+            "diagnostic\n",
+          );
+        }
+        const finalized = await input.tools.finalize({
+          commitPaths: ["warning-task.txt"],
+          summary: "Implemented while retaining a diagnostic cleanup residual.",
+        });
+        assert.equal(finalized.validated, true);
+        assert.equal(
+          finalized.residualPaths.some((filePath) =>
+            filePath.startsWith("retained/"),
+          ),
+          true,
+        );
+        return { status: "settled", sessionId: "warning-task-session" };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(result.tasks[0]!.status, "validated");
+    assert.equal(
+      result.warnings.length > 0,
+      true,
+      JSON.stringify(result.tasks[0]),
+    );
+    assert.equal(
+      result.residualPaths.some((filePath) => filePath.startsWith("retained/")),
+      true,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("join conflicts continue the active cherry-pick and preserve source to integrated provenance", async () => {
+  const repo = fixture();
+  try {
+    const left = graphTask("left-task");
+    const right = graphTask("right-task");
+    const executionGraph = graph([left, right]);
+    const tree = {
+      kind: "fork",
+      branches: [
+        { kind: "task", taskId: left.id },
+        { kind: "task", taskId: right.id },
+      ],
+    } satisfies ExecutionTree;
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      worktreePrepare: [],
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      runCheck: passingCheck,
+      async runSession(input) {
+        if (input.kind === "conflict-resolution") {
+          fs.writeFileSync(path.join(input.cwd, "shared.txt"), "left+right\n");
+          const finalized = await input.tools.finalize({
+            commitPaths: ["shared.txt"],
+            summary: "Resolved the two validated fixture changes together.",
+          });
+          assert.equal(finalized.validated, true);
+          return { status: "settled", sessionId: "conflict-resolver" };
+        }
+        const value = input.task!.id.startsWith("left") ? "left\n" : "right\n";
+        fs.writeFileSync(path.join(input.cwd, "shared.txt"), value);
+        await input.tools.finalize({
+          commitPaths: ["shared.txt"],
+          summary: `Implemented ${input.task!.id}.`,
+        });
+        return { status: "settled", sessionId: input.role };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(
+      fs.readFileSync(path.join(repo.workingDir, "shared.txt"), "utf8"),
+      "left+right\n",
+    );
+    assert.equal(result.joins[0]!.commits.length, 2);
+    assert.notEqual(
+      result.joins[0]!.commits[1]!.sourceCommit,
+      result.joins[0]!.commits[1]!.integratedCommit,
+    );
+    assert.equal(
+      result.tasks.some(
+        ({ kind, status }) =>
+          kind === "conflict-resolution" && status === "validated",
+      ),
+      true,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("compatible duplicate branch changes retain both deterministic source mappings", async () => {
+  const repo = fixture();
+  try {
+    const left = graphTask("duplicate-left");
+    const right = graphTask("duplicate-right");
+    const executionGraph = graph([left, right]);
+    const tree = {
+      kind: "fork",
+      branches: [
+        { kind: "task", taskId: left.id },
+        { kind: "task", taskId: right.id },
+      ],
+    } satisfies ExecutionTree;
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      runCheck: passingCheck,
+      async runSession(input) {
+        fs.writeFileSync(path.join(input.cwd, "shared.txt"), "same-change\n");
+        await input.tools.finalize({
+          commitPaths: ["shared.txt"],
+          summary: `Applied the compatible ${input.task!.id} change.`,
+        });
+        return { status: "settled", sessionId: input.role };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(result.joins[0]!.commits.length, 2);
+    assert.equal(
+      new Set(
+        result.joins[0]!.commits.map(
+          ({ integratedCommit }) => integratedCommit,
+        ),
+      ).size,
+      2,
+    );
+    assert.equal(git(repo.workingDir, ["rev-list", "--count", "HEAD"]), "3");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("post-join semantic failure creates one continuing join-repair task", async () => {
+  const repo = fixture();
+  try {
+    const left = graphTask("left-file");
+    const right = graphTask("right-file");
+    const downstream = graphTask("after-repair", [left.id, right.id]);
+    const executionGraph = graph([left, right, downstream]);
+    const tree = {
+      kind: "sequence",
+      steps: [
+        {
+          kind: "fork",
+          branches: [
+            { kind: "task", taskId: left.id },
+            { kind: "task", taskId: right.id },
+          ],
+        },
+        { kind: "task", taskId: downstream.id },
+      ],
+    } satisfies ExecutionTree;
+    let repairDependency:
+      | {
+          readonly taskId: string;
+          readonly commit: string;
+          readonly summary: string;
+        }
+      | undefined;
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: executionGraph,
+      tree,
+      async runCheck(input) {
+        const joined =
+          fs.existsSync(path.join(input.workspaceRoot, "left-file.txt")) &&
+          fs.existsSync(path.join(input.workspaceRoot, "right-file.txt"));
+        const repaired = fs.existsSync(
+          path.join(input.workspaceRoot, "repair.txt"),
+        );
+        return {
+          exitCode: joined && !repaired ? 1 : 0,
+          stdout: joined ? "joined" : "branch",
+          stderr: joined && !repaired ? "combined state needs repair" : "",
+        };
+      },
+      async runSession(input) {
+        if (input.kind === "join-repair") {
+          fs.writeFileSync(path.join(input.cwd, "repair.txt"), "compatible\n");
+          await input.tools.finalize({
+            commitPaths: ["repair.txt"],
+            summary: "Repaired the combined semantic state.",
+          });
+          return { status: "settled", sessionId: "join-repair" };
+        }
+        if (input.task!.id === downstream.id) {
+          repairDependency =
+            input.capsule.graphContext.completedDependencies.find(
+              ({ taskId }) => taskId === "__join-1-repair",
+            );
+        }
+        const filePath = `${input.task!.id}.txt`;
+        fs.writeFileSync(path.join(input.cwd, filePath), "branch\n");
+        await input.tools.finalize({
+          commitPaths: [filePath],
+          summary: `Implemented ${input.task!.id}.`,
+        });
+        return { status: "settled", sessionId: input.role };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(result.joins[0]!.status, "completed");
+    assert.equal(result.joins[0]!.repairTaskId, "__join-1-repair");
+    assert.equal(
+      result.tasks.find(({ id }) => id === "__join-1-repair")?.status,
+      "validated",
+    );
+    assert.equal(repairDependency?.taskId, "__join-1-repair");
+    assert.equal(
+      repairDependency?.commit,
+      result.tasks.find(({ id }) => id === "__join-1-repair")?.validatedCommit,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(repo.workingDir, "repair.txt"), "utf8"),
+      "compatible\n",
+    );
+  } finally {
+    repo.cleanup();
+  }
+});

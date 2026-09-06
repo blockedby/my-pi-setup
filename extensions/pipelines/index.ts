@@ -110,7 +110,7 @@ const PIPELINE_RUN_COMMON_PROPERTIES = {
   git_commit: Type.Optional(
     Type.Boolean({
       description:
-        "feature-pipeline hard-requires explicit true, Linux bubblewrap, and a dedicated clean attached linked worktree; controller-owned candidates/synthesis and the post-promotion remediation root may make scoped ordinary commits. small-feature also requires a caller-prepared linked worktree but keeps commit permission optional for its persistent implementer. Plan/audit reject true. Never permits push, delivery merge, history rewrite, deployment, or arbitrary branch/worktree operations.",
+        "feature-pipeline hard-requires explicit true, Linux bubblewrap, and a dedicated clean attached linked worktree; controller-owned Luna tasks, final Sol review, and later audit remediation may make scoped ordinary commits. small-feature also requires a caller-prepared linked worktree but keeps commit permission optional for its persistent implementer. Plan/audit reject true. Never permits push, delivery merge, history rewrite, deployment, or arbitrary branch/worktree operations.",
     }),
   ),
   audit: Type.Optional(
@@ -137,23 +137,41 @@ const PLAN_PATH_PARAMETER = Type.Union(
   },
 );
 
-const NON_PLAN_PIPELINE_PARAMETERS = Type.Object(
+const PIPELINE_NAME_PARAMETER = Type.String({
+  description: PIPELINE_NAME_DESCRIPTION,
+  minLength: 1,
+  maxLength: PIPELINE_NAME_MAX_LENGTH,
+  pattern: PIPELINE_NAME_PATTERN,
+});
+
+const FEATURE_PIPELINE_PARAMETERS = Type.Object(
   {
-    pipeline_name: Type.String({
-      description: PIPELINE_NAME_DESCRIPTION,
+    pipeline_name: PIPELINE_NAME_PARAMETER,
+    pipeline: Type.Optional(Type.Literal(FEATURE_PIPELINE_ID)),
+    ...PIPELINE_RUN_COMMON_PROPERTIES,
+    worktree_root: Type.String({
+      description:
+        "Required absolute pre-existing directory for controller-owned feature graph worktrees.",
       minLength: 1,
-      maxLength: PIPELINE_NAME_MAX_LENGTH,
-      pattern: PIPELINE_NAME_PATTERN,
+      maxLength: 16 * 1024,
     }),
-    pipeline: Type.Optional(
-      StringEnum(
-        [FEATURE_PIPELINE_ID, "small-feature-pipeline", AUDIT_PIPELINE_ID],
-        {
-          description:
-            "Known non-plan pipeline definition; defaults to feature-pipeline when omitted.",
-        },
-      ),
+    worktree_prepare: Type.Array(
+      Type.String({ minLength: 1, maxLength: 32 * 1024 }),
+      {
+        description:
+          "Required ordered child-worktree preparation commands; pass an empty array when none are needed.",
+        maxItems: 64,
+      },
     ),
+    plan_path: Type.Optional(Type.Null()),
+  },
+  { additionalProperties: false },
+);
+
+const OTHER_NON_PLAN_PIPELINE_PARAMETERS = Type.Object(
+  {
+    pipeline_name: PIPELINE_NAME_PARAMETER,
+    pipeline: StringEnum(["small-feature-pipeline", AUDIT_PIPELINE_ID]),
     ...PIPELINE_RUN_COMMON_PROPERTIES,
     plan_path: Type.Optional(Type.Null()),
   },
@@ -162,12 +180,7 @@ const NON_PLAN_PIPELINE_PARAMETERS = Type.Object(
 
 const PLAN_PIPELINE_PARAMETERS = Type.Object(
   {
-    pipeline_name: Type.String({
-      description: PIPELINE_NAME_DESCRIPTION,
-      minLength: 1,
-      maxLength: PIPELINE_NAME_MAX_LENGTH,
-      pattern: PIPELINE_NAME_PATTERN,
-    }),
+    pipeline_name: PIPELINE_NAME_PARAMETER,
     pipeline: Type.Literal("plan-pipeline"),
     ...PIPELINE_RUN_COMMON_PROPERTIES,
     plan_path: PLAN_PATH_PARAMETER,
@@ -176,7 +189,8 @@ const PLAN_PIPELINE_PARAMETERS = Type.Object(
 );
 
 export const PIPELINE_RUN_PARAMETERS = Type.Union([
-  NON_PLAN_PIPELINE_PARAMETERS,
+  FEATURE_PIPELINE_PARAMETERS,
+  OTHER_NON_PLAN_PIPELINE_PARAMETERS,
   PLAN_PIPELINE_PARAMETERS,
 ]);
 
@@ -300,9 +314,9 @@ export default function pipelines(pi: ExtensionAPI) {
         discoverySubmit,
         discoverySessionCreated,
         discoveryToolAllowed,
-        featureCommit,
         executionFinish,
         executionFinishSessionCreated,
+        featureTaskHost,
       ) =>
         createPipelineSessionFactory({
           modelRegistry: ctx.modelRegistry,
@@ -316,9 +330,9 @@ export default function pipelines(pi: ExtensionAPI) {
           discoverySubmit,
           discoverySessionCreated,
           discoveryToolAllowed,
-          featureCommit,
           executionFinish,
           executionFinishSessionCreated,
+          featureTaskHost,
         }),
       onHandoff: deliver,
     });
@@ -346,13 +360,13 @@ export default function pipelines(pi: ExtensionAPI) {
     name: "pipeline_run",
     label: "Run Pipeline",
     description:
-      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name (maximum 64 characters) and return its canonical name-plus-eight-hex run id immediately. Optionally set wallclock_limit to a caller-selected canonical 30s–24h stage budget; omission disables per-stage timing. Supported definitions are feature-pipeline, small-feature-pipeline, plan-pipeline, and audit-pipeline. Omit pipeline for feature-pipeline. Feature discovery and synthesis feed three parallel isolated Luna/high implementation candidates with independent 10-minute steering budgets that do not cancel the run; one Luna/xHIGH synthesis agent selects a primary before writing, performs bounded primary-based augmentation, verifies/commits, promotes the exact result, cleans temporary worktrees, then starts independent audit/remediation. plan-pipeline produces a complete repository-grounded plan through six parallel Luna discoveries and one Luna/xHIGH synthesis; pass plan_path explicitly as a destination or null. feature-pipeline requires git_commit=true, Linux bubblewrap, and a dedicated clean attached linked worktree; small-feature also requires a caller-prepared linked worktree while commit permission remains optional; plan/audit reject true.",
+      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name and return its canonical name-plus-eight-hex run id immediately. feature-pipeline runs five discovery tracks, two independent Sol/medium plans, one persistent Sol/xhigh canonical plan and execution graph, fresh Luna/high implementation tasks on controller-owned branches, final review by the same Sol session, then the existing independent audit flow. It requires git_commit=true, a prepared linked working_dir, an absolute existing worktree_root, and an explicit ordered worktree_prepare array. plan-pipeline requires plan_path; small-feature keeps optional commit permission; plan/audit reject commit permission.",
     promptSnippet:
       "Start a background implementation, planning, or Luna audit pipeline",
     promptGuidelines: [
       "Always provide pipeline_name as the unchanged lowercase kebab-case base of 3–5 hyphen-separated words (maximum 64 characters), such as replace-heavy-plan-pipeline. Optionally provide wallclock_limit as an integer duration such as 30s, 5m, or 2h; stages warn at 80% and end as limited at 100% unless an earlier outcome wins. The controller appends the canonical eight-character hexadecimal suffix; use that exact returned id for later inspection or cancellation. Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline request. Use audit-pipeline for routine repository initial or closure audits that require four independent static Luna tracks, one audit-executor contributor, and incremental Luna synthesis without remediation. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Luna implementation, four parallel independent Luna audit tracks, and one same-session Luna remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
       "Automatically use plan-pipeline for a durable audited implementation plan, task breakdown, dependency waves, or test/release plan when at least one complexity signal applies: the goal spans two or more of frontend, backend, data, DevOps, or runtime; it includes migration, rollout, rollback, operational readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies require repository discovery. An explicit plan-pipeline request does not require a complexity signal.",
-      "Do not choose plan-pipeline merely because an implementation request is cross-layer. Do not use implementation or planning pipelines for bugs, refactors, research-only work, or trivial edits; use audit-pipeline only when the requested outcome is a bounded repository audit rather than implementation. A small feature is bounded implementation work that still benefits from independent audit; it is not a synonym for a trivial edit. If the user has not made the desired deliverable—plan versus implementation—clear, ask before launching. Before feature-pipeline or small-feature-pipeline, create and prepare a dedicated linked Git worktree and pass its exact root. git_commit is authoritative and never inferred from task prose. feature-pipeline additionally rejects omission/false and requires Linux bubblewrap plus a clean stable HEAD; its controller alone owns temporary candidate/synthesis branches, worktrees, exact promotion, and cleanup. No pipeline receives push, delivery-merge, history-rewrite, deployment, or external-state authority. After launch, do not duplicate work in the same workspace; use pipeline_check occasionally or /pipelines for live inspection while continuing only unrelated work. Do not poll; completion arrives automatically as a follow-up handoff.",
+      "Do not choose plan-pipeline merely because an implementation request is cross-layer. Do not use implementation or planning pipelines for bugs, refactors, research-only work, or trivial edits; use audit-pipeline only when the requested outcome is a bounded repository audit rather than implementation. Before feature-pipeline or small-feature-pipeline, create and prepare a dedicated linked Git worktree and pass its exact root. For feature-pipeline also pass an absolute existing worktree_root and the explicit project commands in worktree_prepare; pass [] only when no child preparation is needed. git_commit is authoritative and never inferred from task prose. No pipeline receives push, delivery merge, history rewrite, deployment, or external-state authority. After launch, do not duplicate work in the same workspace; use pipeline_check occasionally or /pipelines for live inspection while continuing only unrelated work. Do not poll; completion arrives automatically as a follow-up handoff.",
     ],
     parameters: PIPELINE_RUN_PARAMETERS,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -364,6 +378,30 @@ export default function pipelines(pi: ExtensionAPI) {
         throw new Error(`working_dir is not a directory: ${workingDir}`);
       }
       const definition = resolvePipelineDefinition(params.pipeline);
+      const featureParams =
+        definition === FEATURE_PIPELINE_ID &&
+        "worktree_root" in params &&
+        "worktree_prepare" in params
+          ? params
+          : undefined;
+      if (definition === FEATURE_PIPELINE_ID) {
+        if (!featureParams) {
+          throw new Error(
+            "feature-pipeline requires worktree_root and worktree_prepare.",
+          );
+        }
+        if (!path.isAbsolute(featureParams.worktree_root)) {
+          throw new Error("feature-pipeline worktree_root must be absolute.");
+        }
+        if (
+          !fs.existsSync(featureParams.worktree_root) ||
+          !fs.statSync(featureParams.worktree_root).isDirectory()
+        ) {
+          throw new Error(
+            `feature-pipeline worktree_root is not an existing directory: ${featureParams.worktree_root}`,
+          );
+        }
+      }
       // Keep range validation in the public admission path as well as the
       // controller so rejected requests do not even construct controller state.
       parsePipelineWallclockLimit(params.wallclock_limit);
@@ -407,6 +445,12 @@ export default function pipelines(pi: ExtensionAPI) {
         pipelineName: params.pipeline_name,
         task: params.task,
         workingDir,
+        ...(definition === FEATURE_PIPELINE_ID
+          ? {
+              worktreeRoot: fs.realpathSync(featureParams!.worktree_root),
+              worktreePrepare: featureParams!.worktree_prepare,
+            }
+          : {}),
         pipeline: definition,
         ...(params.git_commit !== undefined
           ? { gitCommit: params.git_commit }

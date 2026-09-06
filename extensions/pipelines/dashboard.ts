@@ -5,6 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   truncateToWidth,
+  wrapTextWithAnsi,
   visibleWidth,
   type Component,
   type TUI,
@@ -25,12 +26,14 @@ import {
   type PipelineStage,
 } from "./domain.ts";
 import type { PipelineController } from "./controller.ts";
-import {
-  FEATURE_CANDIDATE_ROLES,
-  FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
-} from "./feature-best-of-three.ts";
 
-type DashboardStage = PipelineStage | "synthesis";
+import {
+  featureExecutionRows,
+  featureTaskDetails,
+  featureTaskGlyph,
+} from "./feature-progress.ts";
+
+type DashboardStage = PipelineStage;
 type DashboardStageStatus =
   "pending" | "running" | "done" | "failed" | "cancelled" | "limited";
 
@@ -62,6 +65,17 @@ export type PipelineRow =
     }
   | {
       readonly key: string;
+      readonly kind: "task" | "boundary";
+      readonly depth: number;
+      readonly label: string;
+      readonly runId: string;
+      readonly taskId?: string;
+      readonly status?: NonNullable<
+        PipelineRunSnapshot["featureGraph"]
+      >["tasks"][number]["status"];
+    }
+  | {
+      readonly key: string;
       readonly kind: "agent";
       readonly depth: 2 | 3;
       readonly label: string;
@@ -77,13 +91,7 @@ function stageLabel(stage: DashboardStage) {
 }
 
 function dashboardStages(run: PipelineRunSnapshot) {
-  const stages: ReadonlyArray<DashboardStage> = stagesForDefinition(
-    run.definition,
-  );
-  if (run.definition !== "feature-pipeline") return stages;
-  return stages.flatMap((stage) =>
-    stage === "build" ? ([stage, "synthesis"] as const) : [stage],
-  );
+  return stagesForDefinition(run.definition);
 }
 
 function isPipelineAuditRole(role: string) {
@@ -115,20 +123,17 @@ function childStage(
 ): DashboardStage {
   const { definition } = run;
   const { role } = child;
-  if (
-    definition === "feature-pipeline" &&
-    role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE
-  ) {
-    return "synthesis";
+  if (definition === "feature-pipeline") {
+    if (role.startsWith("feature-plan-") || role === "feature-finalizer")
+      return "plan";
+    if (
+      role.startsWith("feature-task-") ||
+      role.startsWith("feature-conflict-") ||
+      role.startsWith("feature-join-repair-")
+    )
+      return "build";
   }
-  const isFeatureCandidate =
-    definition === "feature-pipeline" &&
-    FEATURE_CANDIDATE_ROLES.some(
-      (candidateRole) => `candidate-${candidateRole.toLowerCase()}` === role,
-    );
-  if (role === SMALL_FEATURE_IMPLEMENTER_ROLE || isFeatureCandidate) {
-    return "build";
-  }
+  if (role === SMALL_FEATURE_IMPLEMENTER_ROLE) return "build";
   if (role === AUDIT_SYNTHESIS_ROLE) return "final-audit";
   if (role.startsWith("discover-")) return "discover";
   if (role.startsWith("audit-")) {
@@ -178,6 +183,8 @@ function stageAgentId(
   ) {
     return root.id;
   }
+  if (run.featureGraph && (stage === "plan" || stage === "review"))
+    return run.featureGraph.canonicalSessionId;
   const matching = children.filter(
     (agent) => childStage(run, agent, children) === stage,
   );
@@ -218,19 +225,6 @@ function stageStatus(
 ): DashboardStageStatus {
   const currentStageIndex = stages.indexOf(run.stage);
   const stageIndex = stages.indexOf(stage);
-  if (run.definition === "feature-pipeline" && run.stage === "build") {
-    const synthesis = children.find(
-      (agent) => agent.role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
-    );
-    if (stage === "build" && synthesis) return "done";
-    if (stage === "synthesis") {
-      if (!synthesis) return "pending";
-      if (synthesis.status === "error") return "failed";
-      if (synthesis.status === "cancelled") return "cancelled";
-      if (synthesis.status === "done") return "done";
-      return "running";
-    }
-  }
   if (stageIndex < currentStageIndex) return "done";
   if (stageIndex > currentStageIndex) return "pending";
   if (
@@ -269,8 +263,10 @@ export function buildPipelineRows(
       const root = run.rootId
         ? run.agents.find((agent) => agent.id === run.rootId)
         : undefined;
-      const children = run.agents.filter(
-        (agent) => agent.parentId === run.rootId,
+      const children = run.agents.filter((agent) =>
+        run.definition === "feature-pipeline"
+          ? agent.id !== run.rootId
+          : agent.parentId === run.rootId,
       );
       if (root && run.definition !== "plan-pipeline") {
         rows.push({
@@ -298,6 +294,41 @@ export function buildPipelineRows(
           status,
           agentId: stageAgentId(run, stage, root, children),
         });
+        if (stage === "plan" && run.featureGraph) {
+          for (const phase of ["canonical", "graph"] as const) {
+            rows.push({
+              key: `planning:${run.id}:${phase}`,
+              kind: "boundary",
+              depth: 3,
+              label: `${phase === "canonical" ? "Canonical plan" : "Graph validation"} · ${run.featureGraph.planning[phase]}`,
+              runId: run.id,
+            });
+          }
+        }
+        if (stage === "build" && run.featureGraph) {
+          for (const row of featureExecutionRows(run.featureGraph)) {
+            rows.push({
+              ...row,
+              key: `feature:${run.id}:${row.key}`,
+              runId: run.id,
+            });
+          }
+        }
+        if (stage === "review" && run.featureGraph) {
+          for (const task of run.featureGraph.tasks.filter(
+            (task) => task.kind === "final-review",
+          )) {
+            rows.push({
+              key: `feature:${run.id}:${task.id}`,
+              kind: "task",
+              depth: 3,
+              label: `${task.id} · ${task.status}`,
+              runId: run.id,
+              taskId: task.id,
+              status: task.status,
+            });
+          }
+        }
         const stageAgents =
           run.definition === "plan-pipeline" && stage === "synthesize" && root
             ? [root]
@@ -379,6 +410,8 @@ export function togglePipelineRunExpansion(
 }
 
 export function glyphStatusForPipelineRow(row: PipelineRow) {
+  if (row.kind === "task")
+    return row.status ? featureTaskGlyph(row.status) : undefined;
   if (row.kind === "run") {
     if (row.status === "completed") return "done";
     if (row.status === "failed") return "error";
@@ -497,6 +530,10 @@ class PipelineDashboard implements Component {
     }
     const selected = rows[this.selection.index];
     if (this.keybindings.matches(data, "tui.select.confirm")) {
+      if (selected?.kind === "task" && selected.taskId) {
+        this.close(`task:${selected.runId}:${selected.taskId}`);
+        return;
+      }
       const selectedAgentId = selected
         ? agentIdForPipelineRow(selected)
         : undefined;
@@ -601,7 +638,73 @@ export async function showPipelineDashboard(
       },
     );
     if (!picked) return;
+    if (picked.startsWith("task:")) {
+      const [, runId, taskId] = picked.split(":");
+      if (runId && taskId)
+        await showFeatureTaskDetails(ctx, controller, runId, taskId);
+      continue;
+    }
     if (!controller.agentView.get(picked)) continue;
     await openAgentTakeover(ctx, controller.agentView, picked);
   }
+}
+
+async function showFeatureTaskDetails(
+  ctx: ExtensionCommandContext,
+  controller: PipelineController,
+  runId: string,
+  taskId: string,
+) {
+  await ctx.ui.custom<null>(
+    (tui, theme, keybindings, done) => {
+      let scroll = 0;
+      let closed = false;
+      const unsubscribe = controller.subscribe(() => tui.requestRender());
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        unsubscribe();
+        done(null);
+      };
+      return {
+        invalidate() {},
+        dispose() {
+          unsubscribe();
+        },
+        handleInput(data: string) {
+          if (
+            keybindings.matches(data, "tui.select.cancel") ||
+            keybindings.matches(data, "tui.select.confirm")
+          ) {
+            close();
+            return;
+          }
+          if (data === "j" || keybindings.matches(data, "tui.select.down"))
+            scroll++;
+          if (data === "k" || keybindings.matches(data, "tui.select.up"))
+            scroll = Math.max(0, scroll - 1);
+          tui.requestRender();
+        },
+        render(width: number) {
+          const run = controller.get(runId);
+          const lines = (
+            run ? featureTaskDetails(run, taskId) : "Pipeline is unavailable."
+          )
+            .split("\n")
+            .flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width - 2)));
+          const height = Math.max(3, (tui.terminal.rows || 30) - 4);
+          scroll = Math.min(scroll, Math.max(0, lines.length - height));
+          return [
+            theme.bold(`Task ${taskId}`),
+            ...lines.slice(scroll, scroll + height),
+            theme.fg("dim", "j/k scroll · enter/esc back"),
+          ];
+        },
+      };
+    },
+    {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" },
+    },
+  );
 }

@@ -8,21 +8,20 @@ import {
   type AgentSession,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE } from "./feature-best-of-three.ts";
 import {
+  FEATURE_FINALIZER_ROLE,
   FEATURE_PIPELINE_ID,
   LUNA_MODEL,
   PLAN_PIPELINE_ID,
   PLAN_PIPELINE_SYNTHESIS_ROLE,
+  SOL_MODEL,
 } from "./domain.ts";
 import { createPipelineSessionFactory } from "./session.ts";
 
-const FEATURE_TOOL_NAMES = [
-  "read",
-  "bash",
-  "edit",
-  "write",
-  "pipeline_feature_commit",
+const FEATURE_TASK_TOOL_NAMES = [
+  "pipeline_task_diff",
+  "pipeline_task_check",
+  "pipeline_task_finalize",
 ];
 async function createFixture() {
   const root = await mkdtemp(
@@ -34,34 +33,25 @@ async function createFixture() {
   return { root, cwd, agentDir };
 }
 
-test("implementation synthesis keeps the registered commit tool across selection and mutation", async () => {
+test("persistent Sol finalizer gains its pre-registered task tools only after mutation is enabled", async () => {
   const fixture = await createFixture();
   let sdkSession: AgentSession | undefined;
-  let creationToolNames: string[] | undefined;
-  let creationCommitTool:
-    ReturnType<AgentSession["getToolDefinition"]> | undefined;
-  const commitCalls: Array<{
-    runId: string;
-    role: string;
-    workingDir: string;
-    paths: ReadonlyArray<string>;
-  }> = [];
   let session:
     | Awaited<
         ReturnType<ReturnType<typeof createPipelineSessionFactory>["create"]>
       >
     | undefined;
-
   let fauxProvider: ReturnType<typeof registerFauxProvider> | undefined;
+  let finalized = 0;
 
   try {
-    const registeredFauxProvider = registerFauxProvider({
-      api: "pipeline-lifecycle-test-api",
-      provider: "pipeline-lifecycle-test-provider",
+    fauxProvider = registerFauxProvider({
+      api: "feature-finalizer-lifecycle-test-api",
+      provider: "feature-finalizer-lifecycle-test-provider",
       models: [
         {
-          id: "gpt-5.6-luna",
-          name: "Pipeline Lifecycle Test",
+          id: "gpt-5.6-sol",
+          name: "Feature Finalizer Lifecycle Test",
           reasoning: true,
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -70,50 +60,80 @@ test("implementation synthesis keeps the registered commit tool across selection
         },
       ],
     });
-    fauxProvider = registeredFauxProvider;
-    const assertNoModelTraffic = () => {
-      assert.equal(registeredFauxProvider.state.callCount, 0);
-      assert.equal(registeredFauxProvider.state.deferredFetchCount, 0);
-    };
-
     const factory = createPipelineSessionFactory({
       modelRegistry: {
         find(provider, id) {
           assert.equal(provider, "openai-codex");
-          assert.equal(id, "gpt-5.6-luna");
-          return registeredFauxProvider.getModel();
+          assert.equal(id, "gpt-5.6-sol");
+          return fauxProvider!.getModel();
         },
       },
       parentCwd: fixture.root,
       parentTrusted: false,
       agentDir: fixture.agentDir,
-      // In-memory session storage prevents this regression from touching the
-      // caller's Pipi session directory while retaining a real AgentSession.
       sessionManager: (directory) => SessionManager.inMemory(directory),
       sessionCreated(created) {
         sdkSession = created;
-        creationToolNames = created.getAllTools().map((tool) => tool.name);
-        creationCommitTool = created.getToolDefinition(
-          "pipeline_feature_commit",
-        );
       },
       rootTools: () => [],
       definitionForRun: () => FEATURE_PIPELINE_ID,
-      featureCommit(runId, role, workingDir, paths) {
-        commitCalls.push({ runId, role, workingDir, paths });
-        return {
-          head: "commit-pipeline-lifecycle-test",
-          changedPaths: paths,
-        };
-      },
+      discoverySubmit() {},
+      discoveryToolAllowed: () => false,
+      featureTaskHost: () => ({
+        async diff() {
+          return {
+            taskBaseCommit: "base",
+            currentHead: "head",
+            currentBranch: "feature/test",
+            worktree: fixture.cwd,
+            baseToHead: [],
+            tracked: [],
+            staged: [],
+            untracked: [],
+            ignored: [],
+            conflictPaths: [],
+            knownResidualPaths: [],
+            preparationBaseline: [],
+            previousChecks: [],
+            diff: { text: "", truncated: false, bytes: 0 },
+          };
+        },
+        async check({ checkId }) {
+          return {
+            checkId,
+            command: "bun run check",
+            cwd: ".",
+            purpose: "Verify final state",
+            required: true,
+            status: "passed" as const,
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            changedPaths: [],
+            startedAt: 1,
+            finishedAt: 2,
+          };
+        },
+        async finalize() {
+          finalized++;
+          return {
+            validated: true,
+            status: "satisfied_without_changes" as const,
+            changedPaths: [],
+            checks: [],
+            warnings: [],
+            residualPaths: [],
+          };
+        },
+      }),
     });
 
     session = await factory.create({
-      scopeId: "run-pipeline-lifecycle-test",
-      role: FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
+      scopeId: "feature-finalizer-lifecycle-test",
+      role: FEATURE_FINALIZER_ROLE,
       attempt: 1,
-      title: "Implementation synthesis lifecycle test",
-      model: LUNA_MODEL,
+      title: "Persistent feature finalizer",
+      model: SOL_MODEL,
       thinkingLevel: "xhigh",
       cwd: fixture.cwd,
       prompt: "",
@@ -122,50 +142,46 @@ test("implementation synthesis keeps the registered commit tool across selection
     });
 
     assert.ok(sdkSession);
-    assertNoModelTraffic();
-    assert.deepEqual(creationToolNames, FEATURE_TOOL_NAMES);
-    assert.ok(creationCommitTool);
-    assert.deepEqual(session.activeTools, ["read", "bash"]);
-    assert.deepEqual(sdkSession.getActiveToolNames(), ["read", "bash"]);
-    assert.equal(session.isStreaming, false);
-    assertNoModelTraffic();
+    assert.deepEqual(session.activeTools, [
+      "read",
+      "bash",
+      "pipeline_feature_canonical_plan_submit",
+      "pipeline_feature_execution_graph_submit",
+    ]);
+    for (const tool of ["edit", "write", ...FEATURE_TASK_TOOL_NAMES]) {
+      assert.equal(session.activeTools.includes(tool), false);
+    }
+    for (const tool of FEATURE_TASK_TOOL_NAMES) {
+      assert.ok(sdkSession.getToolDefinition(tool));
+    }
 
-    const persistentSession = session;
-    const persistentSdkSession = sdkSession;
     session.enableMutation();
-    assertNoModelTraffic();
+    assert.deepEqual(session.activeTools, [
+      "read",
+      "bash",
+      "edit",
+      "write",
+      ...FEATURE_TASK_TOOL_NAMES,
+    ]);
+    for (const tool of [
+      "pipeline_feature_commit",
+      "pipeline_feature_canonical_plan_submit",
+      "pipeline_feature_execution_graph_submit",
+    ]) {
+      assert.equal(session.activeTools.includes(tool), false);
+    }
 
-    assert.strictEqual(session, persistentSession);
-    assert.strictEqual(sdkSession, persistentSdkSession);
-    assert.deepEqual(session.activeTools, FEATURE_TOOL_NAMES);
-    assert.deepEqual(sdkSession.getActiveToolNames(), FEATURE_TOOL_NAMES);
-
-    const commitTool = sdkSession.getToolDefinition("pipeline_feature_commit");
-    assert.ok(commitTool);
-    assert.strictEqual(commitTool, creationCommitTool);
-    assertNoModelTraffic();
-    const result = await commitTool.execute(
-      "pipeline-lifecycle-commit-call",
-      { paths: ["src/selected.ts"] },
+    const finalize = sdkSession.getToolDefinition("pipeline_task_finalize");
+    assert.ok(finalize);
+    const result = await finalize.execute(
+      "feature-finalizer-finalize",
+      { commitPaths: [], summary: "The accepted feature needs no changes." },
       undefined,
       undefined,
       { cwd: fixture.cwd } as unknown as ExtensionContext,
     );
-
-    assert.deepEqual(result.details, {
-      head: "commit-pipeline-lifecycle-test",
-      changedPaths: ["src/selected.ts"],
-    });
-    assert.deepEqual(commitCalls, [
-      {
-        runId: "run-pipeline-lifecycle-test",
-        role: FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
-        workingDir: fixture.cwd,
-        paths: ["src/selected.ts"],
-      },
-    ]);
-    assert.equal(session.isStreaming, false);
-    assertNoModelTraffic();
+    assert.equal(result.terminate, true);
+    assert.equal(finalized, 1);
   } finally {
     await session?.dispose();
     fauxProvider?.unregister();

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -47,11 +47,33 @@ function assertAllowedPath(
   roots: ReadonlyArray<string>,
   operation: "read" | "write",
 ) {
+  const requestedParts = path.resolve(value).split(path.sep);
+  if (
+    requestedParts.some(
+      (part) => part === ".git" || part === ".pi-subagents" || part === ".pipi",
+    )
+  ) {
+    throw new Error(
+      "Feature workspace access denied to controller-owned metadata.",
+    );
+  }
   const resolvedRoots = roots.map(comparableExistingPath);
   const resolved =
     operation === "read" || fs.existsSync(value)
       ? comparableExistingPath(value)
       : nearestExisting(value);
+  if (
+    resolved
+      .split(path.sep)
+      .some(
+        (part) =>
+          part === ".git" || part === ".pi-subagents" || part === ".pipi",
+      )
+  ) {
+    throw new Error(
+      "Feature workspace access denied to controller-owned metadata.",
+    );
+  }
   if (!resolvedRoots.some((root) => isWithin(resolved, root))) {
     throw new Error(
       `Feature workspace ${operation} denied outside the controller-assigned scope.`,
@@ -118,12 +140,13 @@ function createFeatureRuntimeDirectories(tempRoot: string, cwd: string) {
   return directories;
 }
 
-function sandboxCommand(
+function sandboxCommandArguments(
   command: string,
   mode: FeatureSandboxMode,
   tempRoot: string,
   cwd: string,
   runtime: FeatureRuntimeDirectories,
+  executionCwd = cwd,
 ) {
   const roots = visibleRoots(mode, tempRoot, cwd);
   const args = [
@@ -152,8 +175,15 @@ function sandboxCommand(
   args.push("--setenv", "TMP", runtime.temp);
   args.push("--setenv", "TEMP", runtime.temp);
   args.push("--setenv", "XDG_CACHE_HOME", runtime.cache);
-  args.push("--chdir", cwd, "--", "/bin/bash", "-lc", command);
-  return `/usr/bin/bwrap ${args.map(shellQuote).join(" ")}`;
+  for (const root of roots) {
+    for (const name of [".git", ".pi-subagents", ".pipi"]) {
+      const protectedPath = path.join(root, name);
+      if (fs.existsSync(protectedPath))
+        args.push("--ro-bind", protectedPath, protectedPath);
+    }
+  }
+  args.push("--chdir", executionCwd, "--", "/bin/bash", "-lc", command);
+  return args;
 }
 
 export function createFeatureToolBoundary(options: {
@@ -168,7 +198,7 @@ export function createFeatureToolBoundary(options: {
   const bashOperations: BashOperations = {
     async exec(command, _requestedCwd, execution) {
       const result = await localBash.exec(
-        sandboxCommand(command, mode, tempRoot, cwd, runtime),
+        `/usr/bin/bwrap ${sandboxCommandArguments(command, mode, tempRoot, cwd, runtime).map(shellQuote).join(" ")}`,
         "/",
         execution,
       );
@@ -266,4 +296,78 @@ export function createFeatureToolBoundary(options: {
       mode = "augmentation";
     },
   } satisfies FeatureToolBoundary;
+}
+
+/** Run an accepted graph check or caller-supplied preparation in its assigned workspace. */
+export async function runFeatureSandboxCommand(options: {
+  workspaceRoot: string;
+  cwd: string;
+  command: string;
+  signal?: AbortSignal;
+}) {
+  if (options.signal?.aborted) throw new Error("Feature command cancelled.");
+  const workspaceRoot = comparableExistingPath(options.workspaceRoot);
+  const cwd = comparableExistingPath(path.resolve(workspaceRoot, options.cwd));
+  if (!isWithin(cwd, workspaceRoot) || !fs.statSync(cwd).isDirectory()) {
+    throw new Error(
+      "Feature check cwd must remain inside its assigned worktree.",
+    );
+  }
+  const tempRoot = comparableExistingPath(path.dirname(workspaceRoot));
+  const runtime = createFeatureRuntimeDirectories(tempRoot, workspaceRoot);
+  const args = sandboxCommandArguments(
+    options.command,
+    "candidate",
+    tempRoot,
+    workspaceRoot,
+    runtime,
+    cwd,
+  );
+  const maxBytes = 256 * 1024;
+  return new Promise<{
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+  }>((resolve, reject) => {
+    const child = spawn("/usr/bin/bwrap", args, {
+      cwd: "/",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = Buffer.alloc(0);
+    let stderr = Buffer.alloc(0);
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutTruncated ||= stdout.length + chunk.length > maxBytes;
+      stdout = Buffer.concat([
+        stdout,
+        chunk.subarray(0, Math.max(0, maxBytes - stdout.length)),
+      ]);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrTruncated ||= stderr.length + chunk.length > maxBytes;
+      stderr = Buffer.concat([
+        stderr,
+        chunk.subarray(0, Math.max(0, maxBytes - stderr.length)),
+      ]);
+    });
+    const cancel = () => {
+      child.kill("SIGTERM");
+    };
+    options.signal?.addEventListener("abort", cancel, { once: true });
+    if (options.signal?.aborted) cancel();
+    child.once("error", (error) => {
+      options.signal?.removeEventListener("abort", cancel);
+      reject(error);
+    });
+    child.once("close", (exitCode) => {
+      options.signal?.removeEventListener("abort", cancel);
+      const marker = "\n[Output truncated.]";
+      resolve({
+        exitCode,
+        stdout: stdout.toString("utf8") + (stdoutTruncated ? marker : ""),
+        stderr: stderr.toString("utf8") + (stderrTruncated ? marker : ""),
+      });
+    });
+  });
 }

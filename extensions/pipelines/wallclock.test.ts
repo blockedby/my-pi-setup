@@ -288,7 +288,9 @@ test("timed stage matrix leaves only plan completion untimed", () => {
         (
           [
             "discover",
+            "plan",
             "build",
+            "review",
             "audit",
             "audit-resolve",
             "final-audit",
@@ -307,7 +309,6 @@ test("timed stage matrix leaves only plan completion untimed", () => {
     >,
     [
       ["feature-pipeline", "discover", true],
-      ["feature-pipeline", "build", true],
       ["feature-pipeline", "audit", true],
       ["feature-pipeline", "audit-resolve", true],
       ["feature-pipeline", "final-audit", true],
@@ -320,6 +321,9 @@ test("timed stage matrix leaves only plan completion untimed", () => {
       ["audit-pipeline", "audit", true],
     ],
   );
+  for (const stage of ["plan", "build", "review"] as const) {
+    assert.equal(timedPipelineStage("feature-pipeline", stage), false);
+  }
 });
 
 test("controller warns current-stage sessions at 80% and settles once at 100%", async () => {
