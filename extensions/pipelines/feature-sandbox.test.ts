@@ -279,3 +279,204 @@ test("graph commands use the contained package cwd and reject symlink escapes", 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("loaded skill packages support symlinks, resources and executable scripts without tool write grants", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-skill-sandbox-"));
+  const cwd = path.join(root, "workspace");
+  const packageRoot = path.join(root, "packages", "quality");
+  const alias = path.join(root, ".pipi", "agent", "skills", "quality");
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.mkdirSync(path.join(packageRoot, "scripts"), { recursive: true });
+  fs.mkdirSync(path.join(packageRoot, "assets"));
+  fs.mkdirSync(path.dirname(alias), { recursive: true });
+  fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "fixture skill");
+  fs.writeFileSync(
+    path.join(packageRoot, "assets", "value.txt"),
+    "fixture resource",
+  );
+  fs.symlinkSync("assets/value.txt", path.join(packageRoot, "reference.txt"));
+  fs.writeFileSync(
+    path.join(packageRoot, "scripts", "run.sh"),
+    '#!/bin/sh\ncat "$(dirname "$0")/../assets/value.txt" > "$TMPDIR/result"\ncat "$TMPDIR/result"\n',
+    { mode: 0o755 },
+  );
+  fs.symlinkSync(packageRoot, alias);
+  const secret = path.join(root, ".pipi", "agent", "auth.json");
+  fs.writeFileSync(secret, "fixture secret");
+  fs.symlinkSync(secret, path.join(packageRoot, "escape"));
+  const sibling = path.join(root, "packages", "quality-other");
+  fs.mkdirSync(sibling);
+  fs.writeFileSync(path.join(sibling, "SKILL.md"), "unloaded");
+  try {
+    for (const mode of ["candidate", "selection"] as const) {
+      const boundary = createFeatureToolBoundary({
+        cwd,
+        mode,
+        skills: [{ baseDir: alias, filePath: path.join(alias, "SKILL.md") }],
+      });
+      for (const [relative, expected] of [
+        ["SKILL.md", "fixture skill"],
+        ["assets/value.txt", "fixture resource"],
+        ["reference.txt", "fixture resource"],
+      ] as const) {
+        const result = await execute(tool(boundary, "read"), {
+          path: path.join(alias, relative),
+        });
+        assert.equal(
+          result.content
+            .filter((p) => p.type === "text")
+            .map((p) => p.text)
+            .join(""),
+          expected,
+        );
+      }
+      for (const denied of [
+        secret,
+        path.join(alias, "escape"),
+        path.join(sibling, "SKILL.md"),
+      ]) {
+        await assert.rejects(
+          execute(tool(boundary, "read"), { path: denied }),
+          /denied/,
+        );
+      }
+      for (const denied of [
+        path.join(alias, "SKILL.md"),
+        path.join(packageRoot, "new.txt"),
+      ]) {
+        await assert.rejects(
+          execute(tool(boundary, "write"), { path: denied, content: "bad" }),
+          /read-only/,
+        );
+      }
+      await assert.rejects(
+        execute(tool(boundary, "edit"), {
+          path: path.join(alias, "SKILL.md"),
+          edits: [{ oldText: "fixture", newText: "bad" }],
+        }),
+        /read-only/,
+      );
+      const result = await execute(tool(boundary, "bash"), {
+        command: `'${alias}/scripts/run.sh'`,
+      });
+      assert.equal(
+        result.content
+          .filter((p) => p.type === "text")
+          .map((p) => p.text)
+          .join("")
+          .trim(),
+        "fixture resource",
+      );
+      await execute(tool(boundary, "bash"), {
+        command: `! touch '${alias}/new.txt' && ! touch '${packageRoot}/new.txt'`,
+      });
+      assert.equal(fs.existsSync(path.join(packageRoot, "new.txt")), false);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a file-symlink skill grants its target file but not its target's siblings", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-file-skill-"));
+  const cwd = path.join(root, "workspace");
+  const baseDir = path.join(root, ".pipi", "agent", "skills", "file-skill");
+  fs.mkdirSync(cwd);
+  fs.mkdirSync(baseDir, { recursive: true });
+  const target = path.join(root, "instructions.md");
+  fs.writeFileSync(target, "file skill");
+  fs.writeFileSync(path.join(root, "other.md"), "not a resource");
+  const filePath = path.join(baseDir, "SKILL.md");
+  fs.symlinkSync(target, filePath);
+  try {
+    const boundary = createFeatureToolBoundary({ cwd, mode: "candidate" });
+    boundary.setSkills([{ baseDir, filePath }]);
+    const result = await execute(tool(boundary, "read"), { path: filePath });
+    assert.equal(
+      result.content
+        .filter((p) => p.type === "text")
+        .map((p) => p.text)
+        .join(""),
+      "file skill",
+    );
+    await assert.rejects(
+      execute(tool(boundary, "read"), { path: path.join(root, "other.md") }),
+      /denied/,
+    );
+    const shell = await execute(tool(boundary, "bash"), {
+      command: `cat '${filePath}'`,
+    });
+    assert.equal(
+      shell.content
+        .filter((p) => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+        .trim(),
+      "file skill",
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("visible symlink packages stay executable and project packages stay read-only after augmentation", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-visible-skill-"));
+  const external = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-external-skill-"),
+  );
+  const cwd = path.join(root, "workspace");
+  const baseDir = path.join(cwd, "skills", "local");
+  const alias = path.join(external, "linked");
+  fs.mkdirSync(baseDir, { recursive: true });
+  fs.writeFileSync(path.join(baseDir, "SKILL.md"), "local package");
+  fs.symlinkSync(baseDir, alias);
+  try {
+    const boundary = createFeatureToolBoundary({
+      cwd,
+      mode: "selection",
+      skills: [{ baseDir: alias, filePath: path.join(alias, "SKILL.md") }],
+    });
+    boundary.enableAugmentation();
+    const shell = await execute(tool(boundary, "bash"), {
+      command: `cat '${alias}/SKILL.md'; ! touch '${baseDir}/new.txt'`,
+    });
+    assert.equal(
+      shell.content
+        .filter((p) => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+        .startsWith("local package"),
+      true,
+    );
+    assert.equal(fs.existsSync(path.join(baseDir, "new.txt")), false);
+    await assert.rejects(
+      execute(tool(boundary, "write"), {
+        path: path.join(baseDir, "new.txt"),
+        content: "bad",
+      }),
+      /read-only/,
+    );
+    await execute(tool(boundary, "write"), {
+      path: path.join(cwd, "output.txt"),
+      content: "allowed",
+    });
+    await assert.rejects(
+      execute(tool(boundary, "read"), {
+        path: path.join(alias, "SKILL.md", "missing"),
+      }),
+    );
+    fs.unlinkSync(alias);
+    fs.symlinkSync(external, alias);
+    fs.writeFileSync(
+      path.join(external, "SKILL.md"),
+      "replacement must not gain access",
+    );
+    await assert.rejects(
+      execute(tool(boundary, "read"), { path: path.join(alias, "SKILL.md") }),
+      /denied/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(external, { recursive: true, force: true });
+  }
+});

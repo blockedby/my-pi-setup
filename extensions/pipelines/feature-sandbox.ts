@@ -11,6 +11,7 @@ import {
   type BashOperations,
   type EditOperations,
   type ReadOperations,
+  type Skill,
   type ToolDefinition,
   type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
@@ -22,6 +23,7 @@ export interface FeatureToolBoundary {
   readonly availableToolNames: ReadonlyArray<string>;
   readonly initialActiveTools: ReadonlyArray<string>;
   enableAugmentation(): void;
+  setSkills(skills: ReadonlyArray<Pick<Skill, "baseDir" | "filePath">>): void;
 }
 
 function comparableExistingPath(value: string) {
@@ -42,11 +44,61 @@ function nearestExisting(value: string) {
   return comparableExistingPath(current);
 }
 
+// Grants come from the host resource loader, never tool arguments. Prompts
+// use lexical paths; containment uses canonical package roots pinned here.
+function skillResources(
+  skills: ReadonlyArray<Pick<Skill, "baseDir" | "filePath">>,
+) {
+  return skills.flatMap((skill) => [
+    {
+      source: comparableExistingPath(skill.baseDir),
+      destination: path.resolve(skill.baseDir),
+      directory: true,
+    },
+    {
+      source: comparableExistingPath(skill.filePath),
+      destination: path.resolve(skill.filePath),
+      directory: false,
+    },
+  ]);
+}
+
+type SkillResources = ReturnType<typeof skillResources>;
+
+function withinSkill(value: string, resources: SkillResources) {
+  return resources.some(({ source, directory }) =>
+    directory ? isWithin(value, source) : value === source,
+  );
+}
+
 function assertAllowedPath(
   value: string,
   roots: ReadonlyArray<string>,
   operation: "read" | "write",
+  resources: SkillResources = [],
 ) {
+  const target =
+    operation === "read" || fs.existsSync(value)
+      ? comparableExistingPath(value)
+      : nearestExisting(value);
+  if (withinSkill(target, resources)) {
+    if (operation === "write") {
+      throw new Error("Feature skill packages are read-only.");
+    }
+    // .pipi ancestors are legitimate for installed skills; nested metadata
+    // is not part of the package resource grant.
+    const allowed = resources.some(({ source, directory }) => {
+      if (!directory) return target === source;
+      return (
+        isWithin(target, source) &&
+        !path
+          .relative(source, target)
+          .split(path.sep)
+          .some((part) => [".git", ".pi-subagents", ".pipi"].includes(part))
+      );
+    });
+    if (allowed) return target;
+  }
   const requestedParts = path.resolve(value).split(path.sep);
   if (
     requestedParts.some(
@@ -147,6 +199,7 @@ function sandboxCommandArguments(
   cwd: string,
   runtime: FeatureRuntimeDirectories,
   executionCwd = cwd,
+  resources: SkillResources = [],
 ) {
   const roots = visibleRoots(mode, tempRoot, cwd);
   const args = [
@@ -182,6 +235,27 @@ function sandboxCommandArguments(
         args.push("--ro-bind", protectedPath, protectedPath);
     }
   }
+  // Restore loaded packages even when tempRoot masked their paths. These
+  // bindings also override writable workspace mounts. Keep original paths
+  // so scripts can locate resources relative to their package directory.
+  const exposedDirectories = [...roots];
+  // Canonical targets first; aliases may resolve through another package.
+  for (const { source, directory } of resources) {
+    args.push("--ro-bind", source, source);
+    if (directory) exposedDirectories.push(source);
+  }
+  for (const { source, destination, directory } of resources) {
+    if (source === destination) continue;
+    // Existing symlinks must be followed, not used as bind destinations.
+    // Only recreate aliases erased by the controller's tempRoot mount.
+    if (
+      isWithin(destination, tempRoot) &&
+      !exposedDirectories.some((root) => isWithin(destination, root))
+    ) {
+      args.push("--ro-bind", source, destination);
+      if (directory) exposedDirectories.push(destination);
+    }
+  }
   args.push("--chdir", executionCwd, "--", "/bin/bash", "-lc", command);
   return args;
 }
@@ -189,7 +263,9 @@ function sandboxCommandArguments(
 export function createFeatureToolBoundary(options: {
   readonly cwd: string;
   readonly mode: "candidate" | "selection";
+  readonly skills?: ReadonlyArray<Pick<Skill, "baseDir" | "filePath">>;
 }) {
+  let resources = skillResources(options.skills ?? []);
   const cwd = comparableExistingPath(options.cwd);
   const tempRoot = comparableExistingPath(path.dirname(cwd));
   const runtime = createFeatureRuntimeDirectories(tempRoot, cwd);
@@ -198,7 +274,7 @@ export function createFeatureToolBoundary(options: {
   const bashOperations: BashOperations = {
     async exec(command, _requestedCwd, execution) {
       const result = await localBash.exec(
-        `/usr/bin/bwrap ${sandboxCommandArguments(command, mode, tempRoot, cwd, runtime).map(shellQuote).join(" ")}`,
+        `/usr/bin/bwrap ${sandboxCommandArguments(command, mode, tempRoot, cwd, runtime, cwd, resources).map(shellQuote).join(" ")}`,
         "/",
         execution,
       );
@@ -211,6 +287,7 @@ export function createFeatureToolBoundary(options: {
         absolutePath,
         visibleRoots(mode, tempRoot, cwd),
         "read",
+        resources,
       );
       return fs.promises.readFile(allowed);
     },
@@ -219,13 +296,19 @@ export function createFeatureToolBoundary(options: {
         absolutePath,
         visibleRoots(mode, tempRoot, cwd),
         "read",
+        resources,
       );
       await fs.promises.access(allowed, fs.constants.R_OK);
     },
   };
   const editOperations: EditOperations = {
     async readFile(absolutePath) {
-      const allowed = assertAllowedPath(absolutePath, [cwd], "write");
+      const allowed = assertAllowedPath(
+        absolutePath,
+        [cwd],
+        "write",
+        resources,
+      );
       return fs.promises.readFile(allowed);
     },
     async writeFile(absolutePath, content) {
@@ -234,11 +317,21 @@ export function createFeatureToolBoundary(options: {
           "Selection phase is read-only until primary validation.",
         );
       }
-      const allowed = assertAllowedPath(absolutePath, [cwd], "write");
+      const allowed = assertAllowedPath(
+        absolutePath,
+        [cwd],
+        "write",
+        resources,
+      );
       await fs.promises.writeFile(allowed, content);
     },
     async access(absolutePath) {
-      const allowed = assertAllowedPath(absolutePath, [cwd], "write");
+      const allowed = assertAllowedPath(
+        absolutePath,
+        [cwd],
+        "write",
+        resources,
+      );
       await fs.promises.access(allowed, fs.constants.R_OK | fs.constants.W_OK);
     },
   };
@@ -249,7 +342,12 @@ export function createFeatureToolBoundary(options: {
           "Selection phase is read-only until primary validation.",
         );
       }
-      const allowed = assertAllowedPath(absolutePath, [cwd], "write");
+      const allowed = assertAllowedPath(
+        absolutePath,
+        [cwd],
+        "write",
+        resources,
+      );
       await fs.promises.writeFile(allowed, content);
     },
     async mkdir(directory) {
@@ -258,7 +356,7 @@ export function createFeatureToolBoundary(options: {
           "Selection phase is read-only until primary validation.",
         );
       }
-      const allowed = assertAllowedPath(directory, [cwd], "write");
+      const allowed = assertAllowedPath(directory, [cwd], "write", resources);
       await fs.promises.mkdir(allowed, { recursive: true });
     },
   };
@@ -291,6 +389,9 @@ export function createFeatureToolBoundary(options: {
       options.mode === "selection"
         ? ["read", "bash"]
         : ["read", "bash", "edit", "write", "pipeline_feature_commit"],
+    setSkills(skills) {
+      resources = skillResources(skills);
+    },
     enableAugmentation() {
       if (options.mode !== "selection") return;
       mode = "augmentation";

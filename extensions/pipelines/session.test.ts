@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import test from "node:test";
 import { Value } from "typebox/value";
@@ -47,6 +47,29 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
   const diffRequests: unknown[] = [];
 
   try {
+    const skillDir = path.join(fixture.agentDir, "skills", "fixture");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      path.join(skillDir, "SKILL.md"),
+      "---\nname: fixture\ndescription: Test package resources.\n---\nFixture\n",
+    );
+    await writeFile(path.join(skillDir, "resource.txt"), "session resource");
+    const discoveredDir = path.join(fixture.root, "discovered-skill");
+    await mkdir(discoveredDir);
+    await writeFile(
+      path.join(discoveredDir, "SKILL.md"),
+      "---\nname: discovered\ndescription: Extension-discovered package.\n---\nFixture\n",
+    );
+    await writeFile(
+      path.join(discoveredDir, "resource.txt"),
+      "discovered resource",
+    );
+    const extensionDir = path.join(fixture.agentDir, "extensions");
+    await mkdir(extensionDir);
+    await writeFile(
+      path.join(extensionDir, "skill-fixture.ts"),
+      `export default function (pi) { pi.on("resources_discover", () => ({ skillPaths: [${JSON.stringify(discoveredDir)}] })); }`,
+    );
     fauxProvider = registerFauxProvider({
       api: "feature-finalizer-lifecycle-test-api",
       provider: "feature-finalizer-lifecycle-test-provider",
@@ -152,6 +175,36 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
 
     assert.ok(sdkSession);
     assert.equal(sdkSession.thinkingLevel, "low");
+    const read = sdkSession.getToolDefinition("read");
+    assert.ok(read);
+    const resource = await read.execute(
+      "read-loaded-skill-resource",
+      { path: path.join(skillDir, "resource.txt") },
+      undefined,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
+    );
+    assert.equal(
+      resource.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join(""),
+      "session resource",
+    );
+    const discovered = await read.execute(
+      "read-discovered-skill-resource",
+      { path: path.join(discoveredDir, "resource.txt") },
+      undefined,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
+    );
+    assert.equal(
+      discovered.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join(""),
+      "discovered resource",
+    );
     assert.deepEqual(session.activeTools, [
       "read",
       "bash",
