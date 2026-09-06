@@ -1,3 +1,4 @@
+import { projectFeatureTasks } from "./feature-progress.ts";
 import {
   defineTool,
   truncateHead,
@@ -309,6 +310,9 @@ export function projectPipelineCheck(
     agentStatusCounts: agentStatusCounts(agents),
     agents: projectedAgents,
     ...(auditSegment ? { auditSegment } : {}),
+    ...(run.featureGraph
+      ? { featureGraph: projectFeatureTasks(run.featureGraph) }
+      : {}),
     ...(completion ? { completion } : {}),
   };
 }
@@ -414,6 +418,22 @@ export function formatPipelineCheck(details: ProjectedPipelineCheck) {
         lines.push("  No model-visible output yet.");
       }
     }
+  }
+
+  if (details.featureGraph) {
+    lines.push(
+      `Feature artifacts: ${details.featureGraph.artifactDir}`,
+      `Feature tasks: ${details.featureGraph.tasks.length}`,
+    );
+    for (const task of details.featureGraph.tasks) {
+      lines.push(
+        `- ${task.id} · ${task.status} · attempt ${task.attempt}${task.validatedCommit ? ` · commit ${task.validatedCommit.slice(0, 12)}` : task.provisionalCommit ? ` · provisional ${task.provisionalCommit.slice(0, 12)}` : ""}`,
+      );
+    }
+    for (const join of details.featureGraph.joins)
+      lines.push(`Join ${join.id}: ${join.status}`);
+    for (const warning of details.featureGraph.warnings)
+      lines.push(`Cleanup warning: ${warning}`);
   }
 
   if (details.auditSegment) {

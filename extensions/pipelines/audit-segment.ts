@@ -8,6 +8,7 @@ import {
   type AuditPipelineInput,
   type PipelineLunaAuditRole,
 } from "./domain.ts";
+import type { FeatureAuditHandoff } from "./feature-audit-handoff.ts";
 import { IncrementalFanInReducer } from "./incremental-fan-in.ts";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
@@ -325,6 +326,7 @@ export interface AuditSegmentContext {
   readonly input: AuditPipelineInput;
   readonly git: AuditGitIdentity;
   readonly purpose: AuditSegmentPurpose;
+  readonly featureHandoff?: FeatureAuditHandoff;
 }
 
 export interface AuditExecutedCheck {
@@ -954,19 +956,23 @@ function sharedAuditContract(
           },
         )}`
       : "Initial mode may discover concrete findings within the supplied task and acceptance contract.";
+  const auditInput = context.featureHandoff
+    ? `Sanitized feature audit context:\n${JSON.stringify(context.featureHandoff)}`
+    : `Acceptance contract: ${context.acceptanceContract}
+Assumptions: ${JSON.stringify(context.assumptions)}
+Checks: ${JSON.stringify(context.checks)}
+Captured review identity and host-collected read-only Git evidence:
+${JSON.stringify(context.git)}`;
   return `Audit mode: ${context.input.mode}
 Audit purpose: ${context.purpose}
 Task: ${context.task}
-Acceptance contract: ${context.acceptanceContract}
-Assumptions: ${JSON.stringify(context.assumptions)}
-Checks: ${JSON.stringify(context.checks)}
+${auditInput}
 ${closure}
-Captured review identity and host-collected read-only Git evidence:
-${JSON.stringify(context.git)}${
-    hostObservation
-      ? `\nFresh host workspace observation captured after executor settlement:\n${JSON.stringify(hostObservation)}`
-      : ""
-  }`;
+${
+  hostObservation
+    ? `\nFresh host workspace observation captured after executor settlement:\n${JSON.stringify(hostObservation)}`
+    : ""
+}`;
 }
 
 export function buildAuditTrackPrompt(

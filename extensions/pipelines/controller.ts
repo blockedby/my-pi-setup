@@ -1,4 +1,7 @@
 import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
   defineTool,
@@ -16,6 +19,8 @@ import {
   AUDIT_SEGMENT_LUNA_ROLES,
   AUDIT_SYNTHESIS_ROLE,
   EXECUTOR_AUDIT_ROLE,
+  FEATURE_FINALIZER_ROLE,
+  FEATURE_PLAN_ROLES,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
   LUNA_MODEL,
@@ -23,6 +28,7 @@ import {
   PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
   PLAN_PIPELINE_SYNTHESIS_ROLE,
+  ASTRA_MODEL,
   type PlanPipelineDiscoveryRole,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
@@ -41,6 +47,9 @@ import {
   titleForRole,
   type AuditPipelineInput,
   type FeaturePipelineDiscoveryRole,
+  type FeaturePipelineGraphSnapshot,
+  type FeaturePipelinePlanningSnapshot,
+  type FeaturePlanRole,
   type PipelineChildRole,
   type PipelineCompletionFacts,
   type PipelineDefinitionId,
@@ -69,41 +78,43 @@ import {
   type PlanDiscoveryReportContext,
 } from "./plan-discovery-report.ts";
 import {
+  buildFeatureCandidatePlanPrompt,
+  buildFeatureCanonicalPlanPrompt,
+  buildFeatureExecutionGraphPrompt,
+  buildFeatureFinalReviewPrompt,
+  buildFeaturePipelinePrompt,
   buildPipelineChildPrompt,
   buildPipelinePrompt,
   type FeatureDiscoveryReportContext,
 } from "./prompt.ts";
 import {
-  FEATURE_CANDIDATE_ROLES,
-  FEATURE_CANDIDATE_STEERING_LIMIT_MS,
-  FEATURE_CANDIDATE_STEERING_WARNING_MS,
-  FEATURE_DISCOVERY_SYNTHESIS_ROLE,
-  FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
-  assertBoundedSynthesisInput,
-  buildFeatureAugmentationPrompt,
-  buildFeatureCandidatePrompt,
-  buildFeatureDiscoverySynthesisPrompt,
-  buildFeatureSelectionPrompt,
-  parseFeatureCandidateHandoff,
-  parseFeatureDiscoverySynthesis,
-  parseFeatureDiscoverySynthesisValue,
-  parseFeatureSelection,
-  parseFeatureSynthesisProvenance,
-  preparedDiscoveryPackage,
-  type FeatureCandidateComparisonInput,
-  type FeatureCandidateHandoff,
-  type FeatureDiscoverySynthesis,
-  type FeatureSelection,
-  type FeatureSynthesisProvenance,
-} from "./feature-best-of-three.ts";
+  FEATURE_PLANNING_CORRECTION_TURNS,
+  parseFeatureCandidatePlanForRole,
+  parseFeatureCandidatePlanText,
+  parseFeatureCanonicalPlan,
+  parseFeatureCanonicalPlanText,
+  parseFeatureExecutionGraph,
+  parseFeatureExecutionGraphText,
+  type FeatureCandidatePlan,
+  type FeatureCanonicalPlan,
+  type FeatureExecutionGraph,
+  type FeaturePlanCandidateRole,
+} from "./feature-planning.ts";
+import { validateAndCompileFeatureExecutionGraph } from "./feature-graph.ts";
+import { buildFeatureAuditHandoff } from "./feature-audit-handoff.ts";
+import {
+  createFeatureReviewRuntime,
+  executeFeatureGraph,
+  type FeatureGraphExecutionResult,
+  type FeatureReviewRuntime,
+  type FeatureTaskSessionInput,
+  type FeatureTaskSessionOutcome,
+  type FeatureTaskToolHost,
+} from "./feature-runtime.ts";
 import {
   defaultFeatureGitOperations,
   type FeatureCallerWorktree,
-  type FeatureCommitResult,
-  type FeatureTemporaryWorktree,
   type FeatureGitOperations,
-  type FeatureWorktreeLifecycle,
-  type FrozenFeatureCandidate,
 } from "./feature-worktrees.ts";
 import {
   AuditSegment,
@@ -145,8 +156,15 @@ export function pipelineDiscoveryToolAllowed(
       (stage === "synthesize" && role === PLAN_PIPELINE_SYNTHESIS_ROLE)
     );
   }
-  if (definition !== FEATURE_PIPELINE_ID || stage !== "discover") return false;
-  if (role === FEATURE_DISCOVERY_SYNTHESIS_ROLE) return true;
+  if (definition !== FEATURE_PIPELINE_ID) return false;
+  if (
+    stage === "plan" &&
+    (role === FEATURE_FINALIZER_ROLE ||
+      FEATURE_PLAN_ROLES.some((planRole) => planRole === role))
+  ) {
+    return bootstrapped;
+  }
+  if (stage !== "discover") return false;
   return (
     !bootstrapped &&
     FEATURE_PIPELINE_DISCOVERY_ROLES.some(
@@ -167,9 +185,7 @@ export function pipelineDiscoverySubmissionAllowed(
   if (!pipelineDiscoveryToolAllowed(definition, role, stage, bootstrapped)) {
     return false;
   }
-  return role === FEATURE_DISCOVERY_SYNTHESIS_ROLE
-    ? bootstrapped
-    : !bootstrapped;
+  return stage === "plan" ? bootstrapped : !bootstrapped;
 }
 
 export function pipelineAuditSubmissionAllowed(
@@ -199,18 +215,12 @@ function isFeatureDiscoveryRole(
 
 function isFeatureInternalImplementationRole(role: string) {
   return (
-    role === FEATURE_DISCOVERY_SYNTHESIS_ROLE ||
-    role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE ||
-    FEATURE_CANDIDATE_ROLES.some(
-      (candidateRole) => `candidate-${candidateRole.toLowerCase()}` === role,
-    )
+    role === FEATURE_FINALIZER_ROLE ||
+    FEATURE_PLAN_ROLES.some((planRole) => planRole === role) ||
+    role.startsWith("feature-task-") ||
+    role.startsWith("feature-conflict-") ||
+    role.startsWith("feature-join-repair-")
   );
-}
-
-function featureAuditVerificationSummary(reportedCheckCount: number) {
-  return [
-    `The synthesized implementation reported ${reportedCheckCount} verification check(s) before exact clean promotion; model-authored check text is withheld so independent audits receive no Best-of-3 provenance.`,
-  ];
 }
 
 function deferredSignal() {
@@ -259,7 +269,6 @@ interface MutableRun {
   limitation?: PipelineWallclockLimitation;
   limiting?: boolean;
   cleanup?: Promise<void>;
-  featureCleanupDone: boolean;
   lastMonotonicNow?: number;
   cancellation?: Promise<PipelineRunSnapshot>;
   featureDiscoveryBootstrapped: boolean;
@@ -274,17 +283,18 @@ interface MutableRun {
   planText?: string;
   planWrittenPath?: string;
   featureCaller?: FeatureCallerWorktree;
-  featureLifecycle?: FeatureWorktreeLifecycle;
-  featureCandidateWorktrees?: ReadonlyArray<FeatureTemporaryWorktree>;
-  featureCandidateSteeringCancels: Map<string, ReadonlyArray<() => void>>;
-  featureDiscoverySynthesis?: FeatureDiscoverySynthesis;
-  featureCandidates?: ReadonlyArray<{
-    readonly candidate: FrozenFeatureCandidate;
-    readonly handoff: FeatureCandidateHandoff;
-  }>;
-  featureSelection?: FeatureSelection;
-  featureSynthesisProvenance?: FeatureSynthesisProvenance;
   featureSynthesisChecks: ReadonlyArray<string>;
+  featurePlanning?: FeaturePipelinePlanningSnapshot;
+  featureCandidatePlans?: ReadonlyArray<FeatureCandidatePlan>;
+  featureCanonicalPlan?: FeatureCanonicalPlan;
+  featureExecutionGraph?: FeatureExecutionGraph;
+  featureGraph?: FeaturePipelineGraphSnapshot;
+  featureExecution?: FeatureGraphExecutionResult;
+  featureExecutionPromise?: Promise<FeatureGraphExecutionResult>;
+  featureReviewRuntime?: FeatureReviewRuntime;
+  featureTaskHosts: Map<string, FeatureTaskToolHost>;
+  featureAbortController?: AbortController;
+  featureArtifactDir?: string;
   auditSegment?: AuditSegment;
   auditSegmentStarting?: Promise<ReadonlyArray<AgentNodeSnapshot>>;
   finalAuditReportDelivered: boolean;
@@ -366,12 +376,6 @@ export interface PipelineControllerOptions {
       token: string,
     ) => void,
     discoveryToolAllowed?: (runId: string, role: string) => boolean,
-    featureCommit?: (
-      runId: string,
-      role: string,
-      workingDir: string,
-      paths: ReadonlyArray<string>,
-    ) => FeatureCommitResult,
     executionFinish?: (
       runId: string,
       role: string,
@@ -384,6 +388,10 @@ export interface PipelineControllerOptions {
       token: string,
       sessionId: string,
     ) => void,
+    featureTaskHost?: (
+      runId: string,
+      role: string,
+    ) => FeatureTaskToolHost | undefined,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
   readonly makeRunId?: (pipelineName: string) => string;
@@ -392,6 +400,9 @@ export interface PipelineControllerOptions {
   readonly featureGit?: FeatureGitOperations;
   readonly monotonicClock?: PipelineMonotonicClock;
   readonly wallclockScheduler?: PipelineWallclockScheduler;
+  readonly executeFeatureGraph?: typeof executeFeatureGraph;
+  readonly createFeatureReviewRuntime?: typeof createFeatureReviewRuntime;
+  readonly artifactRoot?: string;
   /** Concise aliases used by deterministic controller fixtures. */
   readonly clock?: PipelineMonotonicClock;
   readonly scheduler?: PipelineWallclockScheduler;
@@ -467,6 +478,9 @@ export class PipelineController {
   private readonly tree: AgentTreeController;
   private readonly onHandoff: PipelineControllerOptions["onHandoff"];
   private readonly featureGit: FeatureGitOperations;
+  private readonly featureGraphExecutor: typeof executeFeatureGraph;
+  private readonly featureReviewRuntimeFactory: typeof createFeatureReviewRuntime;
+  private readonly artifactRoot: string;
   private readonly makeRunId: (pipelineName: string) => string;
   private shuttingDown = false;
 
@@ -486,6 +500,13 @@ export class PipelineController {
           (options.makeRunToken ?? securePipelineToken)(),
         ));
     this.featureGit = options.featureGit ?? defaultFeatureGitOperations;
+    this.featureGraphExecutor =
+      options.executeFeatureGraph ?? executeFeatureGraph;
+    this.featureReviewRuntimeFactory =
+      options.createFeatureReviewRuntime ?? createFeatureReviewRuntime;
+    this.artifactRoot =
+      options.artifactRoot ??
+      path.join(os.homedir(), ".pipi", "agent", "pipelines");
     this.tree = new AgentTreeController({
       factory: options.createSessionFactory(
         (runId) => this.createRootTools(runId),
@@ -526,12 +547,11 @@ export class PipelineController {
             run.featureDiscoveryBootstrapped,
           );
         },
-        (runId, role, workingDir, paths) =>
-          this.commitFeatureWorktree(runId, role, workingDir, paths),
         (runId, role, token, value) =>
           this.submitExecutionFinish(runId, role, token, value),
         (runId, role, token, sessionId) =>
           this.registerExecutionSessionToken(runId, role, token, sessionId),
+        (runId, role) => this.runs.get(runId)?.featureTaskHosts.get(role),
       ),
       // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
       // intentionally do not apply to pipeline roots or children.
@@ -690,7 +710,19 @@ export class PipelineController {
     run: MutableRun,
     role: string,
   ): PipelineStage | undefined {
-    if (role === FEATURE_DISCOVERY_SYNTHESIS_ROLE) return "discover";
+    if (role === FEATURE_FINALIZER_ROLE) {
+      return run.stage === "plan" || run.stage === "review"
+        ? run.stage
+        : undefined;
+    }
+    if (FEATURE_PLAN_ROLES.some((planRole) => planRole === role)) return "plan";
+    if (
+      role.startsWith("feature-task-") ||
+      role.startsWith("feature-conflict-") ||
+      role.startsWith("feature-join-repair-")
+    ) {
+      return "build";
+    }
     if (role === PLAN_PIPELINE_SYNTHESIS_ROLE) return "synthesize";
     if (role === AUDIT_SYNTHESIS_ROLE) {
       if (run.definition === AUDIT_PIPELINE_ID) return "audit";
@@ -698,16 +730,8 @@ export class PipelineController {
         ? run.stage
         : "final-audit";
     }
-    if (role === FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE) {
-      return run.definition === FEATURE_PIPELINE_ID && run.stage === "build"
-        ? "build"
-        : undefined;
-    }
     if (role.startsWith("discover-")) return "discover";
-    if (
-      role.startsWith("candidate-") ||
-      role === SMALL_FEATURE_IMPLEMENTER_ROLE
-    )
+    if (role === SMALL_FEATURE_IMPLEMENTER_ROLE)
       return run.stage === "final-resolve" ? "final-resolve" : "build";
     if (role.startsWith("audit-")) {
       if (run.definition === AUDIT_PIPELINE_ID) return "audit";
@@ -994,6 +1018,7 @@ export class PipelineController {
     run.wallclockProjection = this.wallclockStateFor(run, now);
     run.limitation = limitation;
     run.status = "limited";
+    run.featureAbortController?.abort();
     run.finishedAt = Date.now();
     run.error = "Pipeline stage wallclock limit reached.";
     run.resolveRootReady();
@@ -1048,12 +1073,15 @@ export class PipelineController {
       run.definition === PLAN_PIPELINE_ID &&
       role === PLAN_PIPELINE_SYNTHESIS_ROLE
         ? true
-        : pipelineDiscoveryToolAllowed(
-            run.definition,
-            role,
-            run.stage,
-            run.featureDiscoveryBootstrapped,
-          );
+        : run.definition === FEATURE_PIPELINE_ID &&
+            role === FEATURE_FINALIZER_ROLE
+          ? true
+          : pipelineDiscoveryToolAllowed(
+              run.definition,
+              role,
+              run.stage,
+              run.featureDiscoveryBootstrapped,
+            );
     if (!allowed) return;
     const node = this.agentsFor(runId)
       .filter((agent) => agent.role === role && agent.status === "starting")
@@ -1219,13 +1247,46 @@ export class PipelineController {
       ...(run.auditSegment
         ? { auditSegment: run.auditSegment.progress() }
         : {}),
+      ...(run.featureGraph ? { featureGraph: run.featureGraph } : {}),
       agents: this.agentsFor(run.id),
     };
+  }
+
+  private persistFeatureArtifact(
+    run: MutableRun,
+    name: string,
+    value: unknown,
+  ) {
+    if (!run.featureArtifactDir) {
+      throw new Error("Feature artifact directory is unavailable.");
+    }
+    const serialized = `${JSON.stringify(value, null, 2)}\n`;
+    fs.writeFileSync(path.join(run.featureArtifactDir, name), serialized, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+  }
+
+  private updateFeaturePlanning(
+    run: MutableRun,
+    update: Partial<
+      Pick<FeaturePipelinePlanningSnapshot, "canonical" | "graph" | "review">
+    > & {
+      readonly candidates?: FeaturePipelinePlanningSnapshot["candidates"];
+    },
+  ) {
+    if (!run.featurePlanning) return;
+    run.featurePlanning = { ...run.featurePlanning, ...update };
+    if (run.featureGraph) {
+      run.featureGraph = { ...run.featureGraph, planning: run.featurePlanning };
+    }
+    this.notify();
   }
 
   private allocateRunId(
     pipelineName: string,
     featureCaller?: FeatureCallerWorktree,
+    worktreeRoot?: string,
   ) {
     for (let attempt = 0; attempt < PIPELINE_ID_ATTEMPTS; attempt++) {
       const id = this.makeRunId(pipelineName);
@@ -1238,6 +1299,13 @@ export class PipelineController {
       if (
         featureCaller &&
         !this.featureGit.namespaceAvailable(featureCaller, id)
+      ) {
+        continue;
+      }
+      if (
+        worktreeRoot &&
+        (fs.existsSync(path.join(worktreeRoot, id)) ||
+          fs.existsSync(path.join(this.artifactRoot, id)))
       ) {
         continue;
       }
@@ -1277,12 +1345,75 @@ export class PipelineController {
       );
     }
     assertPipelineGitCommitSupported(definition, request.gitCommit === true);
+    let worktreeRoot: string | undefined;
+    if (definition === FEATURE_PIPELINE_ID) {
+      if (!Object.prototype.hasOwnProperty.call(request, "worktreeRoot")) {
+        throw new Error("feature-pipeline requires worktreeRoot.");
+      }
+      if (!request.worktreeRoot || !path.isAbsolute(request.worktreeRoot)) {
+        throw new Error(
+          "feature-pipeline worktreeRoot must be an absolute path to an existing directory.",
+        );
+      }
+      if (
+        !fs.existsSync(request.worktreeRoot) ||
+        !fs.statSync(request.worktreeRoot).isDirectory()
+      ) {
+        throw new Error(
+          `feature-pipeline worktreeRoot is not an existing directory: ${request.worktreeRoot}`,
+        );
+      }
+      if (!Array.isArray(request.worktreePrepare)) {
+        throw new Error(
+          "feature-pipeline requires worktreePrepare as an explicit ordered array (empty is allowed).",
+        );
+      }
+      if (
+        request.worktreePrepare.length > 64 ||
+        request.worktreePrepare.some(
+          (command) =>
+            typeof command !== "string" ||
+            !command.trim() ||
+            Buffer.byteLength(command, "utf8") > 32 * 1024,
+        )
+      ) {
+        throw new Error(
+          "feature-pipeline worktreePrepare must contain at most 64 non-empty commands of at most 32 KiB each.",
+        );
+      }
+      worktreeRoot = fs.realpathSync.native(request.worktreeRoot);
+    } else if (
+      request.worktreeRoot !== undefined ||
+      request.worktreePrepare !== undefined
+    ) {
+      throw new Error(
+        `worktreeRoot and worktreePrepare are only valid for feature-pipeline; received ${definition}.`,
+      );
+    }
     const featureCaller =
       definition === FEATURE_PIPELINE_ID
         ? this.featureGit.preflight(request.workingDir)
         : undefined;
+    if (featureCaller) {
+      const occupyingRun = [...this.runs.values()].find(
+        (candidate) =>
+          candidate.definition === FEATURE_PIPELINE_ID &&
+          candidate.featureCaller?.workingDir === featureCaller.workingDir &&
+          !this.handoffs.has(candidate.id),
+      );
+      if (occupyingRun) {
+        throw new Error(
+          `feature-pipeline working_dir is already leased by run "${occupyingRun.id}" until its terminal handoff completes.`,
+        );
+      }
+    }
     const effectiveRequest = featureCaller
-      ? { ...request, workingDir: featureCaller.workingDir }
+      ? {
+          ...request,
+          workingDir: featureCaller.workingDir,
+          worktreeRoot,
+          worktreePrepare: [...(request.worktreePrepare ?? [])],
+        }
       : request;
     if (request.audit && definition !== AUDIT_PIPELINE_ID) {
       throw new Error("Audit input is only valid for audit-pipeline.");
@@ -1309,16 +1440,21 @@ export class PipelineController {
       definition === AUDIT_PIPELINE_ID
         ? { ...effectiveRequest, audit }
         : effectiveRequest;
-    const id = this.allocateRunId(request.pipelineName, featureCaller);
-    let featureLifecycle: FeatureWorktreeLifecycle | undefined;
-    let featureCandidateWorktrees:
-      ReadonlyArray<FeatureTemporaryWorktree> | undefined;
-    if (featureCaller) {
-      featureLifecycle = this.featureGit.createLifecycle(featureCaller, id);
+    const id = this.allocateRunId(
+      request.pipelineName,
+      featureCaller,
+      worktreeRoot,
+    );
+    const featureArtifactDir = featureCaller
+      ? path.join(this.artifactRoot, id)
+      : undefined;
+    if (featureCaller && worktreeRoot && featureArtifactDir) {
+      fs.mkdirSync(this.artifactRoot, { recursive: true });
+      fs.mkdirSync(path.join(worktreeRoot, id));
       try {
-        featureCandidateWorktrees = featureLifecycle.createCandidateWorktrees();
+        fs.mkdirSync(featureArtifactDir);
       } catch (error) {
-        featureLifecycle.cleanup();
+        fs.rmdirSync(path.join(worktreeRoot, id));
         throw error;
       }
     }
@@ -1342,10 +1478,25 @@ export class PipelineController {
       featureDiscoveryReports: new Map(),
       planDiscoveryReports: new Map(),
       ...(featureCaller ? { featureCaller } : {}),
-      ...(featureLifecycle ? { featureLifecycle } : {}),
-      ...(featureCandidateWorktrees ? { featureCandidateWorktrees } : {}),
+      ...(featureArtifactDir ? { featureArtifactDir } : {}),
       featureSynthesisChecks: [],
-      featureCandidateSteeringCancels: new Map(),
+      featureTaskHosts: new Map(),
+      ...(featureCaller
+        ? { featureAbortController: new AbortController() }
+        : {}),
+      ...(featureCaller
+        ? {
+            featurePlanning: {
+              candidates: FEATURE_PLAN_ROLES.map((role) => ({
+                role,
+                status: "waiting" as const,
+              })),
+              canonical: "waiting" as const,
+              graph: "waiting" as const,
+              review: "waiting" as const,
+            },
+          }
+        : {}),
       finalAuditReportDelivered: false,
       ...(wallclockLimitMs !== undefined ? { wallclockLimitMs } : {}),
       wallclockStartedAtMs,
@@ -1354,7 +1505,6 @@ export class PipelineController {
       executionPartials: new Map(),
       executionSessionTokens: new Map(),
       executionSessionEpochs: new Map(),
-      featureCleanupDone: false,
       lastMonotonicNow: wallclockStartedAtMs,
     };
     this.runs.set(id, run);
@@ -1646,251 +1796,529 @@ export class PipelineController {
     if (run.status === "running") this.finishPlan(run, plan);
   }
 
-  private async initializeFeaturePipeline(run: MutableRun) {
-    const lifecycle = run.featureLifecycle;
-    if (!lifecycle || !run.featureCaller) {
-      throw new Error("feature-pipeline Git lifecycle was not initialized.");
+  private async settleFeaturePlanningArtifact<T>(options: {
+    readonly run: MutableRun;
+    readonly sessionId: string;
+    readonly label: string;
+    readonly correctionKey: string;
+    readonly parseText: (text: string) => T;
+    readonly parseValue: (value: unknown) => T;
+  }) {
+    const { run, sessionId } = options;
+    while (run.status === "running") {
+      const [settled] = await this.tree.wait([sessionId]);
+      if (!settled) {
+        throw new Error(`${options.label} session ${sessionId} disappeared.`);
+      }
+      if (settled.status === "error" || settled.status === "cancelled") {
+        throw new Error(
+          `${options.label} session ${settled.status}: ${settled.error ?? "provider failure or cancellation"}.`,
+        );
+      }
+      const hasSubmission = this.discoverySubmissions.has(sessionId);
+      const submitted = this.discoverySubmissions.get(sessionId);
+      this.discoverySubmissions.delete(sessionId);
+      try {
+        return hasSubmission
+          ? options.parseValue(submitted)
+          : options.parseText(settled.finalText);
+      } catch (error) {
+        const key = `${sessionId}:${options.correctionKey}`;
+        const rejected = (this.featureSynthesisCorrections.get(key) ?? 0) + 1;
+        this.featureSynthesisCorrections.set(key, rejected);
+        const detail = boundedPipelineError(error);
+        if (rejected > FEATURE_PLANNING_CORRECTION_TURNS) {
+          throw new Error(
+            `${options.label} rejected settled turn ${rejected}: ${detail}`,
+          );
+        }
+        await this.tree.send(
+          sessionId,
+          `${options.label} was rejected (correction ${rejected}/${FEATURE_PLANNING_CORRECTION_TURNS}): ${detail} Submit the complete corrected typed artifact in this same session, then stop.`,
+        );
+      }
     }
-    const discoverySynthesisAgent = await this.tree.spawn({
+    throw new Error(`${options.label} ended because the run stopped.`);
+  }
+
+  private featurePlanArtifactRole(
+    role: FeaturePlanRole,
+  ): FeaturePlanCandidateRole {
+    return role === "feature-plan-minimal" ? "Minimal" : "Robust";
+  }
+
+  private async runFeatureTaskSession(
+    run: MutableRun,
+    parentId: string,
+    input: FeatureTaskSessionInput,
+  ): Promise<FeatureTaskSessionOutcome> {
+    run.featureTaskHosts.set(input.role, input.tools);
+    try {
+      const agent = await this.tree.spawn({
+        scopeId: run.id,
+        parentId,
+        role: input.role,
+        attempt: input.attempt,
+        title: scopedSessionTitle(run.id, input.role),
+        model: input.model,
+        thinkingLevel: input.thinkingLevel,
+        cwd: input.cwd,
+        prompt:
+          typeof input.capsule === "string"
+            ? input.capsule
+            : JSON.stringify(input.capsule),
+        shouldStart: () => run.status === "running" && !input.signal.aborted,
+      });
+      const [settled] = await this.tree.wait([agent.id], input.signal);
+      if (!settled || settled.status === "error") {
+        return {
+          status: "failed",
+          sessionId: agent.id,
+          error: settled?.error ?? "Feature task session disappeared.",
+        };
+      }
+      if (settled.status === "cancelled") {
+        return { status: "cancelled", sessionId: agent.id };
+      }
+      return { status: "settled", sessionId: agent.id };
+    } catch (error) {
+      if (input.signal.aborted || run.status === "cancelled") {
+        return { status: "cancelled" };
+      }
+      return { status: "failed", error: boundedPipelineError(error) };
+    } finally {
+      run.featureTaskHosts.delete(input.role);
+    }
+  }
+
+  private async initializeFeaturePipeline(run: MutableRun) {
+    if (
+      !run.featureCaller ||
+      !run.request.worktreeRoot ||
+      !run.request.worktreePrepare ||
+      !run.featureArtifactDir ||
+      !run.featureAbortController
+    ) {
+      throw new Error(
+        "feature-pipeline dynamic graph admission was not initialized.",
+      );
+    }
+
+    const reviewHostProxy = {
+      diff: (request?: Parameters<FeatureTaskToolHost["diff"]>[0]) => {
+        if (!run.featureReviewRuntime) {
+          throw new Error("Final Astra review is not active.");
+        }
+        return run.featureReviewRuntime.host.diff(request);
+      },
+      check: (request: Parameters<FeatureTaskToolHost["check"]>[0]) => {
+        if (!run.featureReviewRuntime) {
+          throw new Error("Final Astra review is not active.");
+        }
+        return run.featureReviewRuntime.host.check(request);
+      },
+      finalize: (request: Parameters<FeatureTaskToolHost["finalize"]>[0]) => {
+        if (!run.featureReviewRuntime) {
+          throw new Error("Final Astra review is not active.");
+        }
+        return run.featureReviewRuntime.host.finalize(request);
+      },
+    } satisfies FeatureTaskToolHost;
+    run.featureTaskHosts.set(FEATURE_FINALIZER_ROLE, reviewHostProxy);
+
+    const finalizer = await this.tree.spawn({
       scopeId: run.id,
-      role: FEATURE_DISCOVERY_SYNTHESIS_ROLE,
+      role: FEATURE_FINALIZER_ROLE,
       attempt: 1,
-      title: run.id,
-      model: LUNA_MODEL,
-      thinkingLevel: "medium",
+      title: scopedSessionTitle(
+        run.id,
+        "Canonical plan, graph, and final review",
+      ),
+      model: ASTRA_MODEL,
+      thinkingLevel: "low",
       cwd: run.request.workingDir,
-      prompt: "Controller-deferred feature discovery synthesis.",
+      prompt: "Controller-deferred feature canonical planning.",
       persistent: true,
       deferPrompt: true,
       shouldStart: () => run.status === "starting",
     });
-    run.rootId = discoverySynthesisAgent.id;
+    run.rootId = finalizer.id;
+    run.featureGraph = {
+      tree: { kind: "sequence", steps: [] },
+      tasks: [],
+      branches: [],
+      joins: [],
+      warnings: [],
+      residualPaths: [],
+      artifactDir: run.featureArtifactDir,
+      canonicalSessionId: finalizer.id,
+      planning: run.featurePlanning!,
+    };
     run.resolveRootReady();
-    if (run.status !== "starting") return;
-    this.settleDue(run);
     if (run.status !== "starting") return;
     run.status = "running";
     this.notify();
 
     const discoveryReports = await this.bootstrapFeatureDiscovery(run);
     if (run.status !== "running") return;
+    this.enterStage(run, "plan");
+
+    const planners = await Promise.all(
+      FEATURE_PLAN_ROLES.map(async (role) => {
+        const planner = await this.tree.spawn({
+          scopeId: run.id,
+          parentId: finalizer.id,
+          role,
+          attempt: 1,
+          title: scopedSessionTitle(run.id, titleForRole(role)),
+          model: ASTRA_MODEL,
+          thinkingLevel: "low",
+          cwd: run.request.workingDir,
+          prompt: buildFeatureCandidatePlanPrompt(
+            role,
+            run.request,
+            run.baseSha,
+            discoveryReports,
+          ),
+          persistent: true,
+          shouldStart: () => run.status === "running" && run.stage === "plan",
+        });
+        this.updateFeaturePlanning(run, {
+          candidates: run.featurePlanning!.candidates.map((candidate) =>
+            candidate.role === role
+              ? { ...candidate, status: "running", sessionId: planner.id }
+              : candidate,
+          ),
+        });
+        return { role, planner };
+      }),
+    );
+    const candidatePlans = await Promise.all(
+      planners.map(async ({ role, planner }) => {
+        const artifactRole = this.featurePlanArtifactRole(role);
+        try {
+          const plan = await this.settleFeaturePlanningArtifact({
+            run,
+            sessionId: planner.id,
+            label: `${artifactRole} candidate plan`,
+            correctionKey: artifactRole,
+            parseText: (text) =>
+              parseFeatureCandidatePlanForRole(
+                artifactRole,
+                parseFeatureCandidatePlanText(text),
+              ),
+            parseValue: (value) =>
+              parseFeatureCandidatePlanForRole(artifactRole, value),
+          });
+          this.updateFeaturePlanning(run, {
+            candidates: run.featurePlanning!.candidates.map((candidate) =>
+              candidate.role === role
+                ? { ...candidate, status: "accepted" }
+                : candidate,
+            ),
+          });
+          this.persistFeatureArtifact(
+            run,
+            `candidate-${artifactRole.toLowerCase()}.json`,
+            plan,
+          );
+          this.clearDiscoverySessionTokens(planner.id);
+          this.tree.disableViewMutations(planner.id);
+          return plan;
+        } catch (error) {
+          this.updateFeaturePlanning(run, {
+            candidates: run.featurePlanning!.candidates.map((candidate) =>
+              candidate.role === role
+                ? { ...candidate, status: "failed" }
+                : candidate,
+            ),
+          });
+          throw error;
+        }
+      }),
+    );
+    run.featureCandidatePlans = candidatePlans;
+    if (run.status !== "running") return;
+
+    this.updateFeaturePlanning(run, { canonical: "running" });
     await this.startDeferred(
       run,
-      discoverySynthesisAgent.id,
-      buildFeatureDiscoverySynthesisPrompt(
-        run.request.task,
-        run.request.workingDir,
+      finalizer.id,
+      buildFeatureCanonicalPlanPrompt(
+        run.request,
         discoveryReports,
+        candidatePlans,
       ),
     );
-    const discoverySynthesis = await this.settleFeatureSession(
+    const canonicalPlan = await this.settleFeaturePlanningArtifact({
       run,
-      discoverySynthesisAgent.id,
-      "Feature discovery synthesis",
-      (text) => parseFeatureDiscoverySynthesis(text, discoveryReports),
-      "Call pipeline_discovery_synthesis_submit with one complete strict feature-discovery-synthesis-v1 object. If the tool is unavailable, return the same object as compact final-text JSON. Do not repeat discovery or choose an implementation model/candidate.",
-      (value) => parseFeatureDiscoverySynthesisValue(value, discoveryReports),
-    );
-    run.featureDiscoverySynthesis = discoverySynthesis;
-    if (run.status !== "running") return;
-    this.settleDue(run);
-    if (run.status !== "running") return;
-    this.enterStage(run, "build");
-
-    const prepared = preparedDiscoveryPackage(
-      run.request.task,
-      discoveryReports,
-      discoverySynthesis,
-    );
-    const preparedPackageJson = JSON.stringify(prepared);
-    assertBoundedSynthesisInput(prepared);
-    const candidateWorktrees =
-      run.featureCandidateWorktrees ?? lifecycle.createCandidateWorktrees();
-    const candidateRuns = await Promise.all(
-      candidateWorktrees.map(async (worktree) => {
-        const agent = await this.tree.spawn({
-          scopeId: run.id,
-          parentId: discoverySynthesisAgent.id,
-          role: `candidate-${worktree.role.toLowerCase()}`,
-          attempt: 1,
-          title: scopedSessionTitle(
-            run.id,
-            `${worktree.role} implementation candidate`,
-          ),
-          model: LUNA_MODEL,
-          thinkingLevel: "high",
-          cwd: worktree.path,
-          prompt: buildFeatureCandidatePrompt(
-            worktree.role,
-            worktree.path,
-            worktree.branchRef,
-            worktree.baseCommit,
-            preparedPackageJson,
-          ),
-          shouldStart: () => run.status === "running",
-        });
-        const steer = (message: string) => {
-          if (run.status !== "running" || run.stage !== "build") return;
-          const status = this.tree.view.get(agent.id)?.status;
-          if (status !== "starting" && status !== "running") return;
-          void this.tree.send(agent.id, message).catch(() => {});
-        };
-        if (run.status !== "running") {
-          return { agent, cancelSteeringTimers: [] };
-        }
-        const cancelSteeringTimers = [
-          this.scheduler.schedule(FEATURE_CANDIDATE_STEERING_WARNING_MS, () =>
-            steer(
-              "You have used 8 minutes of your independent 10-minute candidate budget. Stop expanding scope, prioritize required verification, commit the complete implementation, and prepare the required handoff.",
-            ),
-          ),
-          this.scheduler.schedule(FEATURE_CANDIDATE_STEERING_LIMIT_MS, () =>
-            steer(
-              "Your 10-minute candidate budget is reached. Do not start more exploration or optional improvements. Preserve the best valid implementation, run only essential checks, commit, and submit the required handoff now; record anything incomplete as an unresolved issue.",
-            ),
-          ),
-        ];
-        run.featureCandidateSteeringCancels.set(agent.id, cancelSteeringTimers);
-        return { agent, cancelSteeringTimers };
-      }),
-    );
-    const candidateAgents = candidateRuns.map(({ agent }) => agent);
-    const candidateSettlements = candidateRuns.map(
-      async ({ agent, cancelSteeringTimers }, index) => {
-        const worktree = candidateWorktrees[index];
-        if (!worktree)
-          throw new Error("Candidate worktree mapping disappeared.");
-        try {
-          return await this.settleFeatureSession(
-            run,
-            agent.id,
-            `${worktree.role} implementation candidate`,
-            (text) => {
-              const handoff = parseFeatureCandidateHandoff(text);
-              const candidate = lifecycle.freezeCandidate(worktree, handoff);
-              this.tree.disableViewMutations(agent.id);
-              return { candidate, handoff };
-            },
-            `Return one complete strict ${worktree.role} candidate handoff after committing and verifying the complete implementation in your assigned worktree.`,
-          );
-        } finally {
-          for (const cancel of cancelSteeringTimers) cancel();
-          run.featureCandidateSteeringCancels.delete(agent.id);
-        }
-      },
-    );
-    const frozenCandidates = await Promise.all(candidateSettlements);
-    run.featureCandidates = frozenCandidates;
-    if (run.status !== "running") return;
-    this.settleDue(run);
-    if (run.status !== "running") return;
-
-    const comparisonInput: ReadonlyArray<FeatureCandidateComparisonInput> =
-      frozenCandidates.map(({ candidate, handoff }) => ({
-        role: candidate.role,
-        // Keep selection's handoff view canonical as well. The model's
-        // reported path list remains available only through bounded warnings.
-        handoff: { ...handoff, changedPaths: [...candidate.changedPaths] },
-        changedPaths: candidate.changedPaths,
-        warnings: candidate.warnings,
-        boundedDiff: candidate.boundedDiff,
-        immutableCommit: candidate.headCommit,
-        worktreeReference: candidate.path,
-      }));
-    const selectionDirectory = lifecycle.prepareSelectionDirectory();
-    const synthesisAgent = await this.tree.spawn({
-      scopeId: run.id,
-      parentId: discoverySynthesisAgent.id,
-      role: FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
-      attempt: 1,
-      title: scopedSessionTitle(
-        run.id,
-        "Best-of-3 selection and bounded synthesis",
-      ),
-      model: LUNA_MODEL,
-      thinkingLevel: "xhigh",
-      cwd: selectionDirectory,
-      prompt: buildFeatureSelectionPrompt(
-        prepared,
-        comparisonInput,
-        selectionDirectory,
-      ),
-      persistent: true,
-      shouldStart: () => run.status === "running",
+      sessionId: finalizer.id,
+      label: "Canonical feature plan",
+      correctionKey: "canonical",
+      parseText: parseFeatureCanonicalPlanText,
+      parseValue: parseFeatureCanonicalPlan,
     });
-    const selection = await this.settleFeatureSession(
-      run,
-      synthesisAgent.id,
-      "Best-of-3 primary selection",
-      (text) => {
-        const candidates = frozenCandidates.map(({ candidate }) => candidate);
-        lifecycle.assertSelectionReadOnly(candidates);
-        const selection = parseFeatureSelection(text);
-        lifecycle.validateSelection(selection, candidates);
-        return selection;
-      },
-      "Return one strict selection-only JSON object. Do not write code, mutate candidates, or invent a fourth implementation.",
-    );
-    this.settleDue(run);
-    if (run.status !== "running") return;
-    run.featureSelection = selection;
-    const primary = frozenCandidates.find(
-      ({ candidate }) => candidate.role === selection.primaryCandidate,
-    );
-    const primaryInput = comparisonInput.find(
-      ({ role }) => role === selection.primaryCandidate,
-    );
-    if (!primary || !primaryInput) {
-      throw new Error("Validated primary candidate is unavailable.");
-    }
-    this.settleDue(run);
-    if (run.status !== "running") return;
-    const synthesisWorktree = lifecycle.createSynthesisWorktree(
-      primary.candidate,
-    );
-    this.tree.enableMutation(synthesisAgent.id);
+    run.featureCanonicalPlan = canonicalPlan;
+    this.persistFeatureArtifact(run, "canonical-plan.json", canonicalPlan);
+    this.updateFeaturePlanning(run, {
+      canonical: "accepted",
+      graph: "running",
+    });
+
     await this.tree.send(
-      synthesisAgent.id,
-      buildFeatureAugmentationPrompt({
-        selection,
-        primary: primaryInput,
-        synthesisWorktree: synthesisWorktree.path,
-        synthesisBranchRef: synthesisWorktree.branchRef,
+      finalizer.id,
+      buildFeatureExecutionGraphPrompt(canonicalPlan),
+    );
+    const executionGraph = await this.settleFeaturePlanningArtifact({
+      run,
+      sessionId: finalizer.id,
+      label: "Feature execution graph",
+      correctionKey: "graph",
+      parseText: (text) => {
+        const graph = parseFeatureExecutionGraphText(text);
+        const compiled = validateAndCompileFeatureExecutionGraph(
+          canonicalPlan,
+          graph,
+        );
+        if (compiled.issues.length > 0)
+          throw new Error(compiled.issues.join(" "));
+        return graph;
+      },
+      parseValue: (value) => {
+        const graph = parseFeatureExecutionGraph(value);
+        const compiled = validateAndCompileFeatureExecutionGraph(
+          canonicalPlan,
+          graph,
+        );
+        if (compiled.issues.length > 0)
+          throw new Error(compiled.issues.join(" "));
+        return graph;
+      },
+    });
+    const compilation = validateAndCompileFeatureExecutionGraph(
+      canonicalPlan,
+      executionGraph,
+    );
+    if (compilation.issues.length > 0 || !compilation.tree) {
+      throw new Error(
+        compilation.issues.join(" ") || "Execution tree is unavailable.",
+      );
+    }
+    run.featureExecutionGraph = executionGraph;
+    this.persistFeatureArtifact(run, "execution-graph.json", executionGraph);
+    this.updateFeaturePlanning(run, { graph: "accepted" });
+
+    const currentCaller = this.featureGit.preflight(run.request.workingDir);
+    const expectedCaller = run.featureCaller;
+    if (
+      currentCaller.workingDir !== expectedCaller.workingDir ||
+      currentCaller.repositoryRoot !== expectedCaller.repositoryRoot ||
+      currentCaller.commonGitDir !== expectedCaller.commonGitDir ||
+      currentCaller.branchRef !== expectedCaller.branchRef ||
+      currentCaller.baseCommit !== expectedCaller.baseCommit
+    ) {
+      throw new Error(
+        `feature-pipeline caller identity drifted before build; expected ${expectedCaller.branchRef} at ${expectedCaller.baseCommit}, observed ${currentCaller.branchRef} at ${currentCaller.baseCommit}.`,
+      );
+    }
+
+    this.enterStage(run, "build");
+    const executionPromise = this.featureGraphExecutor({
+      runId: run.id,
+      workingDir: run.request.workingDir,
+      worktreeRoot: run.request.worktreeRoot,
+      worktreePrepare: run.request.worktreePrepare,
+      canonicalPlan,
+      graph: executionGraph,
+      tree: compilation.tree,
+      signal: run.featureAbortController.signal,
+      runSession: (input) =>
+        this.runFeatureTaskSession(run, finalizer.id, input),
+      onSnapshot: (snapshot) => {
+        run.featureGraph = {
+          ...snapshot,
+          artifactDir: run.featureArtifactDir!,
+          canonicalSessionId: finalizer.id,
+          planning: run.featurePlanning!,
+        };
+        this.notify();
+      },
+    });
+    run.featureExecutionPromise = executionPromise;
+    const execution = await executionPromise;
+    run.featureExecution = execution;
+    this.persistFeatureArtifact(run, "task-results.json", execution);
+    if (execution.status !== "completed") {
+      throw new Error(
+        execution.status === "cancelled"
+          ? "Feature execution graph was cancelled."
+          : (execution.error ?? "Feature execution graph failed."),
+      );
+    }
+
+    this.enterStage(run, "review");
+    this.updateFeaturePlanning(run, { review: "running" });
+    run.featureReviewRuntime = this.featureReviewRuntimeFactory({
+      runId: run.id,
+      workingDir: run.request.workingDir,
+      checks: executionGraph.reviewChecks,
+      signal: run.featureAbortController.signal,
+      canonicalPlan,
+      graph: executionGraph,
+      diffBaseCommit: run.baseSha,
+      knownResidualPaths: execution.rootResidualPaths,
+      knownTrackedResiduals: execution.rootTrackedResiduals,
+      onSnapshot: (reviewSnapshot) => {
+        if (!run.featureGraph) return;
+        const projectedReview = {
+          ...reviewSnapshot,
+          attempts: reviewSnapshot.attempts.map((attempt) => ({
+            ...attempt,
+            sessionId: finalizer.id,
+            ...(reviewSnapshot.status === "validated" ||
+            reviewSnapshot.status === "satisfied_without_changes"
+              ? { status: "completed" as const }
+              : {}),
+          })),
+        };
+        run.featureGraph = {
+          ...run.featureGraph,
+          tasks: [
+            ...run.featureGraph.tasks.filter(
+              (task) => task.kind !== "final-review",
+            ),
+            projectedReview,
+          ],
+        };
+        this.notify();
+      },
+    });
+    run.featureReviewRuntime.begin(execution.head);
+    this.tree.enableMutation(finalizer.id);
+    const taskManifest = execution.tasks.map((task) => ({
+      taskId: task.id,
+      kind: task.kind,
+      status: task.status,
+      attempt: task.attempt,
+      branchId: task.branchId,
+      branch: task.branch,
+      worktree: task.worktree,
+      taskBaseCommit: task.taskBaseCommit,
+      provisionalCommit: task.provisionalCommit,
+      validatedCommit: task.validatedCommit,
+      attempts: task.attempts.map(({ attempt, sessionId, status }) => ({
+        attempt,
+        sessionId,
+        status,
+      })),
+      checks: task.checks.map(({ checkId, status, exitCode }) => ({
+        checkId,
+        status,
+        exitCode,
+      })),
+    }));
+    const branchManifest = execution.branches.map((branch) => ({
+      branchId: branch.id,
+      parentId: branch.parentId,
+      branch: branch.branch,
+      worktree: branch.worktree,
+      baseCommit: branch.baseCommit,
+      head: branch.head,
+      status: branch.status,
+      taskIds: branch.taskIds,
+    }));
+    const joinManifest = execution.joins.map((join) => ({
+      joinId: join.id,
+      parentBranchId: join.parentBranchId,
+      childBranchIds: join.childBranchIds,
+      status: join.status,
+      commits: join.commits,
+      repairTaskId: join.repairTaskId,
+      checks: join.checks.map(({ checkId, status, exitCode }) => ({
+        checkId,
+        status,
+        exitCode,
+      })),
+    }));
+    const boundedExecution = truncateHead(
+      JSON.stringify({
+        tasks: execution.tasks.map(({ capsule: _capsule, ...task }) => ({
+          ...task,
+          summary: task.summary?.slice(0, 8 * 1024),
+          checks: task.checks.map(
+            ({ stdout: _stdout, stderr: _stderr, ...check }) => check,
+          ),
+        })),
+        branches: execution.branches,
+        joins: execution.joins.map((join) => ({
+          ...join,
+          checks: join.checks.map(
+            ({ stdout: _stdout, stderr: _stderr, ...check }) => check,
+          ),
+        })),
+        warnings: execution.warnings,
+        residualPaths: execution.residualPaths,
+      }),
+      {
+        maxBytes: 384 * 1024,
+        maxLines: 8_000,
+      },
+    );
+    await this.tree.send(
+      finalizer.id,
+      buildFeatureFinalReviewPrompt({
+        request: run.request,
+        canonicalPlan,
+        graph: executionGraph,
+        executionSummary: JSON.stringify({
+          taskManifest,
+          branchManifest,
+          joinManifest,
+          details: boundedExecution.content,
+          detailsTruncated: boundedExecution.truncated,
+        }),
+        gitEvidence: JSON.stringify(this.auditGitIdentity(run)),
+        artifactDir: run.featureArtifactDir,
       }),
     );
-    const synthesized = await this.settleFeatureSession(
-      run,
-      synthesisAgent.id,
-      "Primary-based bounded synthesis",
-      (text) => {
-        const provenance = parseFeatureSynthesisProvenance(text);
-        return {
-          provenance,
-          validated: lifecycle.validateSynthesis(
-            synthesisWorktree,
-            provenance,
-            selection,
-            frozenCandidates.map(({ candidate }) => candidate),
-          ),
-        };
-      },
-      "Return one strict synthesis provenance JSON object after bounded primary-based augmentation, repository verification, a clean worktree, and a distinct final commit. Do not rewrite from scratch.",
-    );
-    run.featureSynthesisProvenance = synthesized.provenance;
-    run.featureSynthesisChecks = featureAuditVerificationSummary(
-      synthesized.provenance.checks.length,
-    );
-    this.settleDue(run);
-    if (run.status !== "running") return;
-    lifecycle.promote(synthesized.validated);
-    const cleanupFailures = lifecycle.cleanup();
-    if (cleanupFailures.length > 0) {
-      throw new Error(cleanupFailures.join(" "));
+    const [reviewer] = await this.tree.wait([finalizer.id]);
+    if (
+      !reviewer ||
+      reviewer.status === "error" ||
+      reviewer.status === "cancelled"
+    ) {
+      throw new Error(
+        reviewer?.error ??
+          "Final Astra review session failed before finalization.",
+      );
     }
-    this.settleDue(run);
-    if (run.status !== "running") return;
+    const reviewSnapshot = run.featureReviewRuntime.snapshot();
+    const review = {
+      ...reviewSnapshot,
+      attempts: reviewSnapshot.attempts.map((attempt) => ({
+        ...attempt,
+        sessionId: finalizer.id,
+        ...(reviewSnapshot.status === "validated" ||
+        reviewSnapshot.status === "satisfied_without_changes"
+          ? { status: "completed" as const }
+          : {}),
+      })),
+    };
+    if (
+      review.status !== "validated" &&
+      review.status !== "satisfied_without_changes"
+    ) {
+      throw new Error(
+        "Final Astra review ended without validated finalization.",
+      );
+    }
+    this.persistFeatureArtifact(run, "sol-review.json", review);
+    this.updateFeaturePlanning(run, { review: "accepted" });
+    run.featureSynthesisChecks = review.checks.map(
+      (check) => `${check.checkId}: ${check.status}`,
+    );
 
-    const postPromotionRoot = await this.tree.spawn({
+    const auditRoot = await this.tree.spawn({
       scopeId: run.id,
       role: "pipeline-root",
       attempt: 1,
@@ -1898,81 +2326,20 @@ export class PipelineController {
       model: LUNA_MODEL,
       thinkingLevel: "xhigh",
       cwd: run.request.workingDir,
-      prompt: "Controller-deferred post-promotion audit and remediation root.",
+      prompt: "Controller-deferred post-review audit and remediation root.",
       persistent: true,
       deferPrompt: true,
       shouldStart: () => run.status === "running",
     });
-    if (postPromotionRoot.status === "error") {
-      throw new Error(
-        postPromotionRoot.error ?? "Post-promotion pipeline root failed.",
-      );
-    }
-    this.tree.reparent(discoverySynthesisAgent.id, postPromotionRoot.id);
-    for (const agent of [...candidateAgents, synthesisAgent]) {
-      this.tree.reparent(agent.id, postPromotionRoot.id);
-    }
-    run.rootId = postPromotionRoot.id;
+    this.tree.reparent(finalizer.id, auditRoot.id);
+    run.rootId = auditRoot.id;
+    this.enterStage(run, "audit");
     this.notify();
     await this.startDeferred(
       run,
-      postPromotionRoot.id,
-      buildPipelinePrompt(
-        run.definition,
-        run.request,
-        discoverySynthesis,
-        run.featureSynthesisChecks,
-      ),
+      auditRoot.id,
+      buildFeaturePipelinePrompt(run.request, this.featureAuditHandoff(run)),
     );
-  }
-
-  private async settleFeatureSession<T>(
-    run: MutableRun,
-    sessionId: string,
-    label: string,
-    parse: (text: string) => T,
-    correctionInstruction: string,
-    parseSubmission?: (value: unknown) => T,
-  ) {
-    while (run.status === "running") {
-      const [settled] = await this.tree.wait([sessionId]);
-      if (!settled)
-        throw new Error(`${label} session ${sessionId} disappeared.`);
-      if (this.hasExecutionPartial(run, sessionId)) {
-        await this.waitUntilRunStops(run);
-        throw new Error(`${label} ended after a cooperative partial.`);
-      }
-      const hasSubmission = this.discoverySubmissions.has(sessionId);
-      const submitted = this.discoverySubmissions.get(sessionId);
-      this.discoverySubmissions.delete(sessionId);
-      if (settled.status === "error" || settled.status === "cancelled") {
-        this.clearDiscoverySessionTokens(sessionId);
-        throw new Error(
-          `${label} session ${settled.status}: ${settled.error ?? "provider failure or cancellation"}.`,
-        );
-      }
-      try {
-        const result =
-          hasSubmission && parseSubmission
-            ? parseSubmission(submitted)
-            : parse(settled.finalText);
-        this.clearDiscoverySessionTokens(sessionId);
-        return result;
-      } catch (error) {
-        const count =
-          (this.featureSynthesisCorrections.get(sessionId) ?? 0) + 1;
-        this.featureSynthesisCorrections.set(sessionId, count);
-        const detail = error instanceof Error ? error.message : String(error);
-        if (count >= 4) {
-          throw new Error(`${label} rejected settled turn ${count}: ${detail}`);
-        }
-        await this.tree.send(
-          sessionId,
-          `${label} was rejected (correction ${count}/3): ${detail} ${correctionInstruction}`,
-        );
-      }
-    }
-    throw new Error(`${label} ended because the run stopped.`);
   }
 
   private async spawnFeatureDiscoveryAttempt(
@@ -2274,22 +2641,18 @@ export class PipelineController {
       mode: "initial" as const,
       acceptanceCriteria: [],
     };
-    const featureSynthesis = run.featureDiscoverySynthesis;
-    const acceptanceContract =
-      run.definition === FEATURE_PIPELINE_ID && featureSynthesis
-        ? JSON.stringify({
-            featureContract: featureSynthesis.featureContract,
-            acceptanceCriteria: featureSynthesis.acceptanceCriteria,
-            constraints: featureSynthesis.constraints,
-            nonGoals: featureSynthesis.nonGoals,
-            contractsInvariants: featureSynthesis.contractsInvariants,
-            verificationExpectations: featureSynthesis.verificationExpectations,
-          })
-        : options.acceptanceContract;
-    const assumptions =
-      run.definition === FEATURE_PIPELINE_ID && featureSynthesis
-        ? featureSynthesis.assumptions
-        : options.assumptions;
+    const git = this.auditGitIdentity(run);
+    const featureHandoff =
+      run.definition === FEATURE_PIPELINE_ID
+        ? this.featureAuditHandoff(run, git)
+        : undefined;
+    const acceptanceContract = featureHandoff
+      ? JSON.stringify({
+          acceptance: featureHandoff.acceptance,
+          invariants: featureHandoff.invariants,
+        })
+      : options.acceptanceContract;
+    const assumptions = featureHandoff?.assumptions ?? options.assumptions;
     const checks =
       run.definition === FEATURE_PIPELINE_ID
         ? run.featureSynthesisChecks
@@ -2300,9 +2663,10 @@ export class PipelineController {
       assumptions: assumptions.slice(0, 128),
       checks: checks.slice(0, 128),
       input,
-      git: this.auditGitIdentity(run),
+      git,
       purpose:
         run.definition === AUDIT_PIPELINE_ID ? "standalone" : "feature-final",
+      ...(featureHandoff ? { featureHandoff } : {}),
     };
     const segment = new AuditSegment(context);
     run.auditSegment = segment;
@@ -2594,19 +2958,6 @@ export class PipelineController {
     this.deliver(run);
   }
 
-  private cleanupFeatureLifecycle(run: MutableRun) {
-    if (run.featureCleanupDone) return [];
-    run.featureCleanupDone = true;
-    const failures = run.featureLifecycle?.cleanup() ?? [];
-    if (failures.length === 0) return failures;
-    run.error = [run.error, ...failures]
-      .filter(Boolean)
-      .join(" ")
-      .slice(0, 16 * 1024);
-    this.notify();
-    return failures;
-  }
-
   private captureTerminalTiming(run: MutableRun) {
     const now = this.monotonicNow(run);
     if (run.stageTiming) run.stageTiming = stageTimingAt(run.stageTiming, now);
@@ -2643,18 +2994,10 @@ export class PipelineController {
     });
   }
 
-  private cancelFeatureCandidateSteering(run: MutableRun) {
-    for (const cancels of run.featureCandidateSteeringCancels.values()) {
-      for (const cancel of cancels) cancel();
-    }
-    run.featureCandidateSteeringCancels.clear();
-  }
-
   private cleanupTerminal(run: MutableRun, cancelRoot: boolean) {
     if (run.cleanup) return run.cleanup;
     run.cleanup = (async () => {
       const failures: string[] = [];
-      this.cancelFeatureCandidateSteering(run);
       const active = this.agentsFor(run.id).filter(
         (agent) =>
           agent.parentId &&
@@ -2674,6 +3017,18 @@ export class PipelineController {
           );
         }
       }
+      if (run.featureExecutionPromise) {
+        const result = await this.boundedCleanupOperation(() =>
+          run.featureExecutionPromise!.then(() => undefined),
+        );
+        if (result.timedOut) {
+          failures.push("Feature graph cleanup timed out.");
+        } else if (result.error !== undefined) {
+          failures.push(
+            `Feature graph cleanup failed: ${boundedPipelineError(result.error)}`,
+          );
+        }
+      }
       if (cancelRoot && run.rootId) {
         const result = await this.boundedCleanupOperation(() =>
           this.tree.cancel(run.rootId!),
@@ -2686,7 +3041,6 @@ export class PipelineController {
           );
         }
       }
-      failures.push(...this.cleanupFeatureLifecycle(run));
       if (failures.length > 0) {
         run.error = [run.error, ...failures]
           .filter(Boolean)
@@ -2745,6 +3099,7 @@ export class PipelineController {
     this.clearExecutionRunState(run);
     this.captureTerminalTiming(run);
     run.status = "failed";
+    run.featureAbortController?.abort();
     run.finishedAt = Date.now();
     run.error = error.slice(0, 16 * 1024);
     void this.cleanupTerminal(run, cancelRoot).then(
@@ -2787,6 +3142,32 @@ export class PipelineController {
   private deliver(run: MutableRun) {
     if (this.shuttingDown || this.handoffs.has(run.id)) return;
     if (run.status === "starting" || run.status === "running") return;
+    if (run.featureArtifactDir) {
+      const summaryPath = path.join(run.featureArtifactDir, "run-summary.json");
+      if (!fs.existsSync(summaryPath)) {
+        try {
+          this.persistFeatureArtifact(run, "run-summary.json", {
+            runId: run.id,
+            status: run.status,
+            stage: run.stage,
+            baseSha: run.baseSha,
+            head: gitHead(run.request.workingDir),
+            planning: run.featurePlanning,
+            warnings: run.featureGraph?.warnings ?? [],
+            error: run.error,
+            completion: run.completion,
+          });
+        } catch (error) {
+          run.error = [
+            run.error,
+            `Unable to persist feature run summary: ${boundedPipelineError(error)}`,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .slice(0, 16 * 1024);
+        }
+      }
+    }
     this.handoffs.add(run.id);
     const handoff: PipelineHandoff = {
       runId: run.id,
@@ -2910,7 +3291,9 @@ export class PipelineController {
           : [];
     const nextStage =
       run.stage === "discover"
-        ? "build"
+        ? run.definition === FEATURE_PIPELINE_ID
+          ? "plan"
+          : "build"
         : run.stage === "audit"
           ? "audit-resolve"
           : undefined;
@@ -3006,18 +3389,33 @@ export class PipelineController {
     return this.snapshot(run);
   }
 
-  private featureAuditAdditionalContext(run: MutableRun) {
-    const synthesis = run.featureDiscoverySynthesis;
-    if (!synthesis) {
-      throw new Error("Feature audit context is unavailable before promotion.");
+  private featureAuditHandoff(
+    run: MutableRun,
+    git = this.auditGitIdentity(run),
+  ) {
+    const canonicalPlan = run.featureCanonicalPlan;
+    if (!canonicalPlan) {
+      throw new Error(
+        "Feature audit context is unavailable before canonical planning.",
+      );
     }
-    return JSON.stringify({
-      discoveryReports: this.featureDiscoveryReports(run),
-      discoverySynthesis: synthesis,
-      verificationChecks: run.featureSynthesisChecks,
-      reviewedWorkspace: run.request.workingDir,
-      reviewedState: "promoted final implementation plus any audit remediation",
+    const review = run.featureReviewRuntime?.snapshot();
+    if (!review) {
+      throw new Error(
+        "Feature audit context is unavailable before final review.",
+      );
+    }
+    return buildFeatureAuditHandoff({
+      canonicalPlan,
+      git,
+      reviewSummary:
+        review.summary ?? "Final review validated without a summary.",
+      reviewChecks: review.checks,
     });
+  }
+
+  private featureAuditAdditionalContext(run: MutableRun) {
+    return JSON.stringify(this.featureAuditHandoff(run));
   }
 
   async spawnChild(
@@ -3062,6 +3460,14 @@ export class PipelineController {
     const priorAttempts = this.agentsFor(runId).filter(
       (agent) => agent.role === role,
     );
+    if (
+      run.definition === FEATURE_PIPELINE_ID &&
+      FEATURE_PLAN_ROLES.some((planRole) => planRole === role)
+    ) {
+      throw new Error(
+        `${role} is controller-owned by feature planning and cannot be spawned by the audit root.`,
+      );
+    }
     if (
       run.definition === FEATURE_PIPELINE_ID &&
       isFeatureDiscoveryRole(role)
@@ -3127,16 +3533,19 @@ export class PipelineController {
     const priorReport = priorReportRole
       ? this.agentsFor(runId).find((agent) => agent.role === priorReportRole)
       : undefined;
-    const hostContext =
+    const sanitizedFeatureAudit =
       run.definition === FEATURE_PIPELINE_ID &&
-      STATIC_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role)
-        ? this.featureAuditAdditionalContext(run)
-        : additionalContext;
+      STATIC_LUNA_AUDIT_ROLES.some((auditRole) => auditRole === role);
+    const hostContext = sanitizedFeatureAudit
+      ? this.featureAuditAdditionalContext(run)
+      : additionalContext;
     const promptContext = [
       ...(priorReport && priorReportRole
         ? [`${titleForRole(priorReportRole)} report:`, priorReport.finalText]
         : []),
-      ...(contextPolicy.gitEvidence ? [this.gitEvidence(runId)] : []),
+      ...(contextPolicy.gitEvidence && !sanitizedFeatureAudit
+        ? [this.gitEvidence(runId)]
+        : []),
       hostContext,
     ]
       .filter((item) => item.trim())
@@ -3354,7 +3763,7 @@ export class PipelineController {
               this.agentsFor(runId).find((candidate) => candidate.role === role)
                 ?.finalText ?? "",
             ]),
-            "Sol remediation instruction:",
+            "Remediation instruction:",
             text,
           ].join("\n")
         : text;
@@ -3385,24 +3794,6 @@ export class PipelineController {
       );
     }
     return this.tree.cancel(id);
-  }
-
-  private commitFeatureWorktree(
-    runId: string,
-    role: string,
-    workingDir: string,
-    paths: ReadonlyArray<string>,
-  ) {
-    const run = this.requireActiveRun(runId);
-    if (run.definition !== FEATURE_PIPELINE_ID || !run.featureLifecycle) {
-      throw new Error("Feature commit authority is unavailable for this run.");
-    }
-    if (!isFeatureInternalImplementationRole(role)) {
-      throw new Error(
-        "Only controller-owned feature candidates/synthesis may commit here.",
-      );
-    }
-    return run.featureLifecycle.commitAssignedWorktree(role, workingDir, paths);
   }
 
   gitStatus(runId: string) {
@@ -3503,6 +3894,15 @@ export class PipelineController {
         );
       }
       requireFinalFindingResolutionEvidence(run, facts);
+      const cleanupWarnings = run.featureExecution?.cleanupCompleted() ?? [];
+      if (cleanupWarnings.length > 0 && run.featureGraph) {
+        run.featureGraph = {
+          ...run.featureGraph,
+          warnings: [
+            ...new Set([...run.featureGraph.warnings, ...cleanupWarnings]),
+          ],
+        };
+      }
       completion = {
         ...facts,
         git: [...facts.git, ...this.finalGitFacts(run)],
@@ -3525,6 +3925,7 @@ export class PipelineController {
     this.clearExecutionRunState(run);
     this.captureTerminalTiming(run);
     run.status = "cancelled";
+    run.featureAbortController?.abort();
     run.finishedAt = Date.now();
     run.resolveRootReady();
     this.notify();
@@ -3585,6 +3986,7 @@ export class PipelineController {
       (role) =>
         role !== AUDIT_SYNTHESIS_ROLE &&
         role !== EXECUTOR_AUDIT_ROLE &&
+        !FEATURE_PLAN_ROLES.some((planRole) => planRole === role) &&
         !(
           run.definition === PLAN_PIPELINE_ID &&
           AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role)
@@ -3710,7 +4112,7 @@ export class PipelineController {
         name: "pipeline_child_wait",
         label: "Wait for Pipeline Children",
         description:
-          "Wait for known children, return their reports in this Sol context, and atomically enter the next stage when the full current-stage fan-in is valid.",
+          "Wait for known children, return their reports in this coordinator context, and atomically enter the next stage when the full current-stage fan-in is valid.",
         parameters: Type.Object({
           ids: Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
         }),
@@ -3920,10 +4322,10 @@ export class PipelineController {
     this.shuttingDown = true;
     for (const run of this.runs.values()) {
       this.cancelStageTimers(run);
-      this.cancelFeatureCandidateSteering(run);
       if (run.status === "starting" || run.status === "running") {
         this.captureTerminalTiming(run);
         run.status = "cancelled";
+        run.featureAbortController?.abort();
         run.finishedAt = Date.now();
         run.resolveRootReady();
         this.clearDiscoveryRunState(run.id);
@@ -3931,7 +4333,11 @@ export class PipelineController {
       }
     }
     await this.tree.dispose();
-    for (const run of this.runs.values()) this.cleanupFeatureLifecycle(run);
+    await Promise.allSettled(
+      [...this.runs.values()].flatMap((run) =>
+        run.featureExecutionPromise ? [run.featureExecutionPromise] : [],
+      ),
+    );
     this.listeners.clear();
   }
 }

@@ -27,7 +27,7 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 | Pipeline                 | Use it when you need                                                                                             |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
 | `small-feature-pipeline` | One focused implementation, parallel review, and a fix pass                                                      |
-| `feature-pipeline`       | A broader feature with discovery, implementation, and multi-concern audit                                        |
+| `feature-pipeline`       | A broader feature with Astra planning, parallel Luna tasks, final review, and audit                                        |
 | `plan-pipeline`          | A repository-grounded implementation plan instead of code, returned directly or saved to a chosen workspace path |
 | `audit-pipeline`         | A read-only initial or closure audit with no remediation                                                         |
 
@@ -61,7 +61,7 @@ Implementation agents work in dedicated Git worktrees, keeping feature changes i
 
 Pipi installs beside regular Pi and requires a stable supported Bun 1.4+ command to be installed first; Pipi never downloads or replaces Bun. Root/extensions share one frozen Bun workspace lock; the isolated installed runtime has one exact deployment lock. Its settings, sessions, MCP configuration, and authentication directory remain under `~/.pipi`. It does not copy regular Pi secrets. Authentication sharing is opt-in. The capability-verified, permission-restricted workflow sandbox is the sole documented Node runtime exception because its security boundary must not be weakened.
 
-The installer pins and validates the bundled review, backlog, and Codex-tool submodules. Pipeline roles receive only the tools needed for their job, while commit authority is explicit and limited to the persistent implementation role.
+The installer pins and validates the bundled review, backlog, and Codex-tool submodules. Pipeline roles receive only the tools needed for their job, with explicit commit permission for implementation pipelines.
 
 When the [official Herdr](https://github.com/herdrdev/herdr) CLI is available, Pipi installs its official Pi integration so Pipi panes appear correctly in Herdr's Agents view.
 
