@@ -620,6 +620,7 @@ export function createPipelineSessionFactory(
         (featurePlanRole || isFeatureFinalizer || featureTaskHost)
           ? createFeatureToolBoundary({
               cwd: spec.cwd,
+              skills: resources.loader.getSkills().skills,
               mode:
                 isFeatureFinalizer || featurePlanRole
                   ? "selection"
@@ -851,6 +852,8 @@ export function createPipelineSessionFactory(
         options.sessionCreated?.(session);
         await bindChildSessionExtensions(session);
         if (featureBoundary) {
+          // session_start resources_discover may add package skills.
+          featureBoundary.setSkills(resources.loader.getSkills().skills);
           session.setActiveToolsByName(
             featureActiveTools ?? [
               ...featureBoundary.initialActiveTools,
