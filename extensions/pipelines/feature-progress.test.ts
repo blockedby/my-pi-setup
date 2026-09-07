@@ -112,6 +112,32 @@ function run() {
   } satisfies PipelineRunSnapshot;
 }
 
+function detailsForTask(
+  task: NonNullable<PipelineRunSnapshot["featureGraph"]>["tasks"][number],
+) {
+  const snapshot = run();
+  return featureTaskDetails(
+    {
+      ...snapshot,
+      featureGraph: {
+        ...snapshot.featureGraph!,
+        tasks: [task],
+      },
+    },
+    task.id,
+  );
+}
+
+function summaryFromDetails(details: string) {
+  const summaryMarker = "\nSummary\n";
+  const warningsMarker = "\n\nWarnings and residual paths";
+  const summaryStart = details.indexOf(summaryMarker);
+  const warningsStart = details.indexOf(warningsMarker, summaryStart);
+  assert.ok(summaryStart >= 0);
+  assert.ok(warningsStart > summaryStart);
+  return details.slice(summaryStart + summaryMarker.length, warningsStart);
+}
+
 test("execution projection preserves fork structure, waiting tasks and provisional status", () => {
   const rows = featureExecutionRows(progress());
   assert.deepEqual(
@@ -169,4 +195,62 @@ test("dashboard tasks are individually selectable and share the persistent final
   assert.ok(details.includes("luna-b2"));
   assert.ok(details.includes("b1234567890"));
   assert.ok(details.includes("/worktrees/run/b"));
+});
+
+test("task details prefer a concrete failure when the agent never starts", () => {
+  const base = progress().tasks.find((task) => task.id === "b")!;
+  const task = {
+    ...base,
+    status: "failed" as const,
+    attempt: 1,
+    attempts: [],
+    checks: [
+      {
+        checkId: "pre-agent-check",
+        command: "bun test",
+        cwd: "/worktrees/run/b",
+        purpose: "required validation",
+        required: true,
+        status: "failed" as const,
+        exitCode: 1,
+        stdout: "",
+        stderr: "check failed",
+        changedPaths: [],
+        startedAt: 1,
+        finishedAt: 2,
+        error: "check failed",
+      },
+    ],
+    warnings: ["warning retained"],
+    residualPaths: ["residual retained"],
+    error: "Agent launch failed before session creation.",
+  } satisfies NonNullable<PipelineRunSnapshot["featureGraph"]>["tasks"][number];
+  const details = detailsForTask(task);
+
+  assert.equal(summaryFromDetails(details), task.error);
+  assert.ok(details.includes('"checkId": "pre-agent-check"'));
+  assert.ok(details.includes("warning retained"));
+  assert.ok(details.includes("residual retained"));
+});
+
+test("task details keep a validated summary when one is present", () => {
+  const task = progress().tasks.find((candidate) => candidate.id === "a")!;
+  const details = detailsForTask(task);
+
+  assert.equal(summaryFromDetails(details), task.summary);
+});
+
+test("task details retain the generic summary fallback for pending tasks without an error", () => {
+  const base = progress().tasks.find((task) => task.id === "b")!;
+  const task = {
+    ...base,
+    status: "running" as const,
+    attempt: 1,
+    attempts: [],
+    summary: undefined,
+    error: undefined,
+  } satisfies NonNullable<PipelineRunSnapshot["featureGraph"]>["tasks"][number];
+  const details = detailsForTask(task);
+
+  assert.equal(summaryFromDetails(details), "No validated summary yet.");
 });

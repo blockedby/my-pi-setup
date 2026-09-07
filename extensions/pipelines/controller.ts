@@ -122,6 +122,15 @@ import {
 import { validateAndCompileFeatureExecutionGraph } from "./feature-graph.ts";
 import { buildFeatureAuditHandoff } from "./feature-audit-handoff.ts";
 import {
+  verifyPlanningReadinessSource,
+  type PlanningReadinessCheck,
+} from "./planning-readiness.ts";
+import type { PlanningReadinessResult } from "./domain.ts";
+import {
+  runFeatureSandboxCommand,
+  cleanupFeatureSandboxRuntime,
+} from "./feature-sandbox.ts";
+import {
   createFeatureReviewRuntime,
   executeFeatureGraph,
   type FeatureGraphExecutionResult,
@@ -312,6 +321,9 @@ interface MutableRun {
   planText?: string;
   planWrittenPath?: string;
   featureCaller?: FeatureCallerWorktree;
+  planningReadiness?: PlanningReadinessResult[];
+  readinessQueue?: Promise<void>;
+  readinessRuntimeUsed?: boolean;
   featureSynthesisChecks: ReadonlyArray<string>;
   featurePlanning?: FeaturePipelinePlanningSnapshot;
   featureCandidatePlans?: ReadonlyArray<FeatureCandidatePlan>;
@@ -425,6 +437,13 @@ export interface PipelineControllerOptions {
       runId: string,
       role: string,
     ) => ReadonlyArray<ToolDefinition>,
+    planningReadinessCheck?: (
+      runId: string,
+      role: string,
+      token: string,
+      input: PlanningReadinessCheck,
+      signal?: AbortSignal,
+    ) => Promise<PlanningReadinessResult>,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
   readonly makeRunId?: (pipelineName: string) => string;
@@ -436,6 +455,7 @@ export interface PipelineControllerOptions {
   readonly executeFeatureGraph?: typeof executeFeatureGraph;
   readonly createFeatureReviewRuntime?: typeof createFeatureReviewRuntime;
   readonly artifactRoot?: string;
+  readonly runPlanningReadinessCommand?: typeof runFeatureSandboxCommand;
   /** Concise aliases used by deterministic controller fixtures. */
   readonly clock?: PipelineMonotonicClock;
   readonly scheduler?: PipelineWallclockScheduler;
@@ -519,6 +539,8 @@ export class PipelineController {
 
   constructor(options: PipelineControllerOptions) {
     this.onHandoff = options.onHandoff;
+    this.readinessCommand =
+      options.runPlanningReadinessCommand ?? runFeatureSandboxCommand;
     this.clock =
       options.monotonicClock ?? options.clock ?? systemPipelineMonotonicClock;
     this.scheduler =
@@ -594,6 +616,8 @@ export class PipelineController {
                 (tool) => tool.name === "pipeline_artifact_read",
               )
             : [],
+        (runId, role, token, input, signal) =>
+          this.checkPlanningReadiness(runId, role, token, input, signal),
       ),
       // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
       // intentionally do not apply to pipeline roots or children.
@@ -1155,6 +1179,197 @@ export class PipelineController {
     this.requireRun(runId).planDiscoveryReports.clear();
   }
 
+  private async checkPlanningReadiness(
+    runId: string,
+    role: string,
+    token: string,
+    input: PlanningReadinessCheck,
+    signal?: AbortSignal,
+  ) {
+    input = structuredClone(input);
+    const run = this.requireActiveRun(runId);
+    const authorize = () => {
+      const sessionId = this.discoverySessionTokens.get(token);
+      const node = sessionId ? this.tree.view.get(sessionId) : undefined;
+      if (
+        run.definition !== FEATURE_PIPELINE_ID ||
+        role !== "discover-context" ||
+        run.status !== "running" ||
+        !pipelineDiscoverySubmissionAllowed(
+          run.definition,
+          role,
+          run.stage,
+          run.featureDiscoveryBootstrapped,
+        ) ||
+        !node ||
+        node.scopeId !== runId ||
+        node.role !== role ||
+        node.status !== "running" ||
+        this.discoverySubmissions.has(node.id)
+      ) {
+        throw new Error(
+          "Planning readiness is not active for this discovery session.",
+        );
+      }
+      if (signal?.aborted || run.featureAbortController?.signal.aborted)
+        throw new Error("Planning readiness cancelled.");
+      return node.id;
+    };
+    authorize();
+    const operation = (run.readinessQueue ?? Promise.resolve()).then(
+      async () => {
+        const sessionId = authorize();
+        const startedAt = Date.now();
+        let sourceHash: string | undefined;
+        let stdout = "";
+        let stderr = "";
+        let exitCode: number | null = null;
+        let error: string | undefined;
+        try {
+          if ((run.planningReadiness?.length ?? 0) >= 12)
+            throw new Error("Planning readiness check limit reached.");
+          const verified = await verifyPlanningReadinessSource(
+            run.request.workingDir,
+            input,
+          );
+          sourceHash = verified.sourceHash;
+          if (
+            /\b(?:bun|npm|pnpm|yarn|vp)\s+(?:run\s+)?(?:install(?::[\w-]+)?|add|bootstrap|setup)(?:\s|$)/i.test(
+              input.command,
+            )
+          ) {
+            throw new Error(
+              "Readiness checks cannot install dependencies or bootstrap the repository.",
+            );
+          }
+          const assertCaller = () => {
+            const observed = this.featureGit.preflight(run.request.workingDir);
+            const expected = run.featureCaller;
+            if (
+              !expected ||
+              observed.workingDir !== expected.workingDir ||
+              observed.repositoryRoot !== expected.repositoryRoot ||
+              observed.commonGitDir !== expected.commonGitDir ||
+              observed.branchRef !== expected.branchRef ||
+              observed.baseCommit !== expected.baseCommit
+            ) {
+              throw new Error(
+                "Implementation worktree identity changed during planning readiness.",
+              );
+            }
+          };
+          assertCaller();
+          run.readinessRuntimeUsed = true;
+          this.recordEvidence(run, {
+            kind: "planning_readiness_started",
+            sessionId,
+            role,
+            detail: input.command.slice(0, 2048),
+            facts: {
+              cwd: input.cwd.slice(0, 2048),
+              source: input.source.path.slice(0, 2048),
+            },
+          });
+          const abortSignals = [
+            signal,
+            run.featureAbortController?.signal,
+          ].filter((value): value is AbortSignal => Boolean(value));
+          const result = await this.readinessCommand({
+            workspaceRoot: run.request.workingDir,
+            cwd: input.cwd,
+            command: input.command,
+            signal: AbortSignal.any(abortSignals),
+          });
+          ({ stdout, stderr, exitCode } = result);
+          assertCaller();
+          if (signal?.aborted || run.featureAbortController?.signal.aborted)
+            throw new Error("Planning readiness cancelled.");
+          if (exitCode !== 0)
+            error = `Command exited with code ${exitCode ?? "unknown"}.`;
+        } catch (failure) {
+          error =
+            boundedPipelineError(failure) ||
+            "Planning readiness command failed.";
+        }
+        const result: PlanningReadinessResult = {
+          ...structuredClone(input),
+          sourceHash,
+          workspaceRoot: run.request.workingDir,
+          status: error ? "failed" : "passed",
+          exitCode,
+          stdout,
+          stderr,
+          startedAt,
+          finishedAt: Date.now(),
+          ...(error ? { error } : {}),
+        };
+        (run.planningReadiness ??= []).push(result);
+        this.recordEvidence(run, {
+          kind: "planning_readiness_finished",
+          sessionId,
+          role,
+          detail: error?.slice(0, 2048),
+          facts: {
+            command: input.command.slice(0, 2048),
+            status: result.status,
+            exitCode,
+          },
+        });
+        try {
+          if (!run.evidenceStore)
+            throw new Error(
+              "Planning readiness artifact store is unavailable.",
+            );
+          await run.evidenceStore.writeSnapshot({
+            artifactId: "planning-readiness",
+            schemaVersion: 1,
+            value: run.planningReadiness,
+          });
+        } catch (failure) {
+          run.evidence?.markIncomplete(boundedPipelineError(failure));
+          this.failRun(
+            run,
+            `Planning readiness evidence could not be persisted: ${boundedPipelineError(failure)}`,
+            true,
+          );
+        }
+        this.notify();
+        if (result.status === "failed") {
+          this.failRun(
+            run,
+            [
+              "Repository readiness failed during discovery; implementation was not started.",
+              `Worktree: ${result.workspaceRoot}`,
+              `Command: ${result.command}`,
+              `Source: ${result.source.path}`,
+              `Exit code: ${result.exitCode ?? "unknown"}`,
+              result.error,
+              result.stderr.slice(0, 4096),
+              "Captured stdout/stderr: pipeline_artifact_read, artifactId planning-readiness.",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            true,
+          );
+        }
+        const clip = (text: string) =>
+          text.length > 4096
+            ? `${text.slice(0, 4096)}\n[Display truncated; read planning-readiness artifact for captured output.]`
+            : text;
+        return {
+          ...result,
+          stdout: clip(result.stdout),
+          stderr: clip(result.stderr),
+        };
+      },
+    );
+    run.readinessQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
   private submitDiscoveryReport(
     runId: string,
     role: string,
@@ -1300,6 +1515,9 @@ export class PipelineController {
         ? { auditSegment: run.auditSegment.progress() }
         : {}),
       ...(run.featureGraph ? { featureGraph: run.featureGraph } : {}),
+      ...(run.planningReadiness
+        ? { planningReadiness: structuredClone(run.planningReadiness) }
+        : {}),
       agents: this.agentsFor(run.id),
     };
   }
@@ -2110,6 +2328,53 @@ export class PipelineController {
     }
   }
 
+  private cleanupReadinessRuntime(run: MutableRun) {
+    if (!run.readinessRuntimeUsed) return [];
+    run.readinessRuntimeUsed = false;
+    return cleanupFeatureSandboxRuntime(run.request.workingDir, (record) => {
+      this.recordEvidence(run, {
+        kind: `cleanup_${record.event}`,
+        operationId: record.operationId,
+        detail: record.detail,
+        facts: {
+          resourceId: record.resourceId,
+          resourceType: record.resourceType,
+          resource: record.resource,
+          ownership: record.ownership,
+          phase: record.phase,
+          disposition: record.disposition ?? null,
+          operationStatus: record.operationStatus ?? null,
+          reasonCode: record.reasonCode ?? null,
+          expectedIdentity: record.expectedIdentity ?? null,
+        },
+      });
+    });
+  }
+
+  private planningReadinessHandoff(run: MutableRun) {
+    return `\n\nController-observed repository readiness (existing checks only; future task checks are separate):\n${JSON.stringify((run.planningReadiness ?? []).map(({ command, cwd, source, sourceHash, status, exitCode }) => ({ command, cwd, source: source.path, sourceHash, status, exitCode })))}`;
+  }
+
+  private assertPlanningBaselineChecks(
+    run: MutableRun,
+    graph: FeatureExecutionGraph,
+  ) {
+    for (const check of graph.baselineChecks) {
+      if (
+        !run.planningReadiness?.some(
+          (observed) =>
+            observed.status === "passed" &&
+            observed.command === check.command &&
+            path.normalize(observed.cwd) === path.normalize(check.cwd),
+        )
+      ) {
+        throw new Error(
+          `Baseline ${check.id} was not successfully executed from a confirmed repository source during discovery. Use the exact observed command/cwd; future checks belong after the task that creates them.`,
+        );
+      }
+    }
+  }
+
   private async initializeFeaturePipeline(run: MutableRun) {
     if (
       !run.featureCaller ||
@@ -2194,12 +2459,13 @@ export class PipelineController {
           model: ASTRA_MODEL,
           thinkingLevel: "low",
           cwd: run.request.workingDir,
-          prompt: buildFeatureCandidatePlanPrompt(
-            role,
-            run.request,
-            run.baseSha,
-            discoveryReports,
-          ),
+          prompt:
+            buildFeatureCandidatePlanPrompt(
+              role,
+              run.request,
+              run.baseSha,
+              discoveryReports,
+            ) + this.planningReadinessHandoff(run),
           persistent: true,
           shouldStart: () => run.status === "running" && run.stage === "plan",
         });
@@ -2268,7 +2534,7 @@ export class PipelineController {
         run.request,
         discoveryReports,
         candidatePlans,
-      ),
+      ) + this.planningReadinessHandoff(run),
     );
     const canonicalPlan = await this.settleFeaturePlanningArtifact({
       run,
@@ -2287,7 +2553,8 @@ export class PipelineController {
 
     await this.tree.send(
       finalizer.id,
-      buildFeatureExecutionGraphPrompt(canonicalPlan),
+      buildFeatureExecutionGraphPrompt(canonicalPlan) +
+        this.planningReadinessHandoff(run),
     );
     const executionGraph = await this.settleFeaturePlanningArtifact({
       run,
@@ -2296,6 +2563,7 @@ export class PipelineController {
       correctionKey: "graph",
       parseText: (text) => {
         const graph = parseFeatureExecutionGraphText(text);
+        this.assertPlanningBaselineChecks(run, graph);
         const compiled = validateAndCompileFeatureExecutionGraph(
           canonicalPlan,
           graph,
@@ -2306,6 +2574,7 @@ export class PipelineController {
       },
       parseValue: (value) => {
         const graph = parseFeatureExecutionGraph(value);
+        this.assertPlanningBaselineChecks(run, graph);
         const compiled = validateAndCompileFeatureExecutionGraph(
           canonicalPlan,
           graph,
@@ -2750,6 +3019,18 @@ export class PipelineController {
     const reports = this.featureDiscoveryReports(run);
     const fanInIssues = validateFeatureDiscoveryFanIn(reports);
     if (fanInIssues.length > 0) throw new Error(fanInIssues.join(" "));
+    await run.readinessQueue;
+    if (run.status !== "running") return [];
+    const cleanupWarnings = this.cleanupReadinessRuntime(run);
+    if (cleanupWarnings.length)
+      throw new Error(
+        `Planning readiness cleanup: ${cleanupWarnings.join(" ")}`,
+      );
+    if (!run.planningReadiness?.some((check) => check.status === "passed")) {
+      throw new Error(
+        "Repository readiness was not verified during discovery. No controller-observed source-confirmed check passed; implementation was not started. Inspect repository instructions and report missing or conflicting checks rather than inventing commands.",
+      );
+    }
     run.featureDiscoveryBootstrapped = true;
     this.notify();
     return reports;
@@ -3370,6 +3651,16 @@ export class PipelineController {
           );
         }
       }
+      if (run.readinessQueue) {
+        const result = await this.boundedCleanupOperation(
+          () => run.readinessQueue!,
+        );
+        if (result.timedOut)
+          failures.push(
+            "Planning readiness command cleanup timed out; runtime retained.",
+          );
+        else failures.push(...this.cleanupReadinessRuntime(run));
+      }
       if (run.featureExecutionPromise) {
         const result = await this.boundedCleanupOperation(() =>
           run.featureExecutionPromise!.then(() => undefined),
@@ -3493,6 +3784,7 @@ export class PipelineController {
   }
 
   private readonly evidenceDeliveries = new Set<string>();
+  private readonly readinessCommand: typeof runFeatureSandboxCommand;
 
   private deliver(run: MutableRun) {
     if (
@@ -3606,11 +3898,23 @@ export class PipelineController {
         schemaVersion: 2,
         value: run.graphEvidence ?? [],
       });
+      if (run.planningReadiness)
+        await run.evidenceStore.writeSnapshot({
+          artifactId: "planning-readiness",
+          schemaVersion: 1,
+          value: run.planningReadiness,
+        });
       if (run.featureGraph)
         await run.evidenceStore.writeSnapshot({
           artifactId: "task-results",
           schemaVersion: 2,
           value: run.featureGraph.tasks,
+        });
+      if (run.featureGraph)
+        await run.evidenceStore.writeSnapshot({
+          artifactId: "worktree-preparation",
+          schemaVersion: 1,
+          value: run.featureGraph.branches,
         });
       if (run.featureReviewRuntime)
         await run.evidenceStore.writeSnapshot({

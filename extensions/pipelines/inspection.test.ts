@@ -9,6 +9,7 @@ import {
   stagesForDefinition,
   type PipelineRunSnapshot,
   type PipelineRunStatus,
+  type PlanningReadinessResult,
 } from "./domain.ts";
 import {
   createPipelineInspectionTools,
@@ -70,6 +71,26 @@ function snapshot(
     ],
     ...overrides,
   };
+}
+
+function readinessResult(overrides: Partial<PlanningReadinessResult> = {}) {
+  return {
+    command: "bun run check",
+    cwd: ".",
+    purpose: "Verify the repository before implementation.",
+    source: {
+      path: "package.json",
+      excerpt: '"check":"bun run check"',
+    },
+    workspaceRoot: "/repo/worktree",
+    status: "passed",
+    exitCode: 0,
+    stdout: "check passed",
+    stderr: "",
+    startedAt: 12_000,
+    finishedAt: 13_000,
+    ...overrides,
+  } satisfies PlanningReadinessResult;
 }
 
 function acceptanceWithRawDetails() {
@@ -383,6 +404,100 @@ test("completed inspection projects independent acceptance statuses without raw 
     implementation: "unavailable",
     execution: "unavailable",
   });
+});
+
+test("readiness failure stays visible after many verbose successful checks", () => {
+  const passed = readinessResult({
+    stdout: "large success output ".repeat(1000),
+  });
+  const failed = readinessResult({
+    status: "failed",
+    exitCode: 127,
+    stderr: "missing-command-diagnostic",
+  });
+  const projected = projectPipelineCheck(
+    snapshot({
+      planningReadiness: [...Array.from({ length: 11 }, () => passed), failed],
+    }),
+    now,
+  );
+  const formatted = formatPipelineCheck(projected);
+  assert.ok(formatted.includes("Check 12:"));
+  assert.ok(formatted.includes("missing-command-diagnostic"));
+  assert.ok(formatted.indexOf("Check 12:") < formatted.indexOf("Check 1:"));
+  assert.equal(projected.planningReadiness?.[0]?.status, "passed");
+  assert.equal(projected.planningReadiness?.[11]?.status, "failed");
+  assert.ok(Buffer.byteLength(formatted) <= PIPELINE_CHECK_MAX_BYTES);
+});
+
+test("planning-readiness inspection keeps metadata, bounds output, and exposes failed status facts", () => {
+  const longOutput = `${"🙂".repeat(2_000)}\nRAW_OUTPUT_TAIL`;
+  const readiness = readinessResult({
+    status: "failed",
+    exitCode: null,
+    source: {
+      path: "package.json",
+      excerpt: `${"source excerpt ".repeat(300)}\nRAW_EXCERPT_TAIL`,
+    },
+    stdout: longOutput,
+    stderr: `${"stderr ".repeat(1_000)}\nRAW_STDERR_TAIL`,
+    error: `${"error ".repeat(1_000)}\nRAW_ERROR_TAIL`,
+  });
+  const projected = projectPipelineCheck(
+    snapshot({ planningReadiness: [readiness] }),
+    now,
+  );
+  const projectedReadiness = projected.planningReadiness?.[0];
+  assert.ok(projectedReadiness);
+  assert.equal(projectedReadiness.command, readiness.command);
+  assert.equal(projectedReadiness.cwd, readiness.cwd);
+  assert.equal(projectedReadiness.workspaceRoot, readiness.workspaceRoot);
+  assert.equal(projectedReadiness.source.path, readiness.source.path);
+  assert.equal(projectedReadiness.exitCode, null);
+  for (const value of [
+    projectedReadiness.stdout,
+    projectedReadiness.stderr,
+    projectedReadiness.error ?? "",
+    projectedReadiness.source.excerpt,
+  ]) {
+    assert.ok(Buffer.byteLength(value, "utf8") <= PIPELINE_PREVIEW_MAX_BYTES);
+    assert.ok(value.split("\\n").length <= PIPELINE_PREVIEW_MAX_LINES);
+  }
+  const serialized = JSON.stringify(projected);
+  for (const excluded of [
+    "RAW_OUTPUT_TAIL",
+    "RAW_EXCERPT_TAIL",
+    "RAW_STDERR_TAIL",
+    "RAW_ERROR_TAIL",
+  ]) {
+    assert.equal(serialized.includes(excluded), false, excluded);
+  }
+
+  const formatted = formatPipelineCheck(projected);
+  for (const fact of [
+    "Planning readiness (phase: discovery):",
+    "status: FAILED before implementation",
+    "workspaceRoot: /repo/worktree",
+    "cwd: .",
+    "command: bun run check",
+    "source.path: package.json",
+    "exitCode: unknown",
+    "stdout:",
+    "stderr:",
+    "error:",
+    'pipeline_artifact_read({ runId: "run-1", artifactId: "planning-readiness", revision: <revision from manifest> })',
+  ]) {
+    assert.equal(formatted.includes(fact), true, fact);
+  }
+  assert.equal(/revision: \d+/u.test(formatted), false);
+  assert.ok(Buffer.byteLength(formatted, "utf8") <= PIPELINE_CHECK_MAX_BYTES);
+
+  const legacy = projectPipelineCheck(snapshot(), now);
+  assert.equal("planningReadiness" in legacy, false);
+  assert.equal(
+    formatPipelineCheck(legacy).includes("Planning readiness"),
+    false,
+  );
 });
 
 test("active previews prefer live text, fall back to finalized assistant text, and show open tool independently", () => {

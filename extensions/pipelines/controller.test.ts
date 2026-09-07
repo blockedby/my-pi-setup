@@ -16,6 +16,7 @@ import type {
 import {
   PipelineController,
   pipelineDiscoverySubmissionAllowed,
+  type PipelineControllerOptions,
 } from "./controller.ts";
 import { inspectPipeline, PIPELINE_CHECK_MAX_BYTES } from "./inspection.ts";
 import { executeFeatureGraph } from "./feature-graph-executor.ts";
@@ -98,6 +99,7 @@ function createLinkedWorktreeFixture(
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, contents);
   }
+  ensurePlanningReadinessFixture(primary);
   execFileSync("git", ["add", "."], { cwd: primary });
   execFileSync("git", ["commit", "-qm", "baseline"], { cwd: primary });
   execFileSync("git", ["worktree", "add", "-q", "-b", "feature/test", linked], {
@@ -139,19 +141,23 @@ class FakePipelineSession implements AgentTreeSession {
   readonly spec: AgentNodeSpec;
   readonly autoReport?: string | ((turn: number) => string);
   readonly discoverySubmit?: (value: unknown) => void;
+  readonly planningReadinessCheck?: () => Promise<unknown>;
   private turn = 0;
+  private planningReadinessInvoked = false;
 
   constructor(
     activeTools: ReadonlyArray<string>,
     spec: AgentNodeSpec,
     autoReport?: string | ((turn: number) => string),
     discoverySubmit?: (value: unknown) => void,
+    planningReadinessCheck?: () => Promise<unknown>,
     private readonly synchronousAutoComplete = false,
   ) {
     this.activeTools = activeTools;
     this.spec = spec;
     this.autoReport = autoReport;
     this.discoverySubmit = discoverySubmit;
+    this.planningReadinessCheck = planningReadinessCheck;
     this.sessionFile = `/tmp/${spec.scopeId}-${spec.role}-${spec.attempt}.jsonl`;
   }
 
@@ -184,6 +190,14 @@ class FakePipelineSession implements AgentTreeSession {
   async prompt(text: string) {
     this.prompts.push(text);
     this.isStreaming = true;
+    if (
+      this.spec.role === "discover-context" &&
+      this.planningReadinessCheck &&
+      !this.planningReadinessInvoked
+    ) {
+      this.planningReadinessInvoked = true;
+      await this.planningReadinessCheck();
+    }
     this.autoComplete();
   }
 
@@ -398,7 +412,9 @@ function featureGitHarness(
       } catch {
         // Most controller fixtures intentionally use a synthetic workspace.
       }
-      if (driftBeforeBuild && call > 1) baseCommit = "f".repeat(40);
+      // Startup and readiness each revalidate the caller before build gets a
+      // chance to observe the injected drift.
+      if (driftBeforeBuild && call > 3) baseCommit = "f".repeat(40);
       return {
         workingDir,
         repositoryRoot: workingDir,
@@ -423,6 +439,54 @@ function featureGitHarness(
   };
 }
 
+const PLANNING_READINESS_COMMAND = "printf planning-readiness-fixture";
+const PLANNING_READINESS_SOURCE_PATH = "planning-readiness-fixture.txt";
+const PLANNING_READINESS_SOURCE_EXCERPT = `existing command: ${PLANNING_READINESS_COMMAND}`;
+const PLANNING_READINESS_PURPOSE = "Verify the repository readiness fixture.";
+
+function ensurePlanningReadinessFixture(workingDir: string) {
+  fs.mkdirSync(workingDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(workingDir, PLANNING_READINESS_SOURCE_PATH),
+    `# Existing repository check\n${PLANNING_READINESS_SOURCE_EXCERPT}\n`,
+  );
+}
+
+function planningReadinessInput(workingDir: string, unverifiedSource = false) {
+  ensurePlanningReadinessFixture(workingDir);
+  return {
+    command: PLANNING_READINESS_COMMAND,
+    cwd: ".",
+    purpose: PLANNING_READINESS_PURPOSE,
+    source: {
+      path: PLANNING_READINESS_SOURCE_PATH,
+      excerpt: unverifiedSource
+        ? `unverified excerpt: ${PLANNING_READINESS_COMMAND}`
+        : PLANNING_READINESS_SOURCE_EXCERPT,
+    },
+  };
+}
+
+function readinessBaselineCheck() {
+  return {
+    id: "repository-readiness",
+    command: PLANNING_READINESS_COMMAND,
+    cwd: ".",
+    purpose: PLANNING_READINESS_PURPOSE,
+    required: true,
+  };
+}
+
+function unknownReadinessBaselineCheck() {
+  return {
+    id: "unknown-repository-readiness",
+    command: "printf unknown-repository-readiness",
+    cwd: ".",
+    purpose: "This baseline was not observed during discovery.",
+    required: true,
+  };
+}
+
 function harness(
   options: {
     rootGate?: Promise<void>;
@@ -444,6 +508,16 @@ function harness(
     useDefaultRunId?: boolean;
     failCandidateReservation?: boolean;
     driftFeatureBaseBeforeBuild?: boolean;
+    readinessMode?: "pass" | "none" | "unverified";
+    readinessResult?: {
+      readonly exitCode: number | null;
+      readonly stdout: string;
+      readonly stderr: string;
+    };
+    readinessCommand?: PipelineControllerOptions["runPlanningReadinessCommand"];
+    readinessGraphBaseline?: boolean;
+    unknownGraphBaselineOnce?: boolean;
+    unknownGraphBaselineAlways?: boolean;
     scheduler?: PipelineWallclockScheduler;
   } = {},
 ) {
@@ -454,6 +528,29 @@ function harness(
   const featureReviewSignals: AbortSignal[] = [];
   const featureReviewDiffBases: Array<string | undefined> = [];
   const featureReviewKnownResidualPaths: ReadonlyArray<string>[] = [];
+  const featureGraphBaselineChecks: Array<
+    ReadonlyArray<{ command: string; cwd: string }>
+  > = [];
+  const readinessCalls: Array<
+    Parameters<
+      NonNullable<PipelineControllerOptions["runPlanningReadinessCommand"]>
+    >[0]
+  > = [];
+  const discoveryTokens = new Map<string, string>();
+  let planningReadinessCheckCallback:
+    | ((
+        runId: string,
+        role: string,
+        token: string,
+        input: {
+          command: string;
+          cwd: string;
+          purpose: string;
+          source: { path: string; excerpt: string };
+        },
+        signal?: AbortSignal,
+      ) => Promise<unknown>)
+    | undefined;
   let agentSequence = 0;
   let runSequence = 0;
   let featureCleanupCompleted = 0;
@@ -495,8 +592,11 @@ function harness(
       _executionFinish,
       _executionFinishSessionCreated,
       featureTaskHost,
+      _artifactTools,
+      planningReadinessCheck,
     ) => {
       discoverySubmitCallback = discoverySubmit;
+      planningReadinessCheckCallback = planningReadinessCheck;
       return {
         async create(spec) {
           if (!spec.parentId && options.rootGate) await options.rootGate;
@@ -518,6 +618,18 @@ function harness(
           const planRole = PLAN_PIPELINE_DISCOVERY_ROLES.find(
             (role) => role === spec.role,
           );
+          const controllerGraph = () => {
+            const graph = options.realFeatureExecution
+              ? realControllerGraph()
+              : featureExecutionGraph();
+            return options.readinessGraphBaseline
+              ? { ...graph, baselineChecks: [readinessBaselineCheck()] }
+              : graph;
+          };
+          const unknownBaselineGraph = () => ({
+            ...controllerGraph(),
+            baselineChecks: [unknownReadinessBaselineCheck()],
+          });
           const autoReport =
             featurePlanRole && options.autoCompleteFeaturePlanning !== false
               ? (turn: number) =>
@@ -537,21 +649,19 @@ function harness(
                 ? (turn: number) =>
                     turn === 0
                       ? JSON.stringify(featureCanonicalPlan())
-                      : turn === 1
-                        ? options.malformedFeatureGraphOnce
-                          ? "{}"
-                          : JSON.stringify(
-                              options.realFeatureExecution
-                                ? realControllerGraph()
-                                : featureExecutionGraph(),
-                            )
-                        : turn === 2 && options.malformedFeatureGraphOnce
-                          ? JSON.stringify(
-                              options.realFeatureExecution
-                                ? realControllerGraph()
-                                : featureExecutionGraph(),
-                            )
-                          : "Final review settled after validated finalization."
+                      : turn === 1 && options.malformedFeatureGraphOnce
+                        ? "{}"
+                        : (options.unknownGraphBaselineAlways ||
+                              (options.unknownGraphBaselineOnce &&
+                                turn === 1)) &&
+                            turn >= 1
+                          ? JSON.stringify(unknownBaselineGraph())
+                          : turn === 1 ||
+                              (turn === 2 &&
+                                (options.malformedFeatureGraphOnce ||
+                                  options.unknownGraphBaselineOnce))
+                            ? JSON.stringify(controllerGraph())
+                            : "Final review settled after validated finalization."
                 : planRole && options.autoCompletePlan
                   ? planReportForRole(planRole)
                   : spec.role === PLAN_PIPELINE_SYNTHESIS_ROLE &&
@@ -613,6 +723,10 @@ function harness(
               spec.role,
               discoveryToken,
             );
+            discoveryTokens.set(
+              `${spec.scopeId ?? ""}:${spec.role}`,
+              discoveryToken,
+            );
           }
           const session = new FakePipelineSession(
             !isImplementationRoot
@@ -624,6 +738,9 @@ function harness(
                   "web_fetch_codex",
                   ...(discoveryAllowed
                     ? [
+                        ...(spec.role === "discover-context"
+                          ? ["pipeline_feature_readiness_check"]
+                          : []),
                         spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE
                           ? "pipeline_discovery_synthesis_submit"
                           : "pipeline_discovery_submit",
@@ -640,6 +757,21 @@ function harness(
                     spec.role,
                     discoveryToken,
                     value,
+                  )
+              : undefined,
+            discoveryToken &&
+              spec.role === "discover-context" &&
+              options.readinessMode !== "none" &&
+              planningReadinessCheck
+              ? () =>
+                  planningReadinessCheck(
+                    spec.scopeId ?? "",
+                    spec.role,
+                    discoveryToken,
+                    planningReadinessInput(
+                      spec.cwd,
+                      options.readinessMode === "unverified",
+                    ),
                   )
               : undefined,
             Boolean(candidateRole && options.synchronousCandidateFirstTurn),
@@ -714,6 +846,12 @@ function harness(
     async executeFeatureGraph(input) {
       if (options.realFeatureExecution) return executeFeatureGraph(input);
       if (input.signal) featureExecutionSignals.push(input.signal);
+      featureGraphBaselineChecks.push(
+        input.graph.baselineChecks.map(({ command, cwd }) => ({
+          command,
+          cwd,
+        })),
+      );
       const head = execFileSync("git", ["rev-parse", "HEAD"], {
         cwd: input.workingDir,
         encoding: "utf8",
@@ -849,6 +987,17 @@ function harness(
         snapshot,
       };
     },
+    runPlanningReadinessCommand: async (input) => {
+      readinessCalls.push(input);
+      if (options.readinessCommand) return options.readinessCommand(input);
+      return (
+        options.readinessResult ?? {
+          exitCode: 0,
+          stdout: "planning readiness passed\n",
+          stderr: "",
+        }
+      );
+    },
     featureGit: options.realFeatureExecution
       ? undefined
       : featureGitHarness(
@@ -868,6 +1017,14 @@ function harness(
     featureReviewSignals,
     featureReviewDiffBases,
     featureReviewKnownResidualPaths,
+    featureGraphBaselineChecks,
+    readinessCalls,
+    get planningReadinessCheck() {
+      return planningReadinessCheckCallback;
+    },
+    planningReadinessToken(runId: string) {
+      return discoveryTokens.get(`${runId}:discover-context`);
+    },
     get featureCleanupCompleted() {
       return featureCleanupCompleted;
     },
@@ -889,16 +1046,24 @@ function harness(
   };
 }
 
-const request = (workingDir = implementationWorkingDir()) => ({
-  pipelineName: "approved-feature-run",
-  task: "Implement the approved feature",
-  workingDir,
-  gitCommit: true,
-  worktreeRoot: fs.mkdtempSync(
-    path.join(os.tmpdir(), "pipeline-graph-worktrees-"),
-  ),
-  worktreePrepare: [],
-});
+const request = (
+  workingDir = implementationWorkingDir(),
+  ensureReadiness = true,
+) => {
+  if (ensureReadiness && !fs.existsSync(path.join(workingDir, ".git"))) {
+    ensurePlanningReadinessFixture(workingDir);
+  }
+  return {
+    pipelineName: "approved-feature-run",
+    task: "Implement the approved feature",
+    workingDir,
+    gitCommit: true,
+    worktreeRoot: fs.mkdtempSync(
+      path.join(os.tmpdir(), "pipeline-graph-worktrees-"),
+    ),
+    worktreePrepare: [],
+  };
+};
 
 function nonFeatureRequest(
   pipeline: "small-feature-pipeline" | "plan-pipeline" | "audit-pipeline",
@@ -908,7 +1073,7 @@ function nonFeatureRequest(
     worktreeRoot: _worktreeRoot,
     worktreePrepare: _worktreePrepare,
     ...base
-  } = request(workingDir);
+  } = request(workingDir, false);
   return { ...base, pipeline };
 }
 
@@ -968,6 +1133,7 @@ async function settleInitialization() {
   for (let turn = 0; turn < 5; turn++) {
     await new Promise((resolve) => setImmediate(resolve));
   }
+  await new Promise((resolve) => setTimeout(resolve, 25));
 }
 
 async function waitForHandoff(
@@ -2532,6 +2698,307 @@ test("feature discovery submission scope is fixed to active feature discovery ro
   }
 });
 
+test("failed planning readiness retains both streams in a readable artifact and stops implementation admission", async () => {
+  const stdout = "readiness stdout diagnostic\n";
+  const stderr = "readiness stderr diagnostic\n";
+  const run = harness({
+    readinessResult: { exitCode: 17, stdout, stderr },
+  });
+  const runId = run.controller.start(request());
+  try {
+    await waitForHandoff(run, runId);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "failed");
+    assert.equal(snapshot?.stage, "discover");
+    const readiness = snapshot?.planningReadiness?.[0];
+    assert.ok(readiness);
+    assert.equal(readiness.status, "failed");
+    assert.equal(readiness.exitCode, 17);
+    assert.equal(readiness.stdout, stdout);
+    assert.equal(readiness.stderr, stderr);
+    assert.equal(run.readinessCalls.length, 1);
+    assert.equal(
+      run.sessions.some((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ),
+      false,
+    );
+    assert.equal(run.featureGraphBaselineChecks.length, 0);
+    assert.equal(run.featureExecutionSignals.length, 0);
+
+    const manifest = await run.controller.readArtifact(runId);
+    if (!Array.isArray(manifest))
+      throw new Error("Expected an artifact manifest.");
+    const entry = manifest.find(
+      (candidate) => candidate.artifactId === "planning-readiness",
+    );
+    assert.ok(entry);
+    const page = requireArtifactPage(
+      await run.controller.readArtifact(runId, {
+        artifactId: entry.artifactId,
+        revision: entry.revision,
+        maxBytes: 64 * 1024,
+      }),
+    );
+    assert.equal(page.completeness, "complete");
+    const persisted = JSON.parse(page.text) as Array<{
+      status: string;
+      exitCode: number | null;
+      stdout: string;
+      stderr: string;
+    }>;
+    assert.equal(persisted[0]?.status, "failed");
+    assert.equal(persisted[0]?.exitCode, 17);
+    assert.equal(persisted[0]?.stdout, stdout);
+    assert.equal(persisted[0]?.stderr, stderr);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("planning readiness rejects wrong roles and tokens before and after discovery submission", async () => {
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteFeaturePlanning: false,
+  });
+  const runId = run.controller.start(request());
+  try {
+    await settleInitialization();
+    const check = run.planningReadinessCheck;
+    const token = run.planningReadinessToken(runId);
+    assert.ok(check);
+    assert.ok(token);
+    const input = planningReadinessInput(implementationWorkingDir());
+    await assert.rejects(
+      check(runId, "discover-problem", token, input),
+      /not active for this discovery session/,
+    );
+    await assert.rejects(
+      check(runId, "discover-context", "wrong-token", input),
+      /not active for this discovery session/,
+    );
+
+    const context = run.sessions.find(
+      (session) => session.spec.role === "discover-context",
+    );
+    const problem = run.sessions.find(
+      (session) => session.spec.role === "discover-problem",
+    );
+    assert.ok(context?.discoverySubmit);
+    assert.ok(problem);
+    assert.equal(
+      context.activeTools.includes("pipeline_feature_readiness_check"),
+      true,
+    );
+    assert.equal(
+      problem.activeTools.includes("pipeline_feature_readiness_check"),
+      false,
+    );
+    context.discoverySubmit(featureDiscoveryValue("discover-context"));
+    await assert.rejects(
+      check(runId, "discover-context", token, input),
+      /not active for this discovery session/,
+    );
+    assert.equal(run.readinessCalls.length, 1);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("unverified planning readiness source fails before invoking the command runner or planners", async () => {
+  const run = harness({ readinessMode: "unverified" });
+  const runId = run.controller.start(request());
+  try {
+    await waitForHandoff(run, runId);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "failed");
+    assert.equal(snapshot?.stage, "discover");
+    const readiness = snapshot?.planningReadiness?.[0];
+    assert.ok(readiness);
+    assert.equal(readiness.status, "failed");
+    assert.equal(readiness.sourceHash, undefined);
+    assert.match(readiness.error ?? "", /does not contain the exact excerpt/);
+    assert.equal(run.readinessCalls.length, 0);
+    assert.equal(
+      run.sessions.some((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ),
+      false,
+    );
+    assert.equal(run.featureExecutionSignals.length, 0);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("a passed source-confirmed readiness result admits planners and the graph with its exact baseline", async () => {
+  const run = harness({ readinessGraphBaseline: true });
+  const runId = run.controller.start(request());
+  try {
+    await settleInitialization();
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "running");
+    assert.equal(snapshot?.stage, "audit");
+    assert.deepEqual(
+      snapshot?.planningReadiness?.map(
+        ({ command, cwd, status, exitCode }) => ({
+          command,
+          cwd,
+          status,
+          exitCode,
+        }),
+      ),
+      [
+        {
+          command: PLANNING_READINESS_COMMAND,
+          cwd: ".",
+          status: "passed",
+          exitCode: 0,
+        },
+      ],
+    );
+    assert.deepEqual(
+      run.readinessCalls.map(({ command, cwd }) => ({ command, cwd })),
+      [{ command: PLANNING_READINESS_COMMAND, cwd: "." }],
+    );
+    assert.equal(
+      run.sessions.filter((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ).length,
+      2,
+    );
+    assert.deepEqual(run.featureGraphBaselineChecks, [
+      [{ command: PLANNING_READINESS_COMMAND, cwd: "." }],
+    ]);
+    assert.equal(run.featureExecutionSignals.length, 1);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("feature planning fails before planners when discovery records no readiness check", async () => {
+  const run = harness({ readinessMode: "none" });
+  const runId = run.controller.start(request());
+  try {
+    await waitForHandoff(run, runId);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "failed");
+    assert.equal(snapshot?.stage, "discover");
+    assert.deepEqual(snapshot?.planningReadiness ?? [], []);
+    assert.equal(run.readinessCalls.length, 0);
+    assert.equal(
+      run.sessions.some((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ),
+      false,
+    );
+    assert.equal(run.featureGraphBaselineChecks.length, 0);
+    assert.equal(run.featureExecutionSignals.length, 0);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("planning readiness cancellation aborts the injected command before planners start", async () => {
+  const run = harness({
+    readinessCommand: async ({ signal }) => {
+      if (signal?.aborted) {
+        return { exitCode: null, stdout: "", stderr: "" };
+      }
+      return new Promise((resolve) => {
+        signal?.addEventListener(
+          "abort",
+          () => resolve({ exitCode: null, stdout: "", stderr: "" }),
+          { once: true },
+        );
+      });
+    },
+  });
+  const runId = run.controller.start(request());
+  try {
+    const deadline = Date.now() + 5_000;
+    while (run.readinessCalls.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(run.readinessCalls.length, 1);
+    const commandSignal = run.readinessCalls[0]?.signal;
+    assert.ok(commandSignal);
+    const cancellation = run.controller.cancelRun(runId);
+    assert.equal(commandSignal.aborted, true);
+    const cancelled = await cancellation;
+    assert.equal(cancelled.status, "cancelled");
+    await waitForHandoff(run, runId);
+    assert.equal(run.controller.get(runId)?.status, "cancelled");
+    assert.equal(
+      run.sessions.some((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ),
+      false,
+    );
+    assert.equal(run.featureGraphBaselineChecks.length, 0);
+    assert.equal(run.featureExecutionSignals.length, 0);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("feature graph corrects an unknown baseline to the passed readiness command and cwd", async () => {
+  const run = harness({
+    readinessGraphBaseline: true,
+    unknownGraphBaselineOnce: true,
+  });
+  const runId = run.controller.start(request());
+  try {
+    await settleInitialization();
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "running");
+    assert.equal(snapshot?.stage, "audit");
+    assert.deepEqual(run.featureGraphBaselineChecks, [
+      [{ command: PLANNING_READINESS_COMMAND, cwd: "." }],
+    ]);
+    const finalizer = run.sessions.find(
+      (session) => session.spec.role === FEATURE_FINALIZER_ROLE,
+    );
+    assert.ok(finalizer);
+    assert.equal(finalizer.sends.length, 4);
+    assert.equal(run.featureExecutionSignals.length, 1);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("feature graph rejects an unknown baseline after the existing correction budget", async () => {
+  const run = harness({
+    readinessGraphBaseline: true,
+    unknownGraphBaselineAlways: true,
+  });
+  const runId = run.controller.start(request());
+  try {
+    await waitForHandoff(run, runId);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "failed");
+    assert.equal(snapshot?.stage, "plan");
+    assert.match(snapshot?.error ?? "", /rejected settled turn 4/);
+    const finalizer = run.sessions.find(
+      (session) => session.spec.role === FEATURE_FINALIZER_ROLE,
+    );
+    assert.ok(finalizer);
+    assert.equal(finalizer.sends.length, 5);
+    assert.equal(run.featureGraphBaselineChecks.length, 0);
+    assert.equal(run.featureExecutionSignals.length, 0);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
 test("programmatic feature discovery retries one malformed report in the same session", async () => {
   const run = harness({
     autoCompleteFeatureDiscovery: false,
@@ -3385,6 +3852,7 @@ test("feature audits and the embedded Luna segment receive captured fresh Git ev
   execFileSync("git", ["config", "user.name", "Test"], {
     cwd: workingDir,
   });
+  ensurePlanningReadinessFixture(workingDir);
   fs.mkdirSync(path.join(workingDir, "src"));
   fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "before\n");
   execFileSync("git", ["add", "."], { cwd: workingDir });
@@ -3926,6 +4394,7 @@ test("feature completion appends committed and dirty Git facts without readiness
   execFileSync("git", ["config", "user.name", "Test"], {
     cwd: workingDir,
   });
+  ensurePlanningReadinessFixture(workingDir);
   fs.writeFileSync(path.join(workingDir, "feature.txt"), "base\n");
   execFileSync("git", ["add", "."], { cwd: workingDir });
   execFileSync("git", ["commit", "-qm", "baseline"], { cwd: workingDir });

@@ -39,6 +39,7 @@ const fixtureExpectedSummary = Object.freeze({
   itemCount: 2,
   characterCount: 9,
 });
+const fixtureBaselineCommand = `test -f ${fixturePaths.input} && test -f ${fixturePaths.test}`;
 const fixtureTestCommand = `node --test ${fixturePaths.test}`;
 const normalizeCheckCommand = `node --input-type=module -e 'import { readFileSync } from "node:fs"; import { normalizeFixtureInput } from "./${fixturePaths.normalize}"; const actual = normalizeFixtureInput(readFileSync("${fixturePaths.input}", "utf8")); if (JSON.stringify(actual) !== "[\\"alpha\\",\\"beta\\"]") process.exit(1);'`;
 const scoreCheckCommand = `node --input-type=module -e 'import { scoreFixtureItems } from "./${fixturePaths.score}"; const actual = scoreFixtureItems(["alpha", "beta"]); if (actual.itemCount !== 2 || actual.characterCount !== 9) process.exit(1);'`;
@@ -259,7 +260,17 @@ function makeFixture(tempRoot) {
     recursive: true,
   });
   fs.writeFileSync(path.join(primary, fixturePaths.test), fixtureTestSource);
-  git(primary, ["add", ".gitignore", fixturePaths.input, fixturePaths.test]);
+  fs.writeFileSync(
+    path.join(primary, "README.md"),
+    `# Fixture checks\n\nExisting baseline before implementation:\n\n${fixtureBaselineCommand}\n\nThe feature test runs only after implementation: ${fixtureTestCommand}\n`,
+  );
+  git(primary, [
+    "add",
+    "README.md",
+    ".gitignore",
+    fixturePaths.input,
+    fixturePaths.test,
+  ]);
   git(primary, ["commit", "-qm", "smoke fixture baseline"]);
   git(primary, ["worktree", "add", "-q", "-b", "smoke/caller", caller]);
   const baseSha = git(caller, ["rev-parse", "HEAD"]);
@@ -271,7 +282,12 @@ function makeFixture(tempRoot) {
     agentDir,
     artifactRoot,
     baseSha,
-    initialFiles: [".gitignore", fixturePaths.input, fixturePaths.test],
+    initialFiles: [
+      "README.md",
+      ".gitignore",
+      fixturePaths.input,
+      fixturePaths.test,
+    ],
   };
 }
 
@@ -597,7 +613,7 @@ function executionGraph() {
     baselineChecks: [
       {
         id: "fixture-baseline",
-        command: `test -f ${fixturePaths.input} && test -f ${fixturePaths.test}`,
+        command: fixtureBaselineCommand,
         cwd: ".",
         purpose:
           "Verify the committed fixture input and executable test contract before task launch.",
@@ -829,6 +845,7 @@ class DeterministicSession {
     this.realSession = options.realSession;
     this.rootTools = options.rootTools;
     this.discoverySubmit = options.discoverySubmit;
+    this.planningReadinessCheck = options.planningReadinessCheck;
     this.auditSubmit = options.auditSubmit;
     this.discoveryTokens = options.discoveryTokens;
     this.auditTokens = options.auditTokens;
@@ -920,6 +937,21 @@ class DeterministicSession {
       const report = featureDiscoveryReport(role, this.coverage);
       const token = this.discoveryTokens.get(`${this.spec.scopeId}:${role}`);
       if (!token) throw new Error(`Missing discovery token for ${role}.`);
+      if (role === "discover-context") {
+        const readiness = await this.planningReadinessCheck(
+          this.spec.scopeId,
+          role,
+          token,
+          {
+            command: fixtureBaselineCommand,
+            cwd: ".",
+            purpose: "Verify existing fixture inputs before implementation.",
+            source: { path: "README.md", excerpt: fixtureBaselineCommand },
+          },
+        );
+        if (readiness.status !== "passed")
+          throw new Error(readiness.error ?? "Fixture readiness failed.");
+      }
       await executeTool(
         this.rootTools,
         "pipeline_discovery_submit",
@@ -1202,6 +1234,7 @@ const controllerCallbackNames = [
   "executionFinishSessionCreated",
   "featureTaskHost",
   "artifactTools",
+  "planningReadinessCheck",
 ];
 
 function controllerCallbackOptions(callbacks) {
@@ -1292,6 +1325,7 @@ function makeDeterministicFactory({
           discoveryTokens,
           auditTokens,
           featureTaskHost: callbackOptions.featureTaskHost,
+          planningReadinessCheck: callbackOptions.planningReadinessCheck,
           baseSha: fixture.baseSha,
           auditState,
           coverage: root.coverage,
@@ -1317,6 +1351,7 @@ function makeLiveFactory({ pipeline, fixture, root, runtime }) {
       executionFinishSessionCreated,
       featureTaskHost,
       artifactTools,
+      planningReadinessCheck,
     } = controllerCallbackOptions(callbacks);
     return pipeline.createPipelineSessionFactory({
       modelRegistry: {
@@ -1340,6 +1375,7 @@ function makeLiveFactory({ pipeline, fixture, root, runtime }) {
       executionFinishSessionCreated,
       featureTaskHost,
       artifactTools,
+      planningReadinessCheck,
     });
   };
 }

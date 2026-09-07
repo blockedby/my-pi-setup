@@ -138,6 +138,18 @@ const runtimeParentTarget = {
   "resourceId" | "resourceType" | "resource" | "ownership" | "expectedIdentity"
 >;
 
+const deferredSandboxCleanupFacts = {
+  resourceId: "/tmp/pipi-pipeline-evidence-9FMFZ1/.pipi-runtime/caller",
+  resourceType: "sandbox",
+  resource: "/tmp/pipi-pipeline-evidence-9FMFZ1/.pipi-runtime/caller",
+  ownership: "controller",
+  phase: "feature-sandbox-runtime-cleanup",
+  expectedIdentity: "55:2167624",
+  disposition: "retained",
+  operationStatus: "not_attempted",
+  reasonCode: "workspace_still_present",
+} satisfies NonNullable<RunEvent["facts"]>;
+
 function dependency(
   branchId: string,
   taskId: string,
@@ -521,6 +533,70 @@ test("accepts outcome-only no-controller guard decisions from cleanup recorder",
 
   const result = assessment(cleanupRunEvents([...skipped, ...retained]), []);
   assert.equal(status(result, "cleanup-policy"), "passed");
+});
+
+test("accepts controller-owned deferred sandbox retention without intent", () => {
+  eventNumber = 0;
+  const result = assessment(
+    [
+      runEvent("cleanup_outcome", 10, {
+        operationId: "cleanup-deferred-sandbox",
+        facts: deferredSandboxCleanupFacts,
+      }),
+    ],
+    [],
+  );
+  assert.equal(status(result, "cleanup-policy"), "passed");
+});
+
+test("keeps near-miss deferred sandbox retention outcomes unproven", () => {
+  const nearMisses = [
+    [
+      "wrong phase",
+      {
+        ...deferredSandboxCleanupFacts,
+        phase: "feature-worktree-lifecycle-cleanup",
+      },
+    ],
+    [
+      "empty expected identity",
+      { ...deferredSandboxCleanupFacts, expectedIdentity: "" },
+    ],
+    [
+      "foreign ownership",
+      { ...deferredSandboxCleanupFacts, ownership: "foreign" },
+    ],
+    [
+      "unknown ownership",
+      { ...deferredSandboxCleanupFacts, ownership: "unknown" },
+    ],
+    [
+      "wrong resource type",
+      { ...deferredSandboxCleanupFacts, resourceType: "directory" },
+    ],
+    [
+      "wrong disposition",
+      { ...deferredSandboxCleanupFacts, disposition: "skipped" },
+    ],
+    [
+      "wrong reason",
+      { ...deferredSandboxCleanupFacts, reasonCode: "caller_owned" },
+    ],
+  ] as const;
+
+  for (const [index, [label, facts]] of nearMisses.entries()) {
+    eventNumber = 0;
+    const result = assessment(
+      [
+        runEvent("cleanup_outcome", 10, {
+          operationId: `cleanup-deferred-sandbox-near-miss-${index}`,
+          facts,
+        }),
+      ],
+      [],
+    );
+    assert.equal(status(result, "cleanup-policy"), "unproven", label);
+  }
 });
 
 test("keeps a succeeded cleanup removal without intent unproven", () => {
