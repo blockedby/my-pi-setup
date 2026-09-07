@@ -28,47 +28,61 @@ export class ToolCallTimeoutError extends Error {
   }
 }
 
+type ToolCallTimeoutPolicy = (toolName: string) => number | null | undefined;
+
+function abortError(toolName: string, signal: AbortSignal) {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error(`Tool call "${toolName}" was aborted.`);
+}
+
 export async function runWithToolCallTimeout<T>(
   toolName: string,
-  timeoutMs: number,
+  timeoutMs: number | undefined,
   signal: AbortSignal | undefined,
   execute: (signal: AbortSignal) => Promise<T>,
 ) {
+  if (signal?.aborted) throw abortError(toolName, signal);
+
   const timeoutController = new AbortController();
   const executionSignal = signal
     ? AbortSignal.any([signal, timeoutController.signal])
     : timeoutController.signal;
-  const timeoutError = new ToolCallTimeoutError(toolName, timeoutMs);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(timeoutError);
-      timeoutController.abort(timeoutError);
-    }, timeoutMs);
-  });
 
   let removeAbortListener: (() => void) | undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    if (!signal) return;
-    const onAbort = () => {
-      reject(
-        signal.reason instanceof Error
-          ? signal.reason
-          : new Error(`Tool call "${toolName}" was aborted.`),
-      );
-    };
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
-    signal.addEventListener("abort", onAbort, { once: true });
-    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-  });
+  const aborted = signal
+    ? new Promise<never>((_resolve, reject) => {
+        const onAbort = () => reject(abortError(toolName, signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () =>
+          signal.removeEventListener("abort", onAbort);
+      })
+    : undefined;
 
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([execute(executionSignal), timeout, aborted]);
+    let timeout: Promise<never> | undefined;
+    if (timeoutMs !== undefined) {
+      const timeoutError = new ToolCallTimeoutError(toolName, timeoutMs);
+      timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(timeoutError);
+          timeoutController.abort(timeoutError);
+        }, timeoutMs);
+      });
+    }
+
+    const execution = execute(executionSignal);
+    if (!timeout) {
+      return aborted
+        ? await Promise.race([execution, aborted])
+        : await execution;
+    }
+    return aborted
+      ? await Promise.race([execution, timeout, aborted])
+      : await Promise.race([execution, timeout]);
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
     removeAbortListener?.();
   }
 }
@@ -76,9 +90,12 @@ export async function runWithToolCallTimeout<T>(
 /**
  * Wrap every currently registered child tool with an independent execution
  * timeout. Calling apply() again is safe and picks up tools registered later.
+ * A policy result of null explicitly disables the timeout; undefined keeps the
+ * guard default.
  */
 export function createToolCallTimeoutGuard(
   timeoutMs = CHILD_TOOL_CALL_TIMEOUT_MS,
+  timeoutPolicy?: ToolCallTimeoutPolicy,
 ) {
   const wrapped = new WeakSet<ToolDefinition>();
 
@@ -87,9 +104,16 @@ export function createToolCallTimeoutGuard(
     wrapped.add(definition);
 
     const execute = definition.execute;
+    const policyTimeoutMs = timeoutPolicy?.(definition.name);
+    const effectiveTimeoutMs =
+      policyTimeoutMs === null ? undefined : (policyTimeoutMs ?? timeoutMs);
     definition.execute = async (toolCallId, params, signal, onUpdate, ctx) =>
-      runWithToolCallTimeout(definition.name, timeoutMs, signal, (signal) =>
-        execute.call(definition, toolCallId, params, signal, onUpdate, ctx),
+      runWithToolCallTimeout(
+        definition.name,
+        effectiveTimeoutMs,
+        signal,
+        (signal) =>
+          execute.call(definition, toolCallId, params, signal, onUpdate, ctx),
       );
   };
 

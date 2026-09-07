@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import test from "node:test";
+import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
+  defineTool,
   SessionManager,
   type AgentSession,
   type ExtensionContext,
@@ -17,6 +19,7 @@ import {
   PLAN_PIPELINE_SYNTHESIS_ROLE,
   ASTRA_MODEL,
 } from "./domain.ts";
+import { ToolCallTimeoutError } from "../shared/tool-call-timeout.ts";
 import { createPipelineSessionFactory } from "./session.ts";
 
 const FEATURE_TASK_TOOL_NAMES = [
@@ -352,6 +355,118 @@ test("feature workers expose task finalization but not the unrelated execution-f
       await session.dispose();
     }
   } finally {
+    provider.unregister();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("pipeline sessions leave only child waits unbounded", async () => {
+  const fixture = await createFixture();
+  const provider = registerFauxProvider({
+    api: "pipeline-timeout-policy-test-api",
+    provider: "pipeline-timeout-policy-test-provider",
+    models: [
+      {
+        id: "gpt-5.6-luna",
+        name: "Pipeline timeout policy test",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32_000,
+        maxTokens: 4_000,
+      },
+    ],
+  });
+  let sdkSession: AgentSession | undefined;
+  let session:
+    | Awaited<
+        ReturnType<ReturnType<typeof createPipelineSessionFactory>["create"]>
+      >
+    | undefined;
+  const waitTool = defineTool({
+    name: "pipeline_child_wait",
+    label: "Wait fixture",
+    description: "Wait fixture",
+    parameters: Type.Object({}),
+    async execute() {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return {
+        content: [{ type: "text" as const, text: "waited" }],
+        details: {},
+      };
+    },
+  });
+  const otherTool = defineTool({
+    name: "pipeline_child_send",
+    label: "Other fixture",
+    description: "Other fixture",
+    parameters: Type.Object({}),
+    async execute() {
+      return new Promise<never>(() => {});
+    },
+  });
+
+  try {
+    const factory = createPipelineSessionFactory({
+      modelRegistry: { find: () => provider.getModel() },
+      parentCwd: fixture.root,
+      parentTrusted: false,
+      agentDir: fixture.agentDir,
+      toolCallTimeoutMs: 5,
+      sessionManager: (cwd) => SessionManager.inMemory(cwd),
+      sessionCreated(created) {
+        sdkSession = created;
+      },
+      rootTools: () => [waitTool, otherTool],
+      definitionForRun: () => FEATURE_PIPELINE_ID,
+    });
+    session = await factory.create({
+      scopeId: "pipeline-timeout-policy-test",
+      role: "pipeline-root",
+      attempt: 1,
+      title: "Pipeline timeout policy test",
+      model: LUNA_MODEL,
+      thinkingLevel: "low",
+      cwd: fixture.cwd,
+      prompt: "",
+      persistent: true,
+      deferPrompt: true,
+    });
+
+    assert.ok(sdkSession);
+    const invoke = (name: string, signal?: AbortSignal) => {
+      const definition = sdkSession!.getToolDefinition(name);
+      assert.ok(definition);
+      return definition.execute(
+        `timeout-policy-${name}`,
+        {},
+        signal,
+        undefined,
+        { cwd: fixture.cwd } as unknown as ExtensionContext,
+      );
+    };
+
+    const result = await invoke("pipeline_child_wait");
+    assert.equal(
+      result.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join(""),
+      "waited",
+    );
+    await assert.rejects(
+      invoke("pipeline_child_send"),
+      (error: unknown) => error instanceof ToolCallTimeoutError,
+    );
+
+    const controller = new AbortController();
+    const reason = new Error("pipeline wait cancelled");
+    const pending = invoke("pipeline_child_wait", controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    controller.abort(reason);
+    await assert.rejects(pending, (error: unknown) => error === reason);
+  } finally {
+    await session?.dispose();
     provider.unregister();
     await rm(fixture.root, { recursive: true, force: true });
   }

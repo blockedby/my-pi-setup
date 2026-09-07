@@ -73,12 +73,20 @@ import type {
 } from "../shared/agent-tree/domain.ts";
 
 const INTERRUPT_TIMEOUT_MS = 5_000;
+const PIPELINE_CHILD_WAIT_TOOL_NAME = "pipeline_child_wait";
+
+/** The controller owns child-wait and stage-deadline cancellation. */
+export function pipelineToolCallTimeoutPolicy(toolName: string) {
+  return toolName === PIPELINE_CHILD_WAIT_TOOL_NAME ? null : undefined;
+}
 
 interface PipelineSessionFactoryOptions {
   readonly modelRegistry: Pick<ModelRegistry, "find">;
   readonly parentCwd: string;
   readonly parentTrusted: boolean;
   readonly agentDir?: string;
+  /** Test-only override for the per-tool execution timeout. */
+  readonly toolCallTimeoutMs?: number;
   readonly sessionManager?: (cwd: string) => SessionManager;
   readonly sessionCreated?: (session: AgentSession) => void;
   readonly rootTools: (runId: string) => ReadonlyArray<ToolDefinition>;
@@ -869,7 +877,10 @@ export function createPipelineSessionFactory(
         throw error;
       }
 
-      const guard = createToolCallTimeoutGuard();
+      const guard = createToolCallTimeoutGuard(
+        options.toolCallTimeoutMs,
+        pipelineToolCallTimeoutPolicy,
+      );
       guard.apply(session);
       const guardSubscription = session.subscribe((event) => {
         if (event.type === "agent_start") guard.apply(session);
