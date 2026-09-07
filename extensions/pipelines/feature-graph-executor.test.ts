@@ -5,7 +5,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import type { ExecutionTree } from "./feature-graph.ts";
-import { executeFeatureGraph } from "./feature-graph-executor.ts";
+import type { CleanupEvidence } from "./cleanup-evidence.ts";
+import {
+  executeFeatureGraph,
+  type FeatureGraphEvidenceEvent,
+} from "./feature-graph-executor.ts";
 import type {
   FeatureCanonicalPlan,
   FeatureExecutionCheck,
@@ -541,6 +545,16 @@ test("baseline failure is reported before any task session or commit", async () 
     repo.cleanup();
   }
 });
+
+function fakeClock(start = 0) {
+  let current = start;
+  return {
+    now: () => current,
+    advance(milliseconds: number) {
+      current += milliseconds;
+    },
+  };
+}
 
 function barrier() {
   let resolve = () => {};
@@ -1381,6 +1395,220 @@ test("post-join semantic failure creates one continuing join-repair task", async
     assert.equal(
       fs.readFileSync(path.join(repo.workingDir, "repair.txt"), "utf8"),
       "compatible\n",
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("graph evidence records compiled fork membership and monotonic join ordering", async () => {
+  const repo = fixture();
+  const clock = fakeClock(100);
+  const events: FeatureGraphEvidenceEvent[] = [];
+  const left = graphTask("evidence-left");
+  const right = graphTask("evidence-right");
+  try {
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([left, right]),
+      tree: {
+        kind: "fork",
+        branches: [
+          { kind: "task", taskId: left.id },
+          { kind: "task", taskId: right.id },
+        ],
+      },
+      now: clock.now,
+      controllerInstanceId: "controller-evidence",
+      onEvidence(event) {
+        events.push(event);
+      },
+      async runCheck(input) {
+        if (input.workspaceRoot === repo.workingDir) clock.advance(7);
+        return passingCheck();
+      },
+      async runSession(input) {
+        const filePath = `${input.task!.id}.txt`;
+        fs.writeFileSync(path.join(input.cwd, filePath), `${input.task!.id}\n`);
+        await input.tools.finalize({
+          commitPaths: [filePath],
+          summary: `Finalize ${input.task!.id}.`,
+        });
+        return { status: "settled", sessionId: input.role };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(
+      events.every(
+        ({ controllerInstanceId }) =>
+          controllerInstanceId === "controller-evidence",
+      ),
+      true,
+    );
+    const eligible = events.filter(({ kind }) => kind === "fork_eligible");
+    assert.deepEqual(
+      eligible.map(({ branchId }) => branchId),
+      ["branch-1-evidence-left", "branch-2-evidence-right"],
+    );
+    assert.deepEqual(
+      eligible.map(({ dependencies }) =>
+        dependencies.map(({ taskId }) => taskId),
+      ),
+      [[left.id], [right.id]],
+    );
+    const memberships = events.filter(
+      ({ kind }) => kind === "branch_task_membership",
+    );
+    assert.deepEqual(
+      memberships.map(({ branchId, taskId }) => ({ branchId, taskId })),
+      [
+        { branchId: "branch-1-evidence-left", taskId: left.id },
+        { branchId: "branch-2-evidence-right", taskId: right.id },
+      ],
+    );
+    const joinStarted = events.find(({ kind }) => kind === "join_started");
+    const joinFinished = events.find(({ kind }) => kind === "join_finished");
+    assert.ok(joinStarted);
+    assert.ok(joinFinished);
+    assert.equal(joinStarted.forkId, "fork-1");
+    assert.equal(joinStarted.joinId, "join-1");
+    assert.equal(joinStarted.status, "joining");
+    assert.deepEqual(
+      joinStarted.dependencies.map(({ taskId, status }) => ({
+        taskId,
+        status,
+      })),
+      [
+        { taskId: left.id, status: "validated" },
+        { taskId: right.id, status: "validated" },
+      ],
+    );
+    assert.equal(joinFinished.status, "completed");
+    assert.equal(joinStarted.atMs, 100);
+    assert.equal(joinFinished.atMs, 107);
+    assert.equal(joinFinished.atMs >= joinStarted.atMs, true);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("failed and cancelled forks emit terminal join evidence with required task settlement", async (t) => {
+  for (const mode of ["failed", "cancelled"] as const) {
+    await t.test(mode, async () => {
+      const repo = fixture();
+      const clock = fakeClock();
+      const events: FeatureGraphEvidenceEvent[] = [];
+      const left = graphTask(`${mode}-left`);
+      const right = graphTask(`${mode}-right`);
+      const controller = new AbortController();
+      try {
+        const result = await executeFeatureGraph({
+          runId: repo.runId,
+          workingDir: repo.workingDir,
+          worktreeRoot: repo.worktreeRoot,
+          canonicalPlan,
+          graph: graph([left, right], []),
+          tree: {
+            kind: "fork",
+            branches: [
+              { kind: "task", taskId: left.id },
+              { kind: "task", taskId: right.id },
+            ],
+          },
+          signal: controller.signal,
+          now: clock.now,
+          onEvidence(event) {
+            events.push(event);
+          },
+          runCheck: passingCheck,
+          async runSession(input) {
+            if (mode === "cancelled") {
+              controller.abort();
+              return { status: "cancelled", sessionId: input.role };
+            }
+            if (input.task!.id === left.id) {
+              return {
+                status: "failed",
+                sessionId: `${input.role}-${input.attempt}`,
+                error: "synthetic branch failure",
+              };
+            }
+            await input.tools.finalize({
+              commitPaths: [],
+              summary: "No change on the independent branch.",
+            });
+            return { status: "settled", sessionId: input.role };
+          },
+        });
+
+        assert.equal(result.status, mode);
+        const started = events.filter(({ kind }) => kind === "join_started");
+        const finished = events.filter(({ kind }) => kind === "join_finished");
+        assert.equal(started.length, 1);
+        assert.equal(finished.length, 1);
+        assert.equal(finished[0]!.status, mode);
+        assert.equal(finished[0]!.atMs >= started[0]!.atMs, true);
+        assert.deepEqual(
+          finished[0]!.dependencies.map(({ taskId, status }) => ({
+            taskId,
+            status,
+          })),
+          mode === "failed"
+            ? [
+                { taskId: left.id, status: "failed" },
+                { taskId: right.id, status: "satisfied_without_changes" },
+              ]
+            : [
+                { taskId: left.id, status: "cancelled" },
+                { taskId: right.id, status: "cancelled" },
+              ],
+        );
+      } finally {
+        repo.cleanup();
+      }
+    });
+  }
+});
+
+test("retained-resource evidence forwards through a graph result without changing cleanup policy", async () => {
+  const repo = fixture();
+  const cleanupEvidence: CleanupEvidence[] = [];
+  const task = graphTask("retained-result");
+  try {
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([task], []),
+      tree: { kind: "task", taskId: task.id },
+      cleanupEvidence: (record) => cleanupEvidence.push(record),
+      runCheck: passingCheck,
+      async runSession() {
+        return { status: "failed", error: "retain diagnostics" };
+      },
+    });
+
+    assert.equal(result.status, "failed");
+    result.recordRetainedResources("graph_failed");
+    assert.equal(
+      cleanupEvidence.some(
+        ({ disposition, reasonCode }) =>
+          disposition === "retained" && reasonCode === "graph_failed",
+      ),
+      true,
+    );
+    assert.equal(
+      git(repo.workingDir, [
+        "for-each-ref",
+        "--format=%(refname)",
+        `refs/heads/pipi-feature/${repo.runId}`,
+      ]).length,
+      0,
     );
   } finally {
     repo.cleanup();

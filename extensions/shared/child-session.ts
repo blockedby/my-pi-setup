@@ -31,6 +31,7 @@ export const PIPELINE_ORCHESTRATION_TOOL_NAMES = [
   "pipeline_child_list",
   "pipeline_child_check",
   "pipeline_child_wait",
+  "pipeline_artifact_read",
   "pipeline_child_send",
   "pipeline_child_cancel",
   "pipeline_complete",

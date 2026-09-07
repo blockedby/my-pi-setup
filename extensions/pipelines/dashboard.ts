@@ -254,7 +254,7 @@ export function buildPipelineRows(
         key: `run:${run.id}`,
         kind: "run",
         depth: 1,
-        label: `${expanded ? "▾" : "▸"} ${run.id} · ${run.status} · ${run.workingDir}`,
+        label: `${expanded ? "▾" : "▸"} ${run.id} · ${run.status} · impl:${run.acceptance?.implementationAcceptance.status ?? "unavailable"} exec:${run.acceptance?.pipelineExecutionAcceptance.status ?? "unavailable"} · ${run.workingDir}`,
         runId: run.id,
         status: run.status,
         expanded,

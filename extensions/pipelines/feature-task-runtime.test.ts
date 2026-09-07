@@ -103,6 +103,296 @@ const passingCheck: FeatureCheckRunner = async () => ({
   stderr: "",
 });
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+test("runtime describes its controller workspace and declared checks", () => {
+  const repo = fixture("runtime-contract-description-a1b2c3d4");
+  try {
+    const runtime = runtimeFor(repo, passingCheck);
+    assert.deepEqual(runtime.host.describe?.(), {
+      workspaceRoot: repo.workingDir,
+      checkIds: ["required-check"],
+    });
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("identical in-flight checks share one runner and one history entry", async () => {
+  const repo = fixture("runtime-dedup-a1b2c3d4");
+  try {
+    const gate = deferred<void>();
+    let invocations = 0;
+    const runtime = runtimeFor(repo, async () => {
+      invocations += 1;
+      await gate.promise;
+      return { exitCode: 0, stdout: "same result\n", stderr: "" };
+    });
+    runtime.beginAttempt(1);
+
+    const first = runtime.host.check({ checkId: "required-check" });
+    const joined = runtime.host.check({ checkId: "required-check" });
+
+    assert.strictEqual(joined, first);
+    assert.equal(invocations, 1);
+    gate.resolve();
+    const [firstResult, joinedResult] = await Promise.all([first, joined]);
+    assert.deepEqual(joinedResult, firstResult);
+    assert.ok(firstResult.checkInvocationId);
+    assert.equal(runtime.snapshot().checks.length, 1);
+    assert.equal(runtime.snapshot().checkHistory?.length, 1);
+    assert.equal(
+      runtime.snapshot().checkHistory?.[0]?.checkInvocationId,
+      firstResult.checkInvocationId,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("dirty tracked or untracked mutation prevents an in-flight check join", async () => {
+  const repo = fixture("runtime-dedup-mutation-b2c3d4e5");
+  try {
+    const gate = deferred<void>();
+    let invocations = 0;
+    const runtime = runtimeFor(repo, async () => {
+      invocations += 1;
+      await gate.promise;
+      return { exitCode: 0, stdout: "passed\n", stderr: "" };
+    });
+    runtime.beginAttempt(1);
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "dirty\n");
+    fs.writeFileSync(
+      path.join(repo.workingDir, "untracked.txt"),
+      "untracked\n",
+    );
+    const first = runtime.host.check({ checkId: "required-check" });
+
+    fs.writeFileSync(
+      path.join(repo.workingDir, "selected.txt"),
+      "dirty mutation\n",
+    );
+    await assert.rejects(
+      runtime.host.check({ checkId: "required-check" }),
+      /different workspace input revision/i,
+    );
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "dirty\n");
+    fs.writeFileSync(
+      path.join(repo.workingDir, "untracked.txt"),
+      "untracked mutation\n",
+    );
+    await assert.rejects(
+      runtime.host.check({ checkId: "required-check" }),
+      /different workspace input revision/i,
+    );
+    assert.equal(invocations, 1);
+
+    gate.resolve();
+    await first;
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("completed checks are not cached and reruns append history", async () => {
+  const repo = fixture("runtime-dedup-sequential-c3d4e5f6");
+  try {
+    let invocations = 0;
+    const runtime = runtimeFor(repo, async () => ({
+      exitCode: 0,
+      stdout: `run ${++invocations}\n`,
+      stderr: "",
+    }));
+    runtime.beginAttempt(1);
+
+    const first = await runtime.host.check({ checkId: "required-check" });
+    const second = await runtime.host.check({ checkId: "required-check" });
+
+    assert.equal(invocations, 2);
+    assert.notEqual(first.checkInvocationId, second.checkInvocationId);
+    assert.notEqual(first.stdout, second.stdout);
+    assert.equal(runtime.snapshot().checks.length, 1);
+    assert.equal(runtime.snapshot().checkHistory?.length, 2);
+    assert.deepEqual(
+      runtime
+        .snapshot()
+        .checkHistory?.map(({ checkInvocationId }) => checkInvocationId),
+      [first.checkInvocationId, second.checkInvocationId],
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("an in-flight check from another attempt cannot be reused", async () => {
+  const repo = fixture("runtime-dedup-attempt-e5f6a7b8");
+  try {
+    const gate = deferred<void>();
+    const runtime = runtimeFor(repo, async () => {
+      await gate.promise;
+      return { exitCode: 0, stdout: "passed\n", stderr: "" };
+    });
+    runtime.beginAttempt(1);
+    const first = runtime.host.check({ checkId: "required-check" });
+    runtime.beginAttempt(2, "retrying after an attempt transition");
+
+    await assert.rejects(
+      runtime.host.check({ checkId: "required-check" }),
+      /another attempt/i,
+    );
+    gate.resolve();
+    await assert.rejects(first, /attempt 1|current attempt/i);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("different checks and finalization remain serialized", async () => {
+  const repo = fixture("runtime-dedup-serialize-d4e5f6a7");
+  try {
+    const firstCheck = requiredCheck("first-check");
+    const secondCheck = requiredCheck("second-check");
+    const gate = deferred<void>();
+    let invocations = 0;
+    const runtime = createFeatureTaskRuntime({
+      kind: "task",
+      task: executionTask("serialize-feature"),
+      canonicalPlan: canonicalPlan(),
+      graph: executionGraph(),
+      target: repo.target,
+      taskBaseCommit: repo.base,
+      checks: [firstCheck, secondCheck],
+      runCheck: async ({ command }) => {
+        invocations += 1;
+        if (command === firstCheck.command) await gate.promise;
+        return { exitCode: 0, stdout: "passed\n", stderr: "" };
+      },
+      signal: new AbortController().signal,
+    });
+    runtime.beginAttempt(1);
+
+    const first = runtime.host.check({ checkId: firstCheck.id });
+    await assert.rejects(
+      runtime.host.check({ checkId: secondCheck.id }),
+      /verification is already running/i,
+    );
+    await assert.rejects(
+      runtime.host.finalize({
+        commitPaths: [],
+        summary: "Finalization must wait for the active check.",
+      }),
+      /verification is already running/i,
+    );
+    assert.equal(invocations, 1);
+
+    gate.resolve();
+    await first;
+    await runtime.host.check({ checkId: secondCheck.id });
+    assert.equal(invocations, 2);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("finalization exposes its internal check only for an exact revision", async () => {
+  const repo = fixture("runtime-dedup-finalize-e5f6a7b8");
+  try {
+    const gate = deferred<void>();
+    let invocations = 0;
+    const runtime = runtimeFor(repo, async () => {
+      invocations += 1;
+      await gate.promise;
+      return { exitCode: 0, stdout: "passed\n", stderr: "" };
+    });
+    runtime.beginAttempt(1);
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "feature\n");
+
+    const finalizing = runtime.host.finalize({
+      commitPaths: ["selected.txt"],
+      summary: "Finalize while the required check is in flight.",
+    });
+    assert.equal(invocations, 1);
+    fs.writeFileSync(
+      path.join(repo.workingDir, "late-untracked.txt"),
+      "late mutation\n",
+    );
+    await assert.rejects(
+      runtime.host.check({ checkId: "required-check" }),
+      /different workspace input revision/i,
+    );
+    fs.rmSync(path.join(repo.workingDir, "late-untracked.txt"));
+    const joined = runtime.host.check({ checkId: "required-check" });
+    const joinedAgain = runtime.host.check({ checkId: "required-check" });
+    assert.strictEqual(joinedAgain, joined);
+    assert.equal(invocations, 1);
+
+    gate.resolve();
+    const [checkResult, finalized] = await Promise.all([joined, finalizing]);
+    assert.equal(finalized.validated, true);
+    assert.deepEqual(finalized.checks, [checkResult]);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("a failed check releases its operation for a later run", async () => {
+  const repo = fixture("runtime-dedup-failure-f6a7b8c9");
+  try {
+    let invocations = 0;
+    const runtime = runtimeFor(repo, async () => {
+      if (++invocations === 1) throw new Error("runner failure");
+      return { exitCode: 0, stdout: "recovered\n", stderr: "" };
+    });
+    runtime.beginAttempt(1);
+
+    const failed = await runtime.host.check({ checkId: "required-check" });
+    const recovered = await runtime.host.check({ checkId: "required-check" });
+
+    assert.equal(failed.status, "failed");
+    assert.equal(recovered.status, "passed");
+    assert.equal(invocations, 2);
+    assert.equal(runtime.snapshot().checkHistory?.length, 2);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("cancelling an in-flight check rejects it and closes its operation", async () => {
+  const repo = fixture("runtime-dedup-cancel-a7b8c9d0");
+  try {
+    const cancellation = new AbortController();
+    const gate = deferred<void>();
+    const runtime = runtimeFor(
+      repo,
+      async ({ signal }) => {
+        await gate.promise;
+        return signal.aborted
+          ? { exitCode: null, stdout: "", stderr: "cancelled" }
+          : { exitCode: 0, stdout: "passed\n", stderr: "" };
+      },
+      cancellation.signal,
+    );
+    runtime.beginAttempt(1);
+    const check = runtime.host.check({ checkId: "required-check" });
+    cancellation.abort();
+    gate.resolve();
+
+    await assert.rejects(check, /cancelled/i);
+    await assert.rejects(
+      runtime.host.check({ checkId: "required-check" }),
+      /cancelled|authority is closed/i,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("failed required verification leaves a provisional commit that a later attempt amends", async () => {
   const repo = fixture("runtime-amend-a1b2c3d4");
   try {
@@ -749,6 +1039,10 @@ test("final review pages from the feature base while commits remain based on exe
       diffBaseCommit: repo.base,
     });
     review.begin(executionHead);
+    assert.deepEqual(review.host.describe?.(), {
+      workspaceRoot: repo.workingDir,
+      checkIds: ["review-check"],
+    });
 
     const evidence = await review.host.diff();
     assert.deepEqual(evidence.baseToHead, ["selected.txt"]);

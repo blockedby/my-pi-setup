@@ -8,6 +8,10 @@ import type {
   FeatureExecutionTask,
 } from "./feature-planning.ts";
 import { isSafeRepositoryRelativePath } from "./feature-planning.ts";
+import {
+  captureCheckInputRevision,
+  type CheckInputRevision,
+} from "./check-input-revision.ts";
 import { runFeatureSandboxCommand } from "./feature-sandbox.ts";
 import {
   createFeatureRootTaskGitTarget,
@@ -63,6 +67,7 @@ export interface FeatureTaskAttemptSnapshot {
 
 export interface FeatureCheckResult {
   readonly checkId: string;
+  readonly checkInvocationId?: string;
   readonly command: string;
   readonly cwd: string;
   readonly purpose: string;
@@ -158,7 +163,14 @@ export interface FeatureTaskFinalizeResult {
   readonly error?: string;
 }
 
+export interface FeatureTaskToolHostDescription {
+  readonly workspaceRoot: string;
+  readonly checkIds: ReadonlyArray<string>;
+}
+
 export interface FeatureTaskToolHost {
+  /** Describe controller-owned task authority without exposing task ACL claims. */
+  readonly describe?: () => FeatureTaskToolHostDescription | undefined;
   diff(request?: FeatureDiffPageRequest): Promise<FeatureTaskDiffResult>;
   check(request: { readonly checkId: string }): Promise<FeatureCheckResult>;
   finalize(request: {
@@ -183,6 +195,7 @@ export interface FeatureTaskSnapshot {
   readonly summary?: string;
   readonly error?: string;
   readonly checks: ReadonlyArray<FeatureCheckResult>;
+  readonly checkHistory?: ReadonlyArray<FeatureCheckResult>;
   readonly warnings: ReadonlyArray<string>;
   readonly residualPaths: ReadonlyArray<string>;
   readonly capsule?: FeatureTaskCapsule;
@@ -242,6 +255,7 @@ interface MutableTaskState {
   attempt: number;
   attempts: FeatureTaskAttemptSnapshot[];
   checks: FeatureCheckResult[];
+  checkHistory: FeatureCheckResult[];
   warnings: string[];
   residualPaths: string[];
   taskBaseCommit?: string;
@@ -251,6 +265,38 @@ interface MutableTaskState {
   error?: string;
   capsule?: FeatureTaskCapsule;
   active: boolean;
+}
+
+interface ActiveCheckOperation {
+  readonly kind: "check";
+  readonly operationId: string;
+  readonly checkInvocationId: string;
+  readonly checkId: string;
+  readonly attempt: number;
+  readonly inputRevision: CheckInputRevision;
+  readonly promise: Promise<FeatureCheckResult>;
+  readonly startedAt: number;
+}
+
+interface ActiveFinalizeOperation {
+  readonly kind: "finalize";
+  readonly operationId: string;
+  readonly promise: Promise<FeatureTaskFinalizeResult>;
+  readonly startedAt: number;
+  internalCheck?: ActiveCheckOperation;
+}
+
+type ActiveOperation = ActiveCheckOperation | ActiveFinalizeOperation;
+type FeatureTaskInspection = ReturnType<FeatureTaskGitTarget["inspect"]>;
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function boundedError(error: unknown) {
@@ -517,13 +563,17 @@ export function createFeatureTaskRuntime(options: {
     attempt: 0,
     attempts: [],
     checks: [],
+    checkHistory: [],
     warnings: [],
     residualPaths: [...new Set(options.knownResidualPaths ?? [])].sort(),
     taskBaseCommit: options.taskBaseCommit,
     active: true,
   };
   const runCheck = options.runCheck ?? runFeatureCheckCommand;
-  let busy = false;
+  let activeOperation: ActiveOperation | undefined;
+  let operationSequence = 0;
+  const nextOperationId = (kind: "check" | "finalize") =>
+    `${kind}-${++operationSequence}`;
   const assertActive = () => {
     if (!state.active)
       throw new Error(`Task ${task.id} tool authority is closed.`);
@@ -534,6 +584,54 @@ export function createFeatureTaskRuntime(options: {
       throw new Error(
         `Task ${task.id} HEAD drifted outside controller ownership.`,
       );
+  };
+  const captureInputRevision = () => {
+    assertActive();
+    const beforeHead = options.target.head();
+    const evidence = options.target.inspect(options.taskBaseCommit);
+    const afterHead = options.target.head();
+    if (beforeHead !== afterHead) {
+      throw new Error(
+        `Task ${task.id} workspace changed while proving check input revision.`,
+      );
+    }
+    return {
+      revision: captureCheckInputRevision({
+        workspaceRoot: options.target.worktree,
+        head: afterHead,
+        evidence,
+      }),
+      evidence,
+    };
+  };
+  const sameCheckInput = (
+    operation: ActiveCheckOperation,
+    revision: CheckInputRevision,
+  ) =>
+    operation.attempt === state.attempt &&
+    operation.inputRevision.fingerprint === revision.fingerprint;
+  const isActiveCheck = (operation: ActiveCheckOperation) =>
+    activeOperation === operation ||
+    (activeOperation?.kind === "finalize" &&
+      activeOperation.internalCheck === operation);
+  const assertCurrentCheckAttempt = (operation: ActiveCheckOperation) => {
+    if (operation.attempt !== state.attempt) {
+      throw new Error(
+        `Task ${task.id} check operation belongs to attempt ${operation.attempt}, current attempt is ${state.attempt}.`,
+      );
+    }
+  };
+  const clearCheckOperation = (operation: ActiveCheckOperation) => {
+    if (activeOperation?.kind === "check" && activeOperation === operation) {
+      activeOperation = undefined;
+      return;
+    }
+    if (
+      activeOperation?.kind === "finalize" &&
+      activeOperation.internalCheck === operation
+    ) {
+      activeOperation.internalCheck = undefined;
+    }
   };
 
   const snapshot = (): FeatureTaskSnapshot => ({
@@ -556,6 +654,7 @@ export function createFeatureTaskRuntime(options: {
     ...(state.summary ? { summary: state.summary } : {}),
     ...(state.error ? { error: state.error } : {}),
     checks: state.checks.map((check) => ({ ...check })),
+    checkHistory: state.checkHistory.map((check) => ({ ...check })),
     warnings: [...state.warnings],
     residualPaths: [...state.residualPaths],
     ...(state.capsule ? { capsule: state.capsule } : {}),
@@ -603,10 +702,16 @@ export function createFeatureTaskRuntime(options: {
     };
   };
 
-  const runDeclaredCheck = async (request: {
-    readonly checkId: string;
-  }): Promise<FeatureCheckResult> => {
+  const runDeclaredCheck = async (
+    request: { readonly checkId: string },
+    operation: ActiveCheckOperation,
+    before: FeatureTaskInspection,
+  ) => {
+    if (!isActiveCheck(operation)) {
+      throw new Error(`Task ${task.id} check operation is no longer active.`);
+    }
     assertActive();
+    assertCurrentCheckAttempt(operation);
     const definition = checksById.get(request.checkId);
     if (!definition) {
       throw new Error(
@@ -614,9 +719,7 @@ export function createFeatureTaskRuntime(options: {
       );
     }
     const cwd = resolveCheckCwd(options.target.worktree, definition.cwd);
-    const before = options.target.inspect(options.taskBaseCommit);
     const beforeTracked = new Set([...before.staged, ...before.tracked]);
-    const startedAt = Date.now();
     let commandResult: FeatureCheckCommandResult;
     let commandError: string | undefined;
     try {
@@ -633,6 +736,10 @@ export function createFeatureTaskRuntime(options: {
       commandResult = { exitCode: null, stdout: "", stderr: commandError };
     }
     assertActive();
+    assertCurrentCheckAttempt(operation);
+    if (!isActiveCheck(operation)) {
+      throw new Error(`Task ${task.id} check operation is no longer active.`);
+    }
     const after = options.target.inspect(options.taskBaseCommit);
     const trackedChanged =
       before.fingerprint !== after.fingerprint ||
@@ -649,6 +756,7 @@ export function createFeatureTaskRuntime(options: {
       .sort();
     const result: FeatureCheckResult = {
       checkId: definition.id,
+      checkInvocationId: operation.checkInvocationId,
       command: definition.command,
       cwd: definition.cwd,
       purpose: definition.purpose,
@@ -661,7 +769,7 @@ export function createFeatureTaskRuntime(options: {
       stdout: boundedText(commandResult.stdout, 16 * 1024),
       stderr: boundedText(commandResult.stderr, 16 * 1024),
       changedPaths,
-      startedAt,
+      startedAt: operation.startedAt,
       finishedAt: Date.now(),
       ...(commandError ? { error: commandError } : {}),
     };
@@ -669,106 +777,142 @@ export function createFeatureTaskRuntime(options: {
       (check) => check.checkId !== result.checkId,
     );
     state.checks.push(result);
+    state.checkHistory.push(result);
     publish();
     return result;
   };
 
-  const check = async (request: { readonly checkId: string }) => {
-    assertActive();
-    if (busy)
-      throw new Error(`Task ${task.id} verification is already running.`);
-    busy = true;
+  const launchCheckOperation = (
+    request: { readonly checkId: string },
+    parent?: ActiveFinalizeOperation,
+  ) => {
+    const { revision: inputRevision, evidence } = captureInputRevision();
+    const deferred = createDeferred<FeatureCheckResult>();
+    const operationId = nextOperationId("check");
+    const operation: ActiveCheckOperation = {
+      kind: "check",
+      operationId,
+      checkInvocationId: operationId,
+      checkId: request.checkId,
+      attempt: state.attempt,
+      inputRevision,
+      promise: deferred.promise,
+      startedAt: Date.now(),
+    };
+    if (parent) {
+      if (activeOperation !== parent || parent.internalCheck) {
+        throw new Error(`Task ${task.id} finalization is already running.`);
+      }
+      parent.internalCheck = operation;
+    } else {
+      if (activeOperation) {
+        throw new Error(`Task ${task.id} verification is already running.`);
+      }
+      activeOperation = operation;
+    }
+    void runDeclaredCheck(request, operation, evidence)
+      .finally(() => clearCheckOperation(operation))
+      .then(
+        (value) => {
+          deferred.resolve(value);
+        },
+        (error: unknown) => {
+          deferred.reject(error);
+        },
+      );
+    return deferred.promise;
+  };
+
+  const check = (request: { readonly checkId: string }) => {
     try {
-      return await runDeclaredCheck(request);
-    } finally {
-      busy = false;
+      assertActive();
+      if (!checksById.has(request.checkId)) {
+        throw new Error(
+          `Unknown declared check ID ${JSON.stringify(request.checkId)}.`,
+        );
+      }
+      const active = activeOperation;
+      const activeCheck =
+        active?.kind === "check" ? active : active?.internalCheck;
+      if (activeCheck) {
+        if (activeCheck.checkId !== request.checkId) {
+          throw new Error(`Task ${task.id} verification is already running.`);
+        }
+        if (activeCheck.attempt !== state.attempt) {
+          throw new Error(
+            `Task ${task.id} verification is already running for another attempt.`,
+          );
+        }
+        const { revision: inputRevision } = captureInputRevision();
+        if (!sameCheckInput(activeCheck, inputRevision)) {
+          throw new Error(
+            `Task ${task.id} verification is already running for a different workspace input revision.`,
+          );
+        }
+        return activeCheck.promise;
+      }
+      if (active) {
+        throw new Error(`Task ${task.id} finalization is already running.`);
+      }
+      return launchCheckOperation(request);
+    } catch (error) {
+      return Promise.reject(error);
     }
   };
 
-  const finalize = async (request: {
-    readonly commitPaths: ReadonlyArray<string>;
-    readonly summary: string;
-  }): Promise<FeatureTaskFinalizeResult> => {
-    assertActive();
-    if (busy)
-      throw new Error(`Task ${task.id} finalization is already running.`);
-    if (!request.summary.trim())
-      throw new Error("Task summary must not be empty.");
-    if (Buffer.byteLength(request.summary, "utf8") > TASK_SUMMARY_LIMIT) {
-      throw new Error(
-        `Task summary exceeds ${TASK_SUMMARY_LIMIT} UTF-8 bytes.`,
+  const runFinalizeCheck = (
+    operation: ActiveFinalizeOperation,
+    request: { readonly checkId: string },
+  ) => launchCheckOperation(request, operation);
+
+  const executeFinalize = async (
+    request: {
+      readonly commitPaths: ReadonlyArray<string>;
+      readonly summary: string;
+    },
+    operation: ActiveFinalizeOperation,
+  ) => {
+    let commitResult: ReturnType<FeatureTaskGitTarget["commit"]> | undefined;
+    if (options.conflict && !state.provisionalCommit) {
+      commitResult = options.target.continueCherryPick(request.commitPaths);
+    } else if (!state.provisionalCommit && request.commitPaths.length > 0) {
+      commitResult = options.target.commit(
+        options.taskBaseCommit,
+        request.commitPaths,
+        `${options.kind === "final-review" ? "review" : "feature"}: ${task.id} ${task.objective}`,
       );
+    } else if (state.provisionalCommit && request.commitPaths.length > 0) {
+      commitResult = options.target.amend(
+        state.provisionalCommit,
+        request.commitPaths,
+      );
+    } else {
+      const meaningful = currentMeaningfulPaths(
+        options.target,
+        options.taskBaseCommit,
+        preparationBaseline,
+        new Set(state.residualPaths),
+      );
+      if (meaningful.length > 0) {
+        throw new Error(
+          `Empty commitPaths cannot discard meaningful task changes: ${meaningful.join(", ")}.`,
+        );
+      }
     }
-    busy = true;
-    try {
-      let commitResult: ReturnType<FeatureTaskGitTarget["commit"]> | undefined;
-      if (options.conflict && !state.provisionalCommit) {
-        commitResult = options.target.continueCherryPick(request.commitPaths);
-      } else if (!state.provisionalCommit && request.commitPaths.length > 0) {
-        commitResult = options.target.commit(
-          options.taskBaseCommit,
-          request.commitPaths,
-          `${options.kind === "final-review" ? "review" : "feature"}: ${task.id} ${task.objective}`,
-        );
-      } else if (state.provisionalCommit && request.commitPaths.length > 0) {
-        commitResult = options.target.amend(
-          state.provisionalCommit,
-          request.commitPaths,
-        );
-      } else {
-        const meaningful = currentMeaningfulPaths(
-          options.target,
-          options.taskBaseCommit,
-          preparationBaseline,
-          new Set(state.residualPaths),
-        );
-        if (meaningful.length > 0) {
-          throw new Error(
-            `Empty commitPaths cannot discard meaningful task changes: ${meaningful.join(", ")}.`,
-          );
-        }
-      }
-      if (commitResult) {
-        state.provisionalCommit = commitResult.commit;
-        state.status = "provisional";
-        state.warnings.push(...commitResult.warnings);
-        state.residualPaths = [...new Set(commitResult.residualPaths)].sort();
-      }
-      state.summary = request.summary.trim();
-      state.error = undefined;
-      state.checks = [];
-      publish();
-      for (const definition of effectiveChecks) {
-        if (options.signal.aborted) {
-          state.status = "cancelled";
-          state.error = "Feature task was cancelled during final verification.";
-          publish();
-          return {
-            validated: false,
-            status: state.status,
-            ...(state.provisionalCommit
-              ? { commit: state.provisionalCommit }
-              : {}),
-            changedPaths: commitResult?.changedPaths ?? [],
-            checks: [...state.checks],
-            warnings: [...state.warnings],
-            residualPaths: [...state.residualPaths],
-            error: state.error,
-          };
-        }
-        await runDeclaredCheck({ checkId: definition.id });
-      }
-      const requiredFailure = state.checks.find(
-        (result) => result.required && result.status !== "passed",
-      );
-      const checkMutations = state.checks.flatMap(
-        ({ changedPaths }) => changedPaths,
-      );
-      if (requiredFailure || checkMutations.length > 0) {
-        state.status = "provisional";
-        state.error = requiredFailure
-          ? `Required check ${requiredFailure.checkId} failed.`
-          : `Checks changed tracked paths: ${[...new Set(checkMutations)].join(", ")}.`;
+    if (commitResult) {
+      state.provisionalCommit = commitResult.commit;
+      state.status = "provisional";
+      state.warnings.push(...commitResult.warnings);
+      state.residualPaths = [...new Set(commitResult.residualPaths)].sort();
+    }
+    state.summary = request.summary.trim();
+    state.error = undefined;
+    state.checks = [];
+    publish();
+    for (const definition of effectiveChecks) {
+      if (options.signal.aborted) {
+        state.status = "cancelled";
+        state.error = "Feature task was cancelled during final verification.";
         publish();
         return {
           validated: false,
@@ -783,30 +927,104 @@ export function createFeatureTaskRuntime(options: {
           error: state.error,
         };
       }
-      assertActive();
-      state.validatedCommit = state.provisionalCommit;
-      state.status =
-        state.provisionalCommit || options.kind === "final-review"
-          ? "validated"
-          : "satisfied_without_changes";
-      state.active = false;
+      await runFinalizeCheck(operation, { checkId: definition.id });
+    }
+    const requiredFailure = state.checks.find(
+      (result) => result.required && result.status !== "passed",
+    );
+    const checkMutations = state.checks.flatMap(
+      ({ changedPaths }) => changedPaths,
+    );
+    if (requiredFailure || checkMutations.length > 0) {
+      state.status = "provisional";
+      state.error = requiredFailure
+        ? `Required check ${requiredFailure.checkId} failed.`
+        : `Checks changed tracked paths: ${[...new Set(checkMutations)].join(", ")}.`;
       publish();
       return {
-        validated: true,
+        validated: false,
         status: state.status,
-        ...(state.validatedCommit ? { commit: state.validatedCommit } : {}),
+        ...(state.provisionalCommit ? { commit: state.provisionalCommit } : {}),
         changedPaths: commitResult?.changedPaths ?? [],
         checks: [...state.checks],
         warnings: [...state.warnings],
         residualPaths: [...state.residualPaths],
+        error: state.error,
       };
-    } finally {
-      busy = false;
+    }
+    assertActive();
+    state.validatedCommit = state.provisionalCommit;
+    state.status =
+      state.provisionalCommit || options.kind === "final-review"
+        ? "validated"
+        : "satisfied_without_changes";
+    state.active = false;
+    publish();
+    return {
+      validated: true,
+      status: state.status,
+      ...(state.validatedCommit ? { commit: state.validatedCommit } : {}),
+      changedPaths: commitResult?.changedPaths ?? [],
+      checks: [...state.checks],
+      warnings: [...state.warnings],
+      residualPaths: [...state.residualPaths],
+    } satisfies FeatureTaskFinalizeResult;
+  };
+
+  const finalize = (request: {
+    readonly commitPaths: ReadonlyArray<string>;
+    readonly summary: string;
+  }) => {
+    try {
+      assertActive();
+      if (activeOperation) {
+        throw new Error(
+          `Task ${task.id} ${activeOperation.kind === "check" ? "verification" : "finalization"} is already running.`,
+        );
+      }
+      if (!request.summary.trim())
+        throw new Error("Task summary must not be empty.");
+      if (Buffer.byteLength(request.summary, "utf8") > TASK_SUMMARY_LIMIT) {
+        throw new Error(
+          `Task summary exceeds ${TASK_SUMMARY_LIMIT} UTF-8 bytes.`,
+        );
+      }
+      const deferred = createDeferred<FeatureTaskFinalizeResult>();
+      const operation: ActiveFinalizeOperation = {
+        kind: "finalize",
+        operationId: nextOperationId("finalize"),
+        promise: deferred.promise,
+        startedAt: Date.now(),
+      };
+      activeOperation = operation;
+      void executeFinalize(request, operation)
+        .finally(() => {
+          if (activeOperation === operation) activeOperation = undefined;
+        })
+        .then(
+          (value) => {
+            deferred.resolve(value);
+          },
+          (error: unknown) => {
+            deferred.reject(error);
+          },
+        );
+      return deferred.promise;
+    } catch (error) {
+      return Promise.reject(error);
     }
   };
 
   const runtime: FeatureTaskRuntime = {
-    host: { diff, check, finalize },
+    host: {
+      describe: () => ({
+        workspaceRoot: options.target.worktree,
+        checkIds: effectiveChecks.map(({ id }) => id),
+      }),
+      diff,
+      check,
+      finalize,
+    },
     setPreparationBaseline(paths) {
       if (state.provisionalCommit || runtime.isValidated()) {
         throw new Error(
@@ -1022,6 +1240,7 @@ export function createFeatureReviewRuntime(options: {
     throw new Error("Final Astra review is not active.");
   };
   const host: FeatureTaskToolHost = {
+    describe: () => runtime?.host.describe?.(),
     diff: (request) => runtime?.host.diff(request) ?? unavailable(),
     check: (request) => runtime?.host.check(request) ?? unavailable(),
     finalize: (request) => runtime?.host.finalize(request) ?? unavailable(),
@@ -1096,6 +1315,7 @@ export function createFeatureReviewRuntime(options: {
           branch: "",
           worktree: options.workingDir,
           checks: [],
+          checkHistory: [],
           warnings: [],
           residualPaths: [...new Set(options.knownResidualPaths ?? [])].sort(),
         }

@@ -122,6 +122,7 @@ test("child denylist keeps extension and workflow structured tools available", a
         "pipeline_child_list",
         "pipeline_child_check",
         "pipeline_child_wait",
+        "pipeline_artifact_read",
         "pipeline_child_send",
         "pipeline_child_cancel",
         "pipeline_complete",

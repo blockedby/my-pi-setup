@@ -15,6 +15,10 @@ import {
   type ToolDefinition,
   type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
+import {
+  createCleanupRecorder,
+  type CleanupEvidenceSink,
+} from "./cleanup-evidence.ts";
 
 export type FeatureSandboxMode = "candidate" | "selection" | "augmentation";
 
@@ -411,38 +415,173 @@ function cleanupErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+const FEATURE_SANDBOX_CLEANUP_PHASE = "feature-sandbox-runtime-cleanup";
+
+function cleanupIdentity(identity: FeatureSandboxDirectoryIdentity) {
+  return `${identity.dev}:${identity.ino}`;
+}
+
+function createSandboxCleanupRecorder(
+  sink: CleanupEvidenceSink | undefined,
+  resource: string,
+  resourceType: "sandbox" | "directory",
+  ownership: "controller" | "caller" | "foreign" | "unknown",
+  expectedIdentity?: FeatureSandboxDirectoryIdentity,
+) {
+  return createCleanupRecorder(sink, {
+    resourceId: resource,
+    resourceType,
+    resource,
+    ownership,
+    phase: FEATURE_SANDBOX_CLEANUP_PHASE,
+    ...(expectedIdentity === undefined
+      ? {}
+      : { expectedIdentity: cleanupIdentity(expectedIdentity) }),
+  });
+}
+
+function unownedSandboxRuntimeRoot(workspaceRoot: string) {
+  const absolute = path.resolve(workspaceRoot);
+  return path.join(
+    path.dirname(absolute),
+    ".pipi-runtime",
+    path.basename(absolute),
+  );
+}
+
+function recordUnownedSandboxCleanup(
+  workspaceRoot: string,
+  sink: CleanupEvidenceSink | undefined,
+) {
+  const resource = unownedSandboxRuntimeRoot(workspaceRoot);
+  const recorder = createSandboxCleanupRecorder(
+    sink,
+    resource,
+    "sandbox",
+    "unknown",
+  );
+  try {
+    if (lstatIfPresent(resource)) {
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "no_controller_ownership",
+        detail:
+          "The runtime path exists, but this process has no cleanup ownership.",
+      });
+    } else {
+      recorder.outcome({
+        disposition: "skipped",
+        operationStatus: "not_attempted",
+        reasonCode: "no_controller_ownership",
+        detail: "No controller-owned runtime is registered for this workspace.",
+      });
+    }
+  } catch (error) {
+    recorder.outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "unowned_runtime_observation_failed",
+      detail: cleanupErrorMessage(error),
+    });
+  }
+}
+
 /** Remove only runtime scratch that this process created for a removed workspace. */
-export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
+export function cleanupFeatureSandboxRuntime(
+  workspaceRoot: string,
+  sink?: CleanupEvidenceSink,
+) {
   const key = cleanupWorkspaceKeys(workspaceRoot).find((candidate) =>
     ownedFeatureSandboxRuntimes.has(candidate),
   );
-  if (!key) return [];
+  if (!key) {
+    recordUnownedSandboxCleanup(workspaceRoot, sink);
+    return [];
+  }
   const owned = ownedFeatureSandboxRuntimes.get(key);
-  if (!owned) return [];
+  if (!owned) {
+    recordUnownedSandboxCleanup(workspaceRoot, sink);
+    return [];
+  }
   const warnings: string[] = [];
+  const parentRecorder = (
+    ownership: "controller" | "caller" | "foreign" | "unknown" = "controller",
+  ) =>
+    createSandboxCleanupRecorder(
+      sink,
+      owned.runtimeParent,
+      "directory",
+      ownership,
+      owned.parentIdentity,
+    );
+  const rootRecorder = (
+    ownership: "controller" | "caller" | "foreign" | "unknown" = "controller",
+  ) =>
+    createSandboxCleanupRecorder(
+      sink,
+      owned.runtimeRoot,
+      "sandbox",
+      ownership,
+      owned.rootIdentity,
+    );
 
   let workspace: fs.Stats | undefined;
   try {
     workspace = lstatIfPresent(owned.workspaceRoot);
   } catch (error) {
+    rootRecorder().outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "workspace_observation_failed",
+      detail: cleanupErrorMessage(error),
+    });
     warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
     return warnings;
   }
-  if (workspace) return warnings;
+  if (workspace) {
+    rootRecorder().outcome({
+      disposition: "retained",
+      operationStatus: "not_attempted",
+      reasonCode: "workspace_still_present",
+      detail:
+        "The assigned workspace is still present; runtime cleanup is deferred.",
+    });
+    return warnings;
+  }
 
   let parent: fs.Stats | undefined;
   try {
     parent = lstatIfPresent(owned.runtimeParent);
   } catch (error) {
+    parentRecorder().outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "runtime_parent_observation_failed",
+      detail: cleanupErrorMessage(error),
+    });
     warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
     return warnings;
   }
   if (!parent) {
+    parentRecorder().outcome({
+      disposition: "skipped",
+      operationStatus: "not_attempted",
+      reasonCode: "runtime_parent_absent",
+      detail:
+        "The runtime parent was already absent; no removal was attempted.",
+    });
     ownedFeatureSandboxRuntimes.delete(key);
     return warnings;
   }
   try {
     if (comparableExistingPath(owned.runtimeParent) !== owned.runtimeParent) {
+      parentRecorder("foreign").outcome({
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "runtime_parent_ancestry_redirected",
+        detail: "The runtime ancestry was redirected; refusing to remove it.",
+      });
       warnings.push(
         cleanupWarning(
           owned,
@@ -452,10 +591,23 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
       return warnings;
     }
   } catch (error) {
+    parentRecorder("unknown").outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "runtime_parent_canonicalization_failed",
+      detail: cleanupErrorMessage(error),
+    });
     warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
     return warnings;
   }
   if (parent.isSymbolicLink() || !parent.isDirectory()) {
+    parentRecorder("foreign").outcome({
+      disposition: "retained",
+      operationStatus: "not_attempted",
+      reasonCode: "runtime_parent_invalid_type",
+      detail:
+        "The runtime parent is not a non-symlink directory; refusing to remove it.",
+    });
     warnings.push(
       cleanupWarning(
         owned,
@@ -470,6 +622,12 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
       owned.parentIdentity,
     )
   ) {
+    parentRecorder("foreign").outcome({
+      disposition: "retained",
+      operationStatus: "not_attempted",
+      reasonCode: "runtime_parent_identity_mismatch",
+      detail: "The runtime parent identity changed; refusing to remove it.",
+    });
     warnings.push(
       cleanupWarning(
         owned,
@@ -484,6 +642,13 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
     isWithin(owned.workspaceRoot, owned.runtimeParent) ||
     path.dirname(owned.runtimeRoot) !== owned.runtimeParent
   ) {
+    parentRecorder("unknown").outcome({
+      disposition: "retained",
+      operationStatus: "not_attempted",
+      reasonCode: "unsafe_runtime_path",
+      detail:
+        "The recorded runtime path is not safely separate from the workspace.",
+    });
     warnings.push(
       cleanupWarning(
         owned,
@@ -497,11 +662,24 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
   try {
     runtimeRoot = lstatIfPresent(owned.runtimeRoot);
   } catch (error) {
+    rootRecorder().outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "runtime_root_observation_failed",
+      detail: cleanupErrorMessage(error),
+    });
     warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
     return warnings;
   }
   if (runtimeRoot) {
     if (runtimeRoot.isSymbolicLink() || !runtimeRoot.isDirectory()) {
+      rootRecorder("foreign").outcome({
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "runtime_root_invalid_type",
+        detail:
+          "The recorded runtime root is not a non-symlink directory; refusing to remove it.",
+      });
       warnings.push(
         cleanupWarning(
           owned,
@@ -516,6 +694,12 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
         owned.rootIdentity,
       )
     ) {
+      rootRecorder("foreign").outcome({
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "runtime_root_identity_mismatch",
+        detail: "The runtime root identity changed; refusing to remove it.",
+      });
       warnings.push(
         cleanupWarning(
           owned,
@@ -524,9 +708,22 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
       );
       return warnings;
     }
+  }
+
+  const rootRemovalRecorder = rootRecorder();
+  let rootRemovalAttempted = false;
+  if (runtimeRoot) {
+    rootRemovalRecorder.intent();
+    rootRemovalAttempted = true;
     try {
       fs.rmSync(owned.runtimeRoot, { recursive: true, force: true });
     } catch (error) {
+      rootRemovalRecorder.outcome({
+        disposition: "retained",
+        operationStatus: "failed",
+        reasonCode: "runtime_root_remove_failed",
+        detail: cleanupErrorMessage(error),
+      });
       warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
       return warnings;
     }
@@ -536,10 +733,23 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
   try {
     remainingRoot = lstatIfPresent(owned.runtimeRoot);
   } catch (error) {
+    rootRemovalRecorder.outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "runtime_root_verification_failed",
+      detail: cleanupErrorMessage(error),
+    });
     warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
     return warnings;
   }
   if (remainingRoot) {
+    rootRemovalRecorder.outcome({
+      disposition: "retained",
+      operationStatus: rootRemovalAttempted ? "failed" : "not_attempted",
+      reasonCode: "runtime_root_remained",
+      detail:
+        "The runtime root remained after the cleanup check; refusing to remove its parent.",
+    });
     warnings.push(
       cleanupWarning(
         owned,
@@ -548,15 +758,43 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
     );
     return warnings;
   }
+  rootRemovalRecorder.outcome(
+    rootRemovalAttempted
+      ? {
+          disposition: "removed",
+          operationStatus: "succeeded",
+          reasonCode: "runtime_root_removed",
+        }
+      : {
+          disposition: "skipped",
+          operationStatus: "not_attempted",
+          reasonCode: "runtime_root_absent",
+          detail:
+            "The runtime root was already absent; no removal was attempted.",
+        },
+  );
 
   let currentParent: fs.Stats | undefined;
   try {
     currentParent = lstatIfPresent(owned.runtimeParent);
   } catch (error) {
+    parentRecorder().outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "runtime_parent_observation_failed",
+      detail: cleanupErrorMessage(error),
+    });
     warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
     return warnings;
   }
   if (!currentParent) {
+    parentRecorder().outcome({
+      disposition: "skipped",
+      operationStatus: "not_attempted",
+      reasonCode: "runtime_parent_absent",
+      detail:
+        "The runtime parent was already absent; no removal was attempted.",
+    });
     ownedFeatureSandboxRuntimes.delete(key);
     return warnings;
   }
@@ -568,6 +806,13 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
       owned.parentIdentity,
     )
   ) {
+    parentRecorder("foreign").outcome({
+      disposition: "retained",
+      operationStatus: "not_attempted",
+      reasonCode: "runtime_parent_changed_during_removal",
+      detail:
+        "The runtime parent changed during removal; refusing to remove it.",
+    });
     warnings.push(
       cleanupWarning(
         owned,
@@ -576,14 +821,87 @@ export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
     );
     return warnings;
   }
+
+  const parentRemovalRecorder = parentRecorder();
+  parentRemovalRecorder.intent();
   try {
     fs.rmdirSync(owned.runtimeParent);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
+      parentRemovalRecorder.outcome({
+        disposition: "retained",
+        operationStatus: "failed",
+        reasonCode: "runtime_parent_remove_failed",
+        detail: cleanupErrorMessage(error),
+      });
       warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
+      ownedFeatureSandboxRuntimes.delete(key);
+      return warnings;
     }
+    let remainingParent: fs.Stats | undefined;
+    try {
+      remainingParent = lstatIfPresent(owned.runtimeParent);
+    } catch (verificationError) {
+      parentRemovalRecorder.outcome({
+        disposition: "retained",
+        operationStatus: "failed",
+        reasonCode: "runtime_parent_verification_failed",
+        detail: cleanupErrorMessage(verificationError),
+      });
+      ownedFeatureSandboxRuntimes.delete(key);
+      return warnings;
+    }
+    parentRemovalRecorder.outcome(
+      remainingParent
+        ? {
+            disposition: "retained",
+            operationStatus: "failed",
+            reasonCode:
+              code === "ENOTEMPTY" || code === "EEXIST"
+                ? "runtime_parent_nonempty"
+                : "runtime_parent_remove_failed",
+            detail: cleanupErrorMessage(error),
+          }
+        : {
+            disposition: "skipped",
+            operationStatus: "failed",
+            reasonCode: "runtime_parent_already_absent",
+            detail: cleanupErrorMessage(error),
+          },
+    );
+    ownedFeatureSandboxRuntimes.delete(key);
+    return warnings;
   }
+
+  let remainingParent: fs.Stats | undefined;
+  try {
+    remainingParent = lstatIfPresent(owned.runtimeParent);
+  } catch (error) {
+    parentRemovalRecorder.outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "runtime_parent_verification_failed",
+      detail: cleanupErrorMessage(error),
+    });
+    ownedFeatureSandboxRuntimes.delete(key);
+    return warnings;
+  }
+  if (remainingParent) {
+    parentRemovalRecorder.outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "runtime_parent_remained",
+      detail: "The runtime parent remained after removal.",
+    });
+    ownedFeatureSandboxRuntimes.delete(key);
+    return warnings;
+  }
+  parentRemovalRecorder.outcome({
+    disposition: "removed",
+    operationStatus: "succeeded",
+    reasonCode: "runtime_parent_removed",
+  });
   ownedFeatureSandboxRuntimes.delete(key);
   return warnings;
 }

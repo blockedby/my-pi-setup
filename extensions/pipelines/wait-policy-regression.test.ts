@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type {
@@ -81,6 +84,31 @@ function flush() {
   return new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+function createHandoffWaiter() {
+  let resolveHandoff: (handoff: PipelineHandoff) => void = () => {};
+  const promise = new Promise<PipelineHandoff>((resolve) => {
+    resolveHandoff = (handoff) => resolve(handoff);
+  });
+  return { promise, resolve: resolveHandoff };
+}
+
+async function awaitHandoff(pending: Promise<PipelineHandoff>) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("pipeline handoff did not settle promptly")),
+          5_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 async function settlePromptly<T>(pending: Promise<T>) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -104,8 +132,13 @@ function harness() {
   const scheduler = new FakeScheduler();
   const sessions: PendingSession[] = [];
   const handoffs: PipelineHandoff[] = [];
+  const handoffWaiter = createHandoffWaiter();
+  const artifactRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-wait-policy-regression-"),
+  );
   let agentSequence = 0;
   const controller = new PipelineController({
+    artifactRoot,
     clock,
     scheduler,
     makeRunId: () => "wait-policy-regression-00000001",
@@ -119,9 +152,18 @@ function harness() {
     }),
     onHandoff: (handoff) => {
       handoffs.push(handoff);
+      handoffWaiter.resolve(handoff);
     },
   });
-  return { clock, scheduler, sessions, handoffs, controller };
+  return {
+    clock,
+    scheduler,
+    sessions,
+    handoffs,
+    handoff: handoffWaiter.promise,
+    artifactRoot,
+    controller,
+  };
 }
 
 async function startPendingPlan(fixture: ReturnType<typeof harness>) {
@@ -151,9 +193,10 @@ async function startPendingPlan(fixture: ReturnType<typeof harness>) {
   return { runId, childId: child.id, initialAgents: run.agents };
 }
 
-async function waitForHandoff(handoffs: ReadonlyArray<PipelineHandoff>) {
-  for (let turn = 0; turn < 8 && handoffs.length === 0; turn++) await flush();
-  assert.equal(handoffs.length, 1);
+async function waitForHandoff(fixture: ReturnType<typeof harness>) {
+  const handoff = await awaitHandoff(fixture.handoff);
+  assert.equal(fixture.handoffs.length, 1);
+  return handoff;
 }
 
 test("an unbounded child wait settles when its pipeline run is cancelled", async () => {
@@ -173,6 +216,7 @@ test("an unbounded child wait settles when its pipeline run is cancelled", async
     const cancellation = fixture.controller.cancelRun(runId);
     const children = await settlePromptly(waiting);
     const cancelled = await settlePromptly(cancellation);
+    await waitForHandoff(fixture);
 
     assert.equal(children[0]?.id, childId);
     assert.equal(children[0]?.status, "cancelled");
@@ -197,6 +241,7 @@ test("an unbounded child wait settles when its pipeline run is cancelled", async
     assert.equal(fixture.handoffs[0]?.status, "cancelled");
   } finally {
     await fixture.controller.dispose();
+    fs.rmSync(fixture.artifactRoot, { recursive: true, force: true });
   }
 });
 
@@ -217,7 +262,7 @@ test("an unbounded child wait settles when its configured stage deadline expires
     fixture.clock.value = 30_000;
     fixture.scheduler.fire(30_000);
     const children = await settlePromptly(waiting);
-    await waitForHandoff(fixture.handoffs);
+    await waitForHandoff(fixture);
 
     assert.equal(children[0]?.id, childId);
     assert.equal(children[0]?.status, "cancelled");
@@ -244,5 +289,6 @@ test("an unbounded child wait settles when its configured stage deadline expires
     assert.equal(fixture.handoffs[0]?.status, "limited");
   } finally {
     await fixture.controller.dispose();
+    fs.rmSync(fixture.artifactRoot, { recursive: true, force: true });
   }
 });

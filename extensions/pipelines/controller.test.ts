@@ -773,6 +773,10 @@ function harness(
           featureCleanupCompleted++;
           return [];
         },
+        recordRetainedResources() {
+          // The controller calls this for terminal non-success runs; the
+          // deterministic graph fixture has no resources to retain.
+        },
       };
     },
     createFeatureReviewRuntime(input) {
@@ -964,6 +968,27 @@ async function settleInitialization() {
   for (let turn = 0; turn < 5; turn++) {
     await new Promise((resolve) => setImmediate(resolve));
   }
+}
+
+async function waitForHandoff(
+  run: ReturnType<typeof harness>,
+  runId: string,
+  timeoutMs = 5_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const handoff = run.handoffs.find((candidate) => candidate.runId === runId);
+    if (handoff) return handoff;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`Timed out waiting for terminal handoff for ${runId}.`);
+}
+
+function requireArtifactPage(
+  value: Awaited<ReturnType<PipelineController["readArtifact"]>>,
+) {
+  if (!("text" in value)) throw new Error("Expected an artifact read page.");
+  return value;
 }
 
 function discoverySynthesisResult() {
@@ -1550,6 +1575,133 @@ async function finishEmbeddedAudit(
   }
 }
 
+async function prepareFeatureCompletion(run: ReturnType<typeof harness>) {
+  const runId = run.controller.start(request());
+  await settleInitialization();
+  await finishEmbeddedAudit(run, runId);
+  const rootId = run.controller.get(runId)?.rootId;
+  assert.ok(rootId);
+  const rootSession = run.sessions.find(
+    (session) => session.spec.id === rootId,
+  );
+  assert.ok(rootSession);
+  assert.equal(rootSession.spec.role, "pipeline-root");
+  assert.equal(run.controller.getAgent(runId, rootId).status, "running");
+  rootSession.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "Awaiting completion tool." },
+  });
+  assert.equal(run.controller.getAgent(runId, rootId).status, "idle");
+  return { runId, rootSession };
+}
+
+function completionParams(rootSession: FakePipelineSession) {
+  return {
+    outcome: "Completed through the registered pipeline completion tool.",
+    changed_paths: [],
+    checks_evidence: [],
+    assumptions: [],
+    git_commits: [],
+    report_summaries_references: [],
+    unresolved_items: [],
+    working_dir: rootSession.spec.cwd,
+  };
+}
+
+async function invokeRegisteredCompletion(
+  run: ReturnType<typeof harness>,
+  runId: string,
+  rootSession: FakePipelineSession,
+  toolCallId: string,
+) {
+  const completeTool = run.rootTool(runId, "pipeline_complete");
+  assert.ok(completeTool);
+  const rootId = run.controller.get(runId)?.rootId;
+  assert.ok(rootId);
+  assert.equal(run.controller.getAgent(runId, rootId).status, "idle");
+  rootSession.emit({ type: "run_started" });
+  assert.equal(run.controller.getAgent(runId, rootId).status, "running");
+  rootSession.emit({
+    type: "tool",
+    phase: "call",
+    toolCallId,
+    name: "pipeline_complete",
+    text: "",
+    isError: false,
+  });
+  const result = await Promise.race([
+    completeTool.execute(
+      toolCallId,
+      completionParams(rootSession),
+      undefined,
+      undefined,
+      {} as ExtensionContext,
+    ),
+    new Promise<never>((_, reject) =>
+      setImmediate(() =>
+        reject(
+          new Error("pipeline_complete did not return before settlement."),
+        ),
+      ),
+    ),
+  ]);
+  assert.equal(result.terminate, true);
+  assert.equal(run.controller.get(runId)?.status, "completed");
+  assert.equal(run.handoffs.length, 0);
+  return result;
+}
+
+function emitCompletionResult(
+  rootSession: FakePipelineSession,
+  toolCallId: string,
+) {
+  rootSession.emit({
+    type: "tool",
+    phase: "result",
+    toolCallId,
+    name: "pipeline_complete",
+    text: "Pipeline completion returned.",
+    isError: false,
+  });
+}
+
+function emitCompletionSettlement(rootSession: FakePipelineSession) {
+  rootSession.emit({
+    type: "settled",
+    outcome: {
+      type: "completed",
+      finalText: "Pipeline completion returned.",
+    },
+  });
+}
+
+function completeSyntheticRoot(
+  run: ReturnType<typeof harness>,
+  runId: string,
+  facts: Parameters<PipelineController["complete"]>[1],
+  toolCallId: string,
+) {
+  const rootId = run.controller.get(runId)?.rootId;
+  assert.ok(rootId);
+  const rootSession = run.sessions.find(
+    (session) => session.spec.id === rootId,
+  );
+  assert.ok(rootSession);
+  assert.equal(run.controller.getAgent(runId, rootId).status, "running");
+  rootSession.emit({
+    type: "tool",
+    phase: "call",
+    toolCallId,
+    name: "pipeline_complete",
+    text: "",
+    isError: false,
+  });
+  run.controller.complete(runId, facts);
+  assert.equal(run.handoffs.length, 0);
+  emitCompletionResult(rootSession, toolCallId);
+  emitCompletionSettlement(rootSession);
+}
+
 test("controller rejects a trailing-newline pipeline name before creating state", async () => {
   const run = harness();
   assert.throws(
@@ -1799,6 +1951,7 @@ test("cancelled production runs preserve diagnostic refs and completed implement
       encoding: "utf8",
     });
     await run.controller.cancelRun(runId);
+    await waitForHandoff(run, runId);
     assert.equal(run.controller.get(runId)?.status, "cancelled");
     assert.equal(
       execFileSync("git", ["rev-parse", "HEAD"], {
@@ -1876,17 +2029,23 @@ test("production controller completes real Git and sandbox execution through rev
       encoding: "utf8",
     }).trim();
     await finishEmbeddedAudit(run, runId, true, [], base);
-    run.controller.complete(runId, {
-      outcome: "Real offline execution verified",
-      changedPaths: ["output-left.txt", "output-right.txt"],
-      checks: ["Real sandbox task and review checks passed"],
-      assumptions: ["Model decisions are synthetic fixture responses"],
-      git: [],
-      reports: [],
-      unresolvedItems: [],
-      workingDir: fixture.linked,
-    });
+    completeSyntheticRoot(
+      run,
+      runId,
+      {
+        outcome: "Real offline execution verified",
+        changedPaths: ["output-left.txt", "output-right.txt"],
+        checks: ["Real sandbox task and review checks passed"],
+        assumptions: ["Model decisions are synthetic fixture responses"],
+        git: [],
+        reports: [],
+        unresolvedItems: [],
+        workingDir: fixture.linked,
+      },
+      "pipeline-complete-real",
+    );
     await settleInitialization();
+    await waitForHandoff(run, runId);
     assert.equal(run.controller.get(runId)?.status, "completed");
     assert.equal(run.handoffs.length, 1);
     assert.equal(fs.existsSync(path.join(worktreeRoot, runId)), false);
@@ -2006,7 +2165,11 @@ test("feature controller accepts corrected Astra plans, persists artifacts, exec
   );
 
   const artifactDir = path.join(run.artifactRoot, runId);
-  assert.deepEqual(fs.readdirSync(artifactDir).sort(), [
+  const featureArtifacts = fs
+    .readdirSync(artifactDir)
+    .filter((name) => name !== "artifacts" && name !== "manifest.json")
+    .sort();
+  assert.deepEqual(featureArtifacts, [
     "candidate-minimal.json",
     "candidate-robust.json",
     "canonical-plan.json",
@@ -2040,12 +2203,15 @@ test("feature build rejects caller branch identity drift after planning", async 
   assert.equal(snapshot?.status, "failed");
   assert.match(snapshot?.error ?? "", /caller identity drifted before build/);
   assert.equal(run.featureExecutionSignals.length, 0);
+  await waitForHandoff(run, runId);
   const artifacts = fs.readdirSync(path.join(run.artifactRoot, runId)).sort();
   assert.deepEqual(artifacts, [
+    "artifacts",
     "candidate-minimal.json",
     "candidate-robust.json",
     "canonical-plan.json",
     "execution-graph.json",
+    "manifest.json",
     "run-summary.json",
   ]);
 
@@ -2161,6 +2327,7 @@ test("concurrent feature cancellation is coalesced and isolates another run", as
     run.controller.cancelRun(runId),
     run.controller.cancelRun(runId),
   ]);
+  await waitForHandoff(run, runId);
 
   assert.deepEqual(
     results.map((result) => result.status),
@@ -2193,6 +2360,7 @@ test("root cancellation rejection still cleans and hands off exactly once", asyn
     run.controller.cancelRun(runId),
     /root cancellation rejected/,
   );
+  await waitForHandoff(run, runId);
 
   assert.equal(run.controller.get(runId)?.status, "cancelled");
   const rootId = run.controller.get(runId)?.rootId;
@@ -2488,6 +2656,7 @@ test("dashboard cancellation of a starting run prevents its root prompt", async 
   releaseRoot();
   await cancellation;
   await settleInitialization();
+  await waitForHandoff(run, runId);
 
   assert.equal(run.sessions.length, 1);
   assert.equal(run.sessions[0]?.prompts.length, 0);
@@ -2513,6 +2682,7 @@ test("root tools are run-scoped and feature discovery children are read-only", a
 
   assert.equal(run.controller.get(runId)?.agents.length, 9);
   assert.deepEqual(run.rootToolNames, [
+    "pipeline_artifact_read",
     "pipeline_stage",
     "pipeline_child_spawn",
     "pipeline_child_list",
@@ -2559,6 +2729,263 @@ test("root tools are run-scoped and feature discovery children are read-only", a
   }
 
   await run.controller.dispose();
+});
+
+test("terminal evidence is durable, bounded, and ignores late terminal events", async () => {
+  const workingDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "controller-evidence-plan-"),
+  );
+  const run = harness({ autoCompletePlan: true });
+  const runId = run.controller.start({
+    ...nonFeatureRequest("plan-pipeline", workingDir),
+    gitCommit: false,
+    planPath: null,
+  });
+
+  try {
+    await settleInitialization();
+    const handoff = await waitForHandoff(run, runId);
+    assert.equal(handoff.evidenceIncomplete, false);
+    assert.ok(handoff.evidence);
+    assert.ok(handoff.evidenceManifest);
+
+    const runDir = path.join(run.artifactRoot, runId);
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(runDir, "manifest.json"), "utf8"),
+    );
+    assert.equal(manifest.formatVersion, 1);
+    assert.equal(manifest.runId, runId);
+    const manifestEntry = (artifactId: string) => {
+      const entry = manifest.entries.find(
+        (candidate: { artifactId: string }) =>
+          candidate.artifactId === artifactId,
+      );
+      assert.ok(entry, `Missing ${artifactId} artifact manifest entry.`);
+      return entry;
+    };
+    const evidenceEntry = manifestEntry("run-evidence");
+    const acceptanceEntry = manifestEntry("acceptance");
+    assert.equal(evidenceEntry.completeness, "complete");
+    assert.equal(acceptanceEntry.completeness, "complete");
+
+    const evidence = JSON.parse(
+      fs.readFileSync(path.join(runDir, evidenceEntry.relativePath), "utf8"),
+    );
+    const acceptance = JSON.parse(
+      fs.readFileSync(path.join(runDir, acceptanceEntry.relativePath), "utf8"),
+    );
+    assert.equal(evidence.completeness, "complete");
+    assert.equal(acceptance.schemaVersion, 2);
+    const startupEvents = evidence.events.filter(
+      (event: { kind: string }) => event.kind === "session_created",
+    );
+    assert.ok(startupEvents.length > 0);
+    for (const event of startupEvents) {
+      assert.equal("sessionFile" in event, false);
+      assert.equal("sessionFile" in (event.facts ?? {}), false);
+    }
+
+    assert.equal(
+      handoff.evidence.manifest.acceptanceRef?.artifactId,
+      "acceptance",
+    );
+    assert.equal(
+      handoff.evidence.manifest.acceptanceRef?.revision,
+      acceptanceEntry.revision,
+    );
+    assert.equal(
+      handoff.evidence.acceptance.fullArtifactRef?.artifactId,
+      "acceptance",
+    );
+    assert.equal(
+      handoff.evidenceManifest.some(
+        (entry) => entry.artifactId === "run-evidence",
+      ),
+      true,
+    );
+    assert.equal(
+      handoff.evidenceManifest.some(
+        (entry) => entry.artifactId === "acceptance",
+      ),
+      true,
+    );
+
+    const handoffCount = run.handoffs.length;
+    const rootSession = run.sessions.find(
+      (session) => session.spec.role === PLAN_PIPELINE_SYNTHESIS_ROLE,
+    );
+    assert.ok(rootSession);
+    rootSession.emit({
+      type: "settled",
+      outcome: {
+        type: "completed",
+        finalText: "late duplicate terminal event",
+      },
+    });
+    await settleInitialization();
+    assert.equal(run.handoffs.length, handoffCount);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+    fs.rmSync(workingDir, { recursive: true, force: true });
+  }
+});
+
+test("REV-001 waits for root pipeline_complete settlement before immutable evidence handoff", async () => {
+  const run = harness();
+  try {
+    const { runId, rootSession } = await prepareFeatureCompletion(run);
+    await invokeRegisteredCompletion(
+      run,
+      runId,
+      rootSession,
+      "pipeline-complete-1",
+    );
+
+    emitCompletionResult(rootSession, "pipeline-complete-1");
+    emitCompletionSettlement(rootSession);
+
+    const handoff = await waitForHandoff(run, runId);
+    assert.equal(handoff.evidenceIncomplete, false);
+    assert.equal(run.handoffs.length, 1);
+    const manifest = handoff.evidenceManifest;
+    assert.ok(manifest);
+    const evidenceEntry = manifest.find(
+      (entry) => entry.artifactId === "run-evidence",
+    );
+    const acceptanceEntry = manifest.find(
+      (entry) => entry.artifactId === "acceptance",
+    );
+    assert.ok(evidenceEntry);
+    assert.ok(acceptanceEntry);
+
+    const evidencePage = requireArtifactPage(
+      await run.controller.readArtifact(runId, {
+        artifactId: evidenceEntry.artifactId,
+        revision: evidenceEntry.revision,
+        maxBytes: 64 * 1024,
+      }),
+    );
+    const evidence = JSON.parse(evidencePage.text) as {
+      events: ReadonlyArray<{
+        kind: string;
+        sequence: number;
+        sessionId?: string;
+        facts?: Readonly<Record<string, unknown>>;
+      }>;
+    };
+    const rootEvents = evidence.events.filter(
+      (event) => event.sessionId === rootSession.spec.id,
+    );
+    const toolResultEvent = rootEvents.find(
+      (event) =>
+        event.kind === "tool_observed" &&
+        event.facts?.toolName === "pipeline_complete" &&
+        event.facts?.phase === "result",
+    );
+    assert.ok(toolResultEvent);
+    const settledEvent = rootEvents.find(
+      (event) =>
+        event.kind === "settled" &&
+        event.facts?.outcome === "completed" &&
+        event.sequence > toolResultEvent.sequence,
+    );
+    assert.ok(settledEvent);
+
+    const acceptancePage = requireArtifactPage(
+      await run.controller.readArtifact(runId, {
+        artifactId: acceptanceEntry.artifactId,
+        revision: acceptanceEntry.revision,
+        maxBytes: 64 * 1024,
+      }),
+    );
+    const acceptance = JSON.parse(acceptancePage.text) as {
+      pipelineExecutionAcceptance: {
+        criteria: ReadonlyArray<{ id: string; status: string }>;
+      };
+    };
+    assert.equal(
+      acceptance.pipelineExecutionAcceptance.criteria.find(
+        (criterion) => criterion.id === "attempts-closed",
+      )?.status,
+      "passed",
+    );
+
+    const sealedEvidenceText = evidencePage.text;
+    const handoffBeforeLateEvents = structuredClone(handoff);
+    emitCompletionResult(rootSession, "pipeline-complete-1");
+    emitCompletionSettlement(rootSession);
+    await settleInitialization();
+    assert.equal(run.handoffs.length, 1);
+    assert.deepEqual(run.handoffs[0], handoffBeforeLateEvents);
+    const rereadEvidence = requireArtifactPage(
+      await run.controller.readArtifact(runId, {
+        artifactId: evidenceEntry.artifactId,
+        revision: evidenceEntry.revision,
+        maxBytes: 64 * 1024,
+      }),
+    );
+    assert.equal(rereadEvidence.text, sealedEvidenceText);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("REV-001 marks stalled terminal observation incomplete at the cleanup bound", async () => {
+  const scheduler = new ManualScheduler();
+  const run = harness({ scheduler });
+  try {
+    const { runId, rootSession } = await prepareFeatureCompletion(run);
+    await invokeRegisteredCompletion(
+      run,
+      runId,
+      rootSession,
+      "pipeline-complete-stalled",
+    );
+    emitCompletionResult(rootSession, "pipeline-complete-stalled");
+    assert.equal(
+      scheduler.scheduled.some(({ delayMs }) => delayMs === 5_000),
+      true,
+    );
+
+    scheduler.fire(5_000);
+    const handoff = await waitForHandoff(run, runId);
+    assert.equal(handoff.evidenceIncomplete, true);
+    assert.equal(run.handoffs.length, 1);
+    const executionAcceptance = handoff.acceptance?.pipelineExecutionAcceptance;
+    assert.ok(executionAcceptance);
+    assert.equal(executionAcceptance.status, "unproven");
+    const manifest = handoff.evidenceManifest;
+    assert.ok(manifest);
+    const evidenceEntry = manifest.find(
+      (entry) => entry.artifactId === "run-evidence",
+    );
+    assert.ok(evidenceEntry);
+    const evidencePage = requireArtifactPage(
+      await run.controller.readArtifact(runId, {
+        artifactId: evidenceEntry.artifactId,
+        revision: evidenceEntry.revision,
+        maxBytes: 64 * 1024,
+      }),
+    );
+    const evidence = JSON.parse(evidencePage.text) as {
+      completeness: string;
+      events: ReadonlyArray<{ kind: string; sessionId?: string }>;
+    };
+    assert.equal(evidence.completeness, "incomplete");
+    assert.equal(
+      run.handoffs[0]?.evidence?.acceptance.pipelineExecutionAcceptance.status,
+      "unproven",
+    );
+
+    emitCompletionSettlement(rootSession);
+    await settleInitialization();
+    assert.equal(run.handoffs.length, 1);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
 });
 
 test("definition role policies centralize child context requirements", () => {
@@ -2926,6 +3353,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     workingDir: implementationWorkingDir(),
   };
   run.controller.complete(runId, facts);
+  await waitForHandoff(run, runId);
   const finalFacts = run.controller.get(runId)?.completion;
   assert.equal(run.controller.get(runId)?.status, "completed");
   assert.ok(finalFacts?.git.some((item) => item.startsWith("Final Git HEAD:")));
@@ -3106,6 +3534,7 @@ test("small-feature-pipeline fails closed on a malformed implementation report",
 
   await run.controller.waitForChildren(runId, [implementer.id]);
   await new Promise((resolve) => setImmediate(resolve));
+  await waitForHandoff(run, runId);
 
   assert.equal(run.controller.get(runId)?.status, "failed");
   assert.equal(run.controller.get(runId)?.stage, "build");
@@ -3146,6 +3575,7 @@ test("small-feature-pipeline fails closed on a malformed Luna audit report", asy
 
   await run.controller.waitForChildren(runId, [auditor.id]);
   await new Promise((resolve) => setImmediate(resolve));
+  await waitForHandoff(run, runId);
 
   assert.equal(run.controller.get(runId)?.status, "failed");
   assert.equal(run.controller.get(runId)?.stage, "final-audit");
@@ -3475,6 +3905,7 @@ test("dashboard cancellation of an idle root cancels the run and active children
   assert.ok(rootRow);
 
   await cancelPipelineRow(run.controller, rootRow);
+  await waitForHandoff(run, runId);
 
   assert.equal(run.controller.get(runId)?.status, "cancelled");
   assert.equal(run.controller.getAgent(runId, rootId).status, "cancelled");
@@ -3559,8 +3990,9 @@ test("feature completion appends committed and dirty Git facts without readiness
       },
     ],
   };
-  run.controller.complete(runId, resolvedFacts);
+  completeSyntheticRoot(run, runId, resolvedFacts, "pipeline-complete-git");
   await settleInitialization();
+  await waitForHandoff(run, runId);
 
   assert.equal(run.handoffs.length, 1);
   const handoff = run.handoffs[0];
@@ -3620,6 +4052,7 @@ test("plan-pipeline uses six Luna discoveries and one xhigh synthesis for termin
     planPath: null,
   });
   await settleInitialization();
+  await waitForHandoff(run, runId);
   const snapshot = run.controller.get(runId);
   assert.equal(snapshot?.status, "completed");
   assert.equal(snapshot?.stage, "complete");
@@ -3776,6 +4209,7 @@ test("plan-pipeline corrects malformed discovery and synthesis turns in place", 
     outcome: { type: "completed", finalText: "# Corrected plan" },
   });
   await settleInitialization();
+  await waitForHandoff(run, runId);
   assert.equal(run.controller.get(runId)?.status, "completed");
   assert.equal(run.handoffs[0]?.facts.plan, "# Corrected plan");
   await run.controller.dispose();
@@ -3792,6 +4226,7 @@ test("plan-pipeline writes exact accepted bytes to arbitrary safe destinations",
     planPath: relativePath,
   });
   await settleInitialization();
+  await waitForHandoff(run, runId);
   const snapshot = run.controller.get(runId);
   const outputPath = path.join(workingDir, relativePath);
   assert.equal(snapshot?.status, "completed");
@@ -3863,8 +4298,9 @@ test("pipeline inspection does not mutate lifecycle state or consume the automat
     workingDir: implementationWorkingDir(),
   };
   await finishEmbeddedAudit(run, runId);
-  run.controller.complete(runId, facts);
+  completeSyntheticRoot(run, runId, facts, "pipeline-complete-inspection");
   await settleInitialization();
+  await waitForHandoff(run, runId);
   const before = structuredClone(run.controller.get(runId));
   assert.equal(run.handoffs.length, 1);
 
@@ -3939,6 +4375,7 @@ test("unknown IDs fail closed and cancellation/disposal stop active sessions", a
   await run.controller.cancelChild(runId, child.id);
   assert.equal(run.controller.getAgent(runId, child.id).status, "cancelled");
   await run.controller.cancelRun(runId);
+  await waitForHandoff(run, runId);
   assert.equal(run.controller.get(runId)?.status, "cancelled");
   assert.equal(run.handoffs.length, 1);
   await run.controller.dispose();

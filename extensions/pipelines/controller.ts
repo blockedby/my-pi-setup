@@ -1,4 +1,22 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { captureReviewIdentity } from "./review-identity.ts";
+import { createRunEvidenceHandoff } from "./run-evidence-handoff.ts";
+import { assessExecutionEvidence } from "./execution-evidence-assessment.ts";
+import { assessImplementationEvidence } from "./implementation-evidence-assessment.ts";
+import {
+  assessAcceptance,
+  type AcceptanceEnvelope,
+  type AcceptanceIdentity,
+} from "./run-acceptance.ts";
+import {
+  createRunEvidenceJournal,
+  type RunEventInput,
+} from "./run-evidence.ts";
+import {
+  createRunArtifactStore,
+  type RunArtifactStore,
+} from "./run-artifacts.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +30,7 @@ import { Type } from "typebox";
 import { AgentTreeController } from "../shared/agent-tree/control.ts";
 import type {
   AgentNodeSnapshot,
+  TreeEvidenceEvent,
   AgentTreeSessionFactory,
 } from "../shared/agent-tree/domain.ts";
 import {
@@ -243,6 +262,16 @@ function boundedPipelineError(error: unknown) {
 }
 
 interface MutableRun {
+  evidenceHandoff?: ReturnType<typeof createRunEvidenceHandoff>;
+  evidenceManifest?: Awaited<ReturnType<RunArtifactStore["manifest"]>>;
+  graphEvidence?: Array<
+    import("./feature-graph-executor.ts").FeatureGraphEvidenceEvent
+  >;
+  acceptance?: AcceptanceEnvelope;
+  reviewedIdentity?: AcceptanceIdentity;
+  finalIdentity?: AcceptanceIdentity;
+  evidence?: ReturnType<typeof createRunEvidenceJournal>;
+  evidenceStore?: RunArtifactStore;
   id: string;
   definition: PipelineDefinitionId;
   request: PipelineRunRequest;
@@ -392,6 +421,10 @@ export interface PipelineControllerOptions {
       runId: string,
       role: string,
     ) => FeatureTaskToolHost | undefined,
+    artifactTools?: (
+      runId: string,
+      role: string,
+    ) => ReadonlyArray<ToolDefinition>,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
   readonly makeRunId?: (pipelineName: string) => string;
@@ -508,6 +541,9 @@ export class PipelineController {
       options.artifactRoot ??
       path.join(os.homedir(), ".pipi", "agent", "pipelines");
     this.tree = new AgentTreeController({
+      observer: (event) => this.recordTreeEvidence(event),
+      onEvidenceError: (error, event) =>
+        this.runs.get(event.scopeId ?? "")?.evidence?.markIncomplete(error),
       factory: options.createSessionFactory(
         (runId) => this.createRootTools(runId),
         (runId) => this.requireRun(runId).definition,
@@ -552,6 +588,12 @@ export class PipelineController {
         (runId, role, token, sessionId) =>
           this.registerExecutionSessionToken(runId, role, token, sessionId),
         (runId, role) => this.runs.get(runId)?.featureTaskHosts.get(role),
+        (runId, role) =>
+          role === AUDIT_SYNTHESIS_ROLE
+            ? this.createRootTools(runId).filter(
+                (tool) => tool.name === "pipeline_artifact_read",
+              )
+            : [],
       ),
       // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
       // intentionally do not apply to pipeline roots or children.
@@ -656,7 +698,12 @@ export class PipelineController {
       return;
     }
     this.cancelStageTimers(run);
+    const previousStage = run.stage;
     run.stage = stage;
+    this.recordEvidence(run, {
+      kind: "stage_entered",
+      facts: { previousStage, stage },
+    });
     const limitMs = run.wallclockLimitMs;
     if (limitMs !== undefined && timedPipelineStage(run.definition, stage)) {
       const stageStartedAtMs = startedAtMs ?? this.monotonicNow(run);
@@ -1140,6 +1187,7 @@ export class PipelineController {
       throw new Error("This discovery turn already recorded a submission.");
     }
     this.discoverySubmissions.set(sessionId, value);
+    this.recordEvidence(run, { kind: "submission_received", sessionId, role });
   }
 
   private registerAuditSessionToken(
@@ -1170,6 +1218,7 @@ export class PipelineController {
       throw new Error("Audit submission session is not registered.");
     }
     segment.submit(sessionId, value);
+    this.recordEvidence(run, { kind: "submission_received", sessionId, role });
   }
 
   private notify() {
@@ -1217,6 +1266,9 @@ export class PipelineController {
       ...run.executionPartials.values(),
     ];
     return {
+      ...(run.acceptance
+        ? { acceptance: structuredClone(run.acceptance) }
+        : {}),
       id: run.id,
       definition: run.definition,
       workingDir: run.request.workingDir,
@@ -1250,6 +1302,109 @@ export class PipelineController {
       ...(run.featureGraph ? { featureGraph: run.featureGraph } : {}),
       agents: this.agentsFor(run.id),
     };
+  }
+
+  async readArtifact(
+    runId: string,
+    request?: import("./run-artifacts.ts").ReadRunArtifactRequest,
+  ) {
+    const run = this.requireRun(runId);
+    if (!run.evidenceStore)
+      throw new Error("Evidence storage unavailable for this run.");
+    return request
+      ? run.evidenceStore.read(request)
+      : run.evidenceStore.manifest();
+  }
+
+  private readonly evidenceControllerInstanceId = randomUUID();
+  private readonly evidenceAcceptedSubmissions = new Set<string>();
+  private readonly evidenceChecks = new Set<string>();
+  private readonly evidenceSubmissions = new Map<string, string>();
+  private readonly evidenceTurns = new Map<string, number>();
+  private readonly evidenceRoleTasks = new Map<string, string>();
+
+  private recordTreeEvidence(event: TreeEvidenceEvent) {
+    const run = this.runs.get(event.scopeId ?? "");
+    if (!run?.evidence) return;
+    if (run.evidence.sealed) return;
+    if (event.type === "session_event" && event.event.type === "run_started") {
+      this.evidenceTurns.set(
+        event.nodeId,
+        (this.evidenceTurns.get(event.nodeId) ?? 0) + 1,
+      );
+    }
+    const turn = this.evidenceTurns.get(event.nodeId);
+    const facts: NonNullable<RunEventInput["facts"]> = {
+      requestedModel: event.requestedModel,
+      attempt: event.attempt,
+      thinkingLevel: event.thinkingLevel ?? null,
+    };
+    let kind: string = event.type;
+    let detail: string | undefined;
+    if (event.type === "session_created") {
+      facts.provider = event.executionMetadata?.provider ?? null;
+      facts.model = event.executionMetadata?.model ?? null;
+      facts.selectedThinkingLevel =
+        event.executionMetadata?.thinkingLevel ?? null;
+      facts.servingRevision = event.executionMetadata?.servingRevision ?? null;
+    }
+    if (event.type === "spawn_failed") detail = event.error;
+    if (event.type === "session_event") {
+      kind = event.event.type;
+      if (event.event.type === "tool") {
+        facts.toolName = event.event.name;
+        facts.toolCallId = event.event.toolCallId;
+        facts.phase = event.event.phase;
+        facts.isError = event.event.isError;
+        kind = event.event.isError ? "tool_failed" : "tool_observed";
+      }
+      if (event.event.type === "settled") {
+        facts.outcome = event.event.outcome.type;
+        if (event.event.outcome.type === "failed")
+          detail = event.event.outcome.error;
+      }
+    }
+    this.recordEvidence(run, {
+      kind,
+      sessionId: event.nodeId,
+      role: event.role,
+      taskId: this.evidenceRoleTasks.get(`${run.id}:${event.role}`),
+      attemptId: `${event.nodeId}:attempt-${event.attempt}`,
+      ...(turn ? { turnId: `${event.nodeId}:turn-${turn}` } : {}),
+      facts,
+      ...(detail ? { detail: detail.slice(0, 2048) } : {}),
+    });
+  }
+
+  private recordEvidence(run: MutableRun, event: RunEventInput) {
+    const turn = event.sessionId
+      ? this.evidenceTurns.get(event.sessionId)
+      : undefined;
+    const submissionKey = `${run.id}:${event.sessionId}:${turn ?? 0}`;
+    if (event.kind === "submission_accepted") {
+      if (this.evidenceAcceptedSubmissions.has(submissionKey)) return undefined;
+      this.evidenceAcceptedSubmissions.add(submissionKey);
+    }
+    let submissionId: string | undefined;
+    if (event.kind.startsWith("submission_")) {
+      submissionId =
+        this.evidenceSubmissions.get(submissionKey) ?? randomUUID();
+      if (event.kind === "submission_received")
+        this.evidenceSubmissions.set(submissionKey, submissionId);
+      else this.evidenceSubmissions.delete(submissionKey);
+    }
+    return run.evidence?.append({
+      ...(event.sessionId
+        ? {
+            attemptId: `${event.sessionId}:attempt-${this.tree?.view.get(event.sessionId)?.attempt ?? 1}`,
+          }
+        : {}),
+      ...(turn && event.sessionId
+        ? { turnId: `${event.sessionId}:turn-${turn}` }
+        : {}),
+      ...(submissionId ? { submissionId } : {}),
+      ...event,
+    });
   }
 
   private persistFeatureArtifact(
@@ -1508,6 +1663,36 @@ export class PipelineController {
       lastMonotonicNow: wallclockStartedAtMs,
     };
     this.runs.set(id, run);
+    let evidenceSequence = 0;
+    let evidenceStoreError: unknown;
+    try {
+      run.evidenceStore = createRunArtifactStore({
+        rootDir: this.artifactRoot,
+        runId: id,
+      });
+    } catch (error) {
+      evidenceStoreError = error;
+    }
+    run.evidence = createRunEvidenceJournal({
+      controllerInstanceId: this.evidenceControllerInstanceId,
+      runId: id,
+      now: () => this.clock.now(),
+      persist: async (event) => {
+        if (!run.evidenceStore)
+          throw new Error("Run artifact storage is unavailable.");
+        // Immutable single-event chunks avoid rewriting the cumulative history.
+        await run.evidenceStore.writeSnapshot({
+          artifactId: `event-${++evidenceSequence}`,
+          schemaVersion: 2,
+          value: event,
+        });
+      },
+    });
+    if (evidenceStoreError) run.evidence.markIncomplete(evidenceStoreError);
+    this.recordEvidence(run, {
+      kind: "run_admitted",
+      facts: { definition: run.definition, baseSha: run.baseSha },
+    });
     // The initial stage budget starts at admitted run insertion, before the
     // asynchronous root/session initialization below.
     this.enterStage(run, run.stage, wallclockStartedAtMs);
@@ -1625,6 +1810,11 @@ export class PipelineController {
         const report = hasSubmission
           ? parsePlanDiscoveryReport(role, submitted)
           : parsePlanDiscoveryReportText(role, settled.finalText);
+        this.recordEvidence(run, {
+          kind: "submission_accepted",
+          sessionId,
+          role,
+        });
         run.planDiscoveryReports.set(role, {
           role,
           provenance: {
@@ -1641,6 +1831,12 @@ export class PipelineController {
         const count = (this.discoveryCorrections.get(sessionId) ?? 0) + 1;
         this.discoveryCorrections.set(sessionId, count);
         const detail = error instanceof Error ? error.message : String(error);
+        this.recordEvidence(run, {
+          kind: "submission_rejected",
+          sessionId,
+          facts: { correction: count, source: "plan-discovery" },
+          detail: detail.slice(0, 2048),
+        });
         if (count >= 4) {
           throw new Error(
             `Plan discovery ${role} rejected settled turn ${count}: ${detail}`,
@@ -1729,6 +1925,12 @@ export class PipelineController {
         const count = (this.discoveryCorrections.get(sessionId) ?? 0) + 1;
         this.discoveryCorrections.set(sessionId, count);
         const detail = error instanceof Error ? error.message : String(error);
+        this.recordEvidence(run, {
+          kind: "submission_rejected",
+          sessionId,
+          facts: { correction: count, source: "plan-synthesis" },
+          detail: detail.slice(0, 2048),
+        });
         if (count >= 4) {
           throw new Error(`Plan synthesis rejected turn ${count}: ${detail}`);
         }
@@ -1819,14 +2021,26 @@ export class PipelineController {
       const submitted = this.discoverySubmissions.get(sessionId);
       this.discoverySubmissions.delete(sessionId);
       try {
-        return hasSubmission
+        const parsed = hasSubmission
           ? options.parseValue(submitted)
           : options.parseText(settled.finalText);
+        this.recordEvidence(run, {
+          kind: "submission_accepted",
+          sessionId,
+          facts: { source: options.correctionKey },
+        });
+        return parsed;
       } catch (error) {
         const key = `${sessionId}:${options.correctionKey}`;
         const rejected = (this.featureSynthesisCorrections.get(key) ?? 0) + 1;
         this.featureSynthesisCorrections.set(key, rejected);
         const detail = boundedPipelineError(error);
+        this.recordEvidence(run, {
+          kind: "submission_rejected",
+          sessionId,
+          facts: { correction: rejected, source: options.correctionKey },
+          detail: detail.slice(0, 2048),
+        });
         if (rejected > FEATURE_PLANNING_CORRECTION_TURNS) {
           throw new Error(
             `${options.label} rejected settled turn ${rejected}: ${detail}`,
@@ -1853,6 +2067,11 @@ export class PipelineController {
     input: FeatureTaskSessionInput,
   ): Promise<FeatureTaskSessionOutcome> {
     run.featureTaskHosts.set(input.role, input.tools);
+    if (typeof input.capsule !== "string")
+      this.evidenceRoleTasks.set(
+        `${run.id}:${input.role}`,
+        input.capsule.taskId,
+      );
     try {
       const agent = await this.tree.spawn({
         scopeId: run.id,
@@ -1905,6 +2124,7 @@ export class PipelineController {
     }
 
     const reviewHostProxy = {
+      describe: () => run.featureReviewRuntime?.host.describe?.(),
       diff: (request?: Parameters<FeatureTaskToolHost["diff"]>[0]) => {
         if (!run.featureReviewRuntime) {
           throw new Error("Final Astra review is not active.");
@@ -2131,10 +2351,68 @@ export class PipelineController {
       canonicalPlan,
       graph: executionGraph,
       tree: compilation.tree,
+      now: () => this.clock.now(),
+      controllerInstanceId: run.evidence?.controllerInstanceId,
+      onEvidence: (event) => {
+        (run.graphEvidence ??= []).push(structuredClone(event));
+        this.recordEvidence(run, {
+          kind: event.kind,
+          taskId: event.taskId,
+          facts: {
+            forkId: event.forkId,
+            branchId: event.branchId,
+            joinId: event.joinId,
+            status: event.status,
+            atMs: event.atMs,
+            dependencies: JSON.stringify(event.dependencies).slice(0, 2048),
+          },
+        });
+      },
+      cleanupEvidence: (record) => {
+        this.recordEvidence(run, {
+          kind: `cleanup_${record.event}`,
+          operationId: record.operationId,
+          detail: record.detail,
+          facts: {
+            resourceId: record.resourceId,
+            resourceType: record.resourceType,
+            resource: record.resource,
+            ownership: record.ownership,
+            phase: record.phase,
+            disposition: record.disposition ?? null,
+            operationStatus: record.operationStatus ?? null,
+            reasonCode: record.reasonCode ?? null,
+            expectedIdentity: record.expectedIdentity ?? null,
+          },
+        });
+      },
       signal: run.featureAbortController.signal,
       runSession: (input) =>
         this.runFeatureTaskSession(run, finalizer.id, input),
       onSnapshot: (snapshot) => {
+        for (const task of snapshot.tasks) {
+          for (const check of task.checkHistory ?? task.checks) {
+            const checkInvocationId =
+              check.checkInvocationId ??
+              `${task.id}:${check.checkId}:${check.startedAt}`;
+            const key = `${run.id}:${checkInvocationId}`;
+            if (this.evidenceChecks.has(key)) continue;
+            this.evidenceChecks.add(key);
+            this.recordEvidence(run, {
+              kind: "check_finished",
+              taskId: task.id,
+              checkInvocationId,
+              facts: {
+                checkId: check.checkId,
+                status: check.status,
+                exitCode: check.exitCode,
+                startedAt: check.startedAt,
+                finishedAt: check.finishedAt,
+              },
+              ...(check.error ? { detail: check.error.slice(0, 2048) } : {}),
+            });
+          }
+        }
         run.featureGraph = {
           ...snapshot,
           artifactDir: run.featureArtifactDir!,
@@ -2385,6 +2663,11 @@ export class PipelineController {
     const report: FeatureDiscoveryReportV2 = hasSubmission
       ? parseFeatureDiscoveryReport(role, submitted)
       : parseFeatureDiscoveryReportText(role, agent.finalText);
+    this.recordEvidence(run, {
+      kind: "submission_accepted",
+      sessionId: agent.id,
+      role,
+    });
     run.featureDiscoveryReports.set(role, {
       role,
       provenance: {
@@ -2426,6 +2709,12 @@ export class PipelineController {
         const count = (this.discoveryCorrections.get(sessionId) ?? 0) + 1;
         this.discoveryCorrections.set(sessionId, count);
         const detail = error instanceof Error ? error.message : String(error);
+        this.recordEvidence(run, {
+          kind: "submission_rejected",
+          sessionId,
+          facts: { correction: count, source: "feature-discovery" },
+          detail: detail.slice(0, 2048),
+        });
         if (count >= 4) {
           throw new Error(
             `Feature discovery ${role} rejected settled turn ${count}: ${detail}`,
@@ -2641,7 +2930,17 @@ export class PipelineController {
       mode: "initial" as const,
       acceptanceCriteria: [],
     };
+    const identityBefore = this.reviewIdentity(run);
     const git = this.auditGitIdentity(run);
+    const identityAfter = this.reviewIdentity(run);
+    run.reviewedIdentity =
+      identityBefore &&
+      identityAfter &&
+      identityBefore.head === identityAfter.head &&
+      identityBefore.diffDigest === identityAfter.diffDigest &&
+      identityAfter.head === git.headSha
+        ? identityAfter
+        : undefined;
     const featureHandoff =
       run.definition === FEATURE_PIPELINE_ID
         ? this.featureAuditHandoff(run, git)
@@ -2657,7 +2956,43 @@ export class PipelineController {
       run.definition === FEATURE_PIPELINE_ID
         ? run.featureSynthesisChecks
         : options.checks;
+    let controllerEvidence: AuditSegmentContext["controllerEvidence"];
+    try {
+      await run.evidence?.flush();
+      if (run.evidence && run.evidenceStore) {
+        const snapshot = run.evidence.snapshot();
+        const assessment = assessExecutionEvidence({
+          events: snapshot.events,
+          graphEvents: run.graphEvidence ?? [],
+          completeness: snapshot.completeness,
+          state: "provisional",
+          featureGraphRequired: run.definition === FEATURE_PIPELINE_ID,
+          runStartMs: run.evidence.originMs,
+        });
+        const entry = await run.evidenceStore.writeSnapshot({
+          artifactId: "pre-audit-evidence",
+          schemaVersion: 2,
+          value: {
+            ...snapshot,
+            executionAssessment: assessment,
+            state: "provisional",
+          },
+        });
+        controllerEvidence = {
+          schemaVersion: 2,
+          artifactId: entry.artifactId,
+          revision: entry.revision,
+        };
+      }
+    } catch (error) {
+      run.evidence?.markIncomplete(error);
+    }
+    if (run.status !== "running" && run.status !== "starting")
+      throw new Error(
+        "Pipeline stopped before audit evidence preparation completed.",
+      );
     const context: AuditSegmentContext = {
+      ...(controllerEvidence ? { controllerEvidence } : {}),
       task: run.request.task,
       acceptanceContract: acceptanceContract.slice(0, 64 * 1024),
       assumptions: assumptions.slice(0, 128),
@@ -2668,6 +3003,13 @@ export class PipelineController {
         run.definition === AUDIT_PIPELINE_ID ? "standalone" : "feature-final",
       ...(featureHandoff ? { featureHandoff } : {}),
     };
+    this.recordEvidence(run, {
+      kind: "review_identity",
+      facts: {
+        head: run.reviewedIdentity?.head ?? null,
+        diffDigest: run.reviewedIdentity?.diffDigest ?? null,
+      },
+    });
     const segment = new AuditSegment(context);
     run.auditSegment = segment;
     this.notify();
@@ -2775,6 +3117,12 @@ export class PipelineController {
   ) {
     const count = (this.auditCorrections.get(sessionId) ?? 0) + 1;
     this.auditCorrections.set(sessionId, count);
+    this.recordEvidence(run, {
+      kind: "submission_rejected",
+      sessionId,
+      facts: { correction: count, source: "audit" },
+      detail: boundedPipelineError(error).slice(0, 2048),
+    });
     if (count >= 4) {
       this.failRun(
         run,
@@ -2850,6 +3198,11 @@ export class PipelineController {
           if (submitted !== undefined)
             segment.acceptSubmitted(role, submitted, child.attempt);
           else segment.accept(role, child.finalText, child.attempt);
+          this.recordEvidence(run, {
+            kind: "submission_accepted",
+            sessionId: id,
+            role,
+          });
           if (role === EXECUTOR_AUDIT_ROLE) {
             segment.captureExecutorHostObservation(this.auditGitIdentity(run));
           }
@@ -3139,7 +3492,219 @@ export class PipelineController {
     };
   }
 
+  private readonly evidenceDeliveries = new Set<string>();
+
   private deliver(run: MutableRun) {
+    if (
+      this.shuttingDown ||
+      this.handoffs.has(run.id) ||
+      this.evidenceDeliveries.has(run.id)
+    )
+      return;
+    if (run.status === "starting" || run.status === "running") return;
+    this.evidenceDeliveries.add(run.id);
+    if (run.status !== "completed")
+      run.featureExecution?.recordRetainedResources(run.status);
+    this.recordEvidence(run, {
+      kind: "final_status",
+      facts: { status: run.status, stage: run.stage },
+    });
+    void this.sealRunEvidence(run).finally(() => this.deliverSealed(run));
+  }
+
+  private reviewIdentity(run: MutableRun) {
+    const captured = captureReviewIdentity({
+      workingDir: run.request.workingDir,
+      base: run.baseSha,
+      revision: run.evidence?.snapshot().events.length ?? 0,
+    });
+    if (captured.state === "available") return captured.identity;
+    this.recordEvidence(run, {
+      kind: "identity_unavailable",
+      detail: captured.reason,
+    });
+    return undefined;
+  }
+
+  private async sealRunEvidence(run: MutableRun) {
+    try {
+      // Completion tools return before their SDK turn settles. Observe that
+      // settlement out-of-band so sealing cannot deadlock the completing tool.
+      const openSessions = new Set<string>();
+      for (const event of run.evidence?.snapshot().events ?? []) {
+        if (!event.sessionId) continue;
+        if (event.kind === "run_started") openSessions.add(event.sessionId);
+        if (event.kind === "settled" || event.kind === "spawn_failed")
+          openSessions.delete(event.sessionId);
+      }
+      if (openSessions.size) {
+        const observation = new AbortController();
+        try {
+          const outcome = await this.boundedCleanupOperation(() =>
+            this.tree.wait([...openSessions], observation.signal),
+          );
+          if (outcome.timedOut || outcome.error)
+            run.evidence?.markIncomplete(
+              outcome.error ?? "Terminal session settlement timed out.",
+            );
+        } finally {
+          observation.abort();
+        }
+      }
+      run.finalIdentity = this.reviewIdentity(run);
+      await run.evidence?.seal();
+      if (!run.evidence) return;
+      const snapshot = run.evidence.snapshot();
+      const executionAssessment = assessExecutionEvidence({
+        events: snapshot.events,
+        graphEvents: run.graphEvidence ?? [],
+        completeness: snapshot.completeness,
+        state: "final",
+        featureGraphRequired: run.definition === FEATURE_PIPELINE_ID,
+        runStartMs: run.evidence.originMs,
+      });
+      const report = run.auditSegment?.finalReport;
+      run.acceptance = {
+        schemaVersion: 2,
+        ...(run.reviewedIdentity
+          ? { reviewedIdentity: run.reviewedIdentity }
+          : {}),
+        ...(run.finalIdentity ? { finalIdentity: run.finalIdentity } : {}),
+        implementationAcceptance: assessAcceptance(
+          assessImplementationEvidence({
+            canonicalPlan: run.featureCanonicalPlan,
+            taskResults: run.featureGraph?.tasks,
+            auditReport: report,
+            reviewedIdentity: run.reviewedIdentity,
+            finalIdentity: run.finalIdentity,
+            state: "final",
+            definition: run.definition,
+          }),
+          "final",
+        ),
+        pipelineExecutionAcceptance: assessAcceptance(
+          executionAssessment.criteria,
+          "final",
+        ),
+      };
+      if (!run.evidenceStore) {
+        run.evidence.markIncomplete("Artifact store unavailable at seal.");
+        return;
+      }
+      await run.evidenceStore.writeSnapshot({
+        artifactId: "run-evidence",
+        schemaVersion: 2,
+        value: snapshot,
+      });
+      await run.evidenceStore.writeSnapshot({
+        artifactId: "concurrency",
+        schemaVersion: 2,
+        value: executionAssessment.concurrency,
+      });
+      await run.evidenceStore.writeSnapshot({
+        artifactId: "graph-timeline",
+        schemaVersion: 2,
+        value: run.graphEvidence ?? [],
+      });
+      if (run.featureGraph)
+        await run.evidenceStore.writeSnapshot({
+          artifactId: "task-results",
+          schemaVersion: 2,
+          value: run.featureGraph.tasks,
+        });
+      if (run.featureReviewRuntime)
+        await run.evidenceStore.writeSnapshot({
+          artifactId: "sol-review",
+          schemaVersion: 2,
+          value: run.featureReviewRuntime.snapshot(),
+        });
+      if (report)
+        await run.evidenceStore.writeSnapshot({
+          artifactId: "audit-report",
+          schemaVersion: 1,
+          value: report,
+        });
+      await run.evidenceStore.writeSnapshot({
+        artifactId: "acceptance",
+        schemaVersion: 2,
+        value: run.acceptance,
+      });
+      const blockers = [
+        ...run.acceptance.implementationAcceptance.criteria,
+        ...run.acceptance.pipelineExecutionAcceptance.criteria,
+      ]
+        .filter(
+          (criterion) =>
+            criterion.status === "failed" || criterion.status === "unproven",
+        )
+        .map((criterion) => ({ id: criterion.id, detail: criterion.detail }));
+      await run.evidenceStore.writeSnapshot({
+        artifactId: "blockers",
+        schemaVersion: 2,
+        value: blockers,
+      });
+      await run.evidenceStore.writeSnapshot({
+        artifactId: "completion",
+        schemaVersion: 1,
+        value:
+          run.completion ??
+          (run.status === "limited"
+            ? this.factsForLimited(run)
+            : this.factsForFailure(run)),
+      });
+      const manifest = await run.evidenceStore.manifest();
+      await run.evidenceStore.writeSnapshot({
+        artifactId: "artifact-index",
+        schemaVersion: 2,
+        value: manifest,
+      });
+      run.evidenceManifest = await run.evidenceStore.manifest();
+      const errorCounts: Record<string, number> = {};
+      const cleanupCounts: Record<string, number> = {};
+      for (const event of snapshot.events) {
+        if (
+          ["spawn_failed", "tool_failed", "submission_rejected"].includes(
+            event.kind,
+          )
+        )
+          errorCounts[event.kind] = (errorCounts[event.kind] ?? 0) + 1;
+        if (event.kind === "cleanup_outcome") {
+          const disposition = String(event.facts?.disposition);
+          cleanupCounts[disposition] = (cleanupCounts[disposition] ?? 0) + 1;
+        }
+      }
+      run.evidenceHandoff = createRunEvidenceHandoff({
+        runId: run.id,
+        status: run.status,
+        acceptance: run.acceptance,
+        manifest: run.evidenceManifest,
+        blockers,
+        errorCounts,
+        cleanupCounts,
+        concurrencySummary: executionAssessment.concurrency,
+      });
+    } catch (error) {
+      run.evidence?.markIncomplete(error);
+      if (run.acceptance)
+        run.acceptance = {
+          ...run.acceptance,
+          pipelineExecutionAcceptance: assessAcceptance(
+            [
+              ...run.acceptance.pipelineExecutionAcceptance.criteria,
+              {
+                id: "terminal-artifact-persistence",
+                status: "unproven",
+                evidenceRefs: [],
+                detail: boundedPipelineError(error).slice(0, 2048),
+              },
+            ],
+            "final",
+          ),
+        };
+    }
+  }
+
+  private deliverSealed(run: MutableRun) {
     if (this.shuttingDown || this.handoffs.has(run.id)) return;
     if (run.status === "starting" || run.status === "running") return;
     if (run.featureArtifactDir) {
@@ -3169,7 +3734,14 @@ export class PipelineController {
       }
     }
     this.handoffs.add(run.id);
+    this.notify();
     const handoff: PipelineHandoff = {
+      ...(run.acceptance ? { acceptance: run.acceptance } : {}),
+      ...(run.evidenceHandoff ? { evidence: run.evidenceHandoff.handoff } : {}),
+      ...(run.evidenceManifest
+        ? { evidenceManifest: run.evidenceManifest }
+        : {}),
+      evidenceIncomplete: run.evidence?.snapshot().completeness !== "complete",
       runId: run.id,
       definition: run.definition,
       status: run.status,
@@ -3993,6 +4565,30 @@ export class PipelineController {
         ),
     );
     const tools: ToolDefinition[] = [
+      defineTool({
+        name: "pipeline_artifact_read",
+        label: "Read Pipeline Evidence",
+        description:
+          "Read a revisioned evidence artifact from this run only. Use artifact IDs from its manifest; no filesystem paths are accepted.",
+        parameters: Type.Object(
+          {
+            artifactId: Type.String({ minLength: 1, maxLength: 128 }),
+            revision: Type.Integer({ minimum: 1 }),
+            cursor: Type.Optional(Type.Integer({ minimum: 0 })),
+            maxBytes: Type.Integer({ minimum: 4, maximum: 64 * 1024 }),
+          },
+          { additionalProperties: false },
+        ),
+        async execute(_id, params) {
+          if (!run.evidenceStore)
+            throw new Error("Evidence storage unavailable for this run.");
+          const page = await run.evidenceStore.read(params);
+          return {
+            content: [{ type: "text", text: page.text }],
+            details: page,
+          };
+        },
+      }),
       defineTool({
         name: "pipeline_stage",
         label: "Pipeline Stage",

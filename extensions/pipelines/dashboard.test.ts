@@ -17,6 +17,7 @@ import {
 } from "./domain.ts";
 import { handoffText } from "./index.ts";
 import { FEATURE_PLAN_ROLES, FEATURE_FINALIZER_ROLE } from "./domain.ts";
+import type { AcceptanceEnvelope } from "./run-acceptance.ts";
 
 function agent(
   id: string,
@@ -57,6 +58,39 @@ function pipelineRun(
   };
 }
 
+function acceptance(
+  implementation: AcceptanceEnvelope["implementationAcceptance"]["status"],
+  execution: AcceptanceEnvelope["pipelineExecutionAcceptance"]["status"],
+) {
+  return {
+    schemaVersion: 2,
+    implementationAcceptance: {
+      state: "final",
+      status: implementation,
+      criteria: [
+        {
+          id: "implementation",
+          status: implementation,
+          evidenceRefs: ["test://implementation"],
+          detail: "Implementation acceptance test evidence.",
+        },
+      ],
+    },
+    pipelineExecutionAcceptance: {
+      state: "final",
+      status: execution,
+      criteria: [
+        {
+          id: "execution",
+          status: execution,
+          evidenceRefs: ["test://execution"],
+          detail: "Execution acceptance test evidence.",
+        },
+      ],
+    },
+  } satisfies AcceptanceEnvelope;
+}
+
 test("runs are collapsed by default with textual and colored summary status", () => {
   const statuses = [
     ["starting", "running"],
@@ -87,9 +121,36 @@ test("runs are collapsed by default with textual and colored summary status", ()
   assert.deepEqual(
     runRows.map((row) => [row.label, glyphStatusForPipelineRow(row)]),
     statuses.map(([status, glyph]) => [
-      `▸ run-${status} · ${status} · /tmp/work`,
+      `▸ run-${status} · ${status} · impl:unavailable exec:unavailable · /tmp/work`,
       glyph,
     ]),
+  );
+});
+
+test("completed runs show independent acceptance statuses and legacy runs stay unavailable", () => {
+  const completed = {
+    ...pipelineRun("run-completed", []),
+    stage: "complete" as const,
+    status: "completed" as const,
+    finishedAt: 2,
+    acceptance: acceptance("passed", "unproven"),
+  };
+  const legacy = {
+    ...pipelineRun("run-legacy", []),
+    stage: "complete" as const,
+    status: "completed" as const,
+    finishedAt: 2,
+  };
+  const runRows = buildPipelineRows([completed, legacy]).filter(
+    (row): row is Extract<typeof row, { kind: "run" }> => row.kind === "run",
+  );
+
+  assert.deepEqual(
+    runRows.map((row) => row.label),
+    [
+      "▸ run-completed · completed · impl:passed exec:unproven · /tmp/work",
+      "▸ run-legacy · completed · impl:unavailable exec:unavailable · /tmp/work",
+    ],
   );
 });
 
@@ -180,7 +241,11 @@ test("nested UI model is definition to run to root, stages, and child attempts",
     rows.slice(0, 3).map((row) => [row.kind, row.depth, row.label]),
     [
       ["definition", 0, "feature-pipeline"],
-      ["run", 1, "▾ run-1 · running · /tmp/work"],
+      [
+        "run",
+        1,
+        "▾ run-1 · running · impl:unavailable exec:unavailable · /tmp/work",
+      ],
       ["agent", 2, "root-1 · running"],
     ],
   );

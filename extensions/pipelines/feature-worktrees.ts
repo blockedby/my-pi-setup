@@ -1,6 +1,11 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+  createCleanupRecorder,
+  type CleanupEvidence,
+  type CleanupEvidenceSink,
+} from "./cleanup-evidence.ts";
 import type {
   FeatureCandidateHandoff,
   FeatureCandidateRole,
@@ -110,7 +115,57 @@ export interface FeatureGitOperations {
   createLifecycle(
     caller: FeatureCallerWorktree,
     runId: string,
+    options?: FeatureWorktreeCleanupOptions | CleanupEvidenceSink,
   ): FeatureWorktreeLifecycle;
+}
+
+export interface FeatureWorktreeCleanupOptions {
+  readonly cleanupEvidence?: CleanupEvidenceSink;
+}
+
+type FeatureWorktreeCleanupInput =
+  FeatureWorktreeCleanupOptions | CleanupEvidenceSink;
+
+type CleanupEvidenceContext = Pick<
+  CleanupEvidence,
+  | "resourceId"
+  | "resourceType"
+  | "resource"
+  | "ownership"
+  | "phase"
+  | "expectedIdentity"
+>;
+
+function cleanupRecorder(
+  options: FeatureWorktreeCleanupInput | undefined,
+  context: CleanupEvidenceContext,
+) {
+  const sink =
+    typeof options === "function" ? options : options?.cleanupEvidence;
+  const recorder = createCleanupRecorder(sink, context);
+  return {
+    intent() {
+      try {
+        recorder.intent();
+      } catch {
+        // Cleanup evidence is observational and cannot change authority.
+      }
+    },
+    outcome(result: Parameters<typeof recorder.outcome>[0]) {
+      try {
+        recorder.outcome(result);
+      } catch {
+        // Cleanup evidence is observational and cannot change authority.
+      }
+    },
+  };
+}
+
+function cleanupResource(
+  resourceType: CleanupEvidence["resourceType"],
+  resource: string,
+) {
+  return `${resourceType}:${resource}`;
 }
 
 function gitRaw(
@@ -628,22 +683,58 @@ function trackedDeletedSymlinkEscapes(cwd: string, filePath: string) {
   );
 }
 
+function refExists(cwd: string, ref: string) {
+  try {
+    execFileSync("git", ["show-ref", "--verify", "--quiet", ref], {
+      cwd,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function rollbackOwnedFeatureBranches(
   cwd: string,
   ownedBranchRefs: ReadonlyMap<string, string>,
+  options?: FeatureWorktreeCleanupInput,
 ) {
   const failures: string[] = [];
   for (const [branchRef, expectedCommit] of [
     ...ownedBranchRefs.entries(),
   ].reverse()) {
+    const ref = `refs/heads/${branchRef}`;
+    const recorder = cleanupRecorder(options, {
+      resourceId: cleanupResource("ref", ref),
+      resourceType: "ref",
+      resource: ref,
+      ownership: "controller",
+      phase: "feature-worktree-reservation-rollback",
+      expectedIdentity: expectedCommit,
+    });
+    recorder.intent();
+    const existed = refExists(cwd, ref);
     try {
       requireGit(
         cwd,
-        ["update-ref", "-d", `refs/heads/${branchRef}`, expectedCommit],
+        ["update-ref", "-d", ref, expectedCommit],
         `Unable to roll back controller-owned branch ${branchRef}`,
       );
+      recorder.outcome({
+        disposition: existed ? "removed" : "skipped",
+        operationStatus: existed ? "succeeded" : "not_attempted",
+        reasonCode: existed ? "compare_delete_succeeded" : "ref_already_absent",
+      });
     } catch (error) {
-      failures.push(boundedDiagnostic(error));
+      const detail = boundedDiagnostic(error);
+      failures.push(detail);
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "failed",
+        reasonCode: "compare_delete_failed",
+        detail,
+      });
     }
   }
   return failures;
@@ -1122,16 +1213,51 @@ function isWithinPath(root: string, candidate: string) {
   return candidate === root || candidate.startsWith(`${root}${path.sep}`);
 }
 
+function residualRecorder(
+  options: FeatureWorktreeCleanupInput | undefined,
+  workingDir: string,
+  filePath: string,
+) {
+  const resource = path.resolve(workingDir, filePath);
+  return cleanupRecorder(options, {
+    resourceId: cleanupResource("residual", resource),
+    resourceType: "residual",
+    resource,
+    ownership: "controller",
+    phase: "feature-worktree-finalization",
+  });
+}
+
+function residualExists(workingDir: string, filePath: string) {
+  try {
+    fs.lstatSync(path.resolve(workingDir, filePath));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function finalizeOwnedWorktree(
   workingDir: string,
   label: string,
   allowUntrackedCleanup: boolean,
+  options?: FeatureWorktreeCleanupInput,
 ) {
   const statuses = readStatusEntries(workingDir);
   const trackedOrStaged = statuses.filter(
     ({ status }) => !isUntrackedStatus(status),
   );
   if (trackedOrStaged.length > 0) {
+    for (const { status, filePath } of trackedOrStaged) {
+      const recorder = residualRecorder(options, workingDir, filePath);
+      recorder.intent();
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "tracked_or_staged_residual",
+        detail: `${status} ${filePath}`,
+      });
+    }
     throw new Error(
       `${label} has tracked/staged leftovers after its final commit: ${trackedOrStaged
         .slice(0, 16)
@@ -1139,8 +1265,26 @@ function finalizeOwnedWorktree(
         .join(", ")}.`,
     );
   }
-  if (statuses.length === 0) return;
+  if (statuses.length === 0) {
+    const recorder = residualRecorder(options, workingDir, ".");
+    recorder.intent();
+    recorder.outcome({
+      disposition: "skipped",
+      operationStatus: "not_attempted",
+      reasonCode: "no_residuals",
+    });
+    return;
+  }
   if (!allowUntrackedCleanup) {
+    for (const { filePath } of statuses) {
+      const recorder = residualRecorder(options, workingDir, filePath);
+      recorder.intent();
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "untracked_cleanup_disabled",
+      });
+    }
     throw new Error(
       `${label} has untracked leftovers after its final commit: ${statuses
         .slice(0, 16)
@@ -1149,22 +1293,70 @@ function finalizeOwnedWorktree(
     );
   }
   if (statuses.length > UNTRACKED_CLEANUP_PATH_LIMIT) {
+    const recorder = residualRecorder(options, workingDir, ".");
+    recorder.intent();
+    recorder.outcome({
+      disposition: "retained",
+      operationStatus: "not_attempted",
+      reasonCode: "untracked_cleanup_limit_exceeded",
+      detail: `${statuses.length} residual paths exceeded ${UNTRACKED_CLEANUP_PATH_LIMIT}.`,
+    });
     throw new Error(
       `${label} has ${statuses.length} untracked leftovers; bounded cleanup allows at most ${UNTRACKED_CLEANUP_PATH_LIMIT}.`,
     );
   }
   const cleanupBudget = { remaining: UNTRACKED_CLEANUP_PATH_LIMIT };
+  let currentIndex = 0;
   try {
-    for (const { filePath } of statuses) {
-      removeOwnedUntrackedPath(workingDir, filePath, cleanupBudget);
+    for (; currentIndex < statuses.length; currentIndex += 1) {
+      const { filePath } = statuses[currentIndex]!;
+      const recorder = residualRecorder(options, workingDir, filePath);
+      recorder.intent();
+      const existed = residualExists(workingDir, filePath);
+      try {
+        removeOwnedUntrackedPath(workingDir, filePath, cleanupBudget);
+        recorder.outcome({
+          disposition: existed ? "removed" : "skipped",
+          operationStatus: existed ? "succeeded" : "not_attempted",
+          reasonCode: existed ? "residual_removed" : "residual_already_absent",
+        });
+      } catch (error) {
+        const detail = boundedDiagnostic(error);
+        recorder.outcome({
+          disposition: "retained",
+          operationStatus: "failed",
+          reasonCode: "residual_remove_failed",
+          detail,
+        });
+        throw error;
+      }
     }
   } catch (error) {
+    for (const { filePath } of statuses.slice(currentIndex + 1)) {
+      const recorder = residualRecorder(options, workingDir, filePath);
+      recorder.intent();
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "prior_residual_cleanup_failed",
+      });
+    }
     throw new Error(
       `${label} untracked cleanup failed: ${boundedDiagnostic(error)}`,
     );
   }
   const remaining = readStatusEntries(workingDir);
   if (remaining.length > 0) {
+    for (const { status, filePath } of remaining) {
+      const recorder = residualRecorder(options, workingDir, filePath);
+      recorder.intent();
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "failed",
+        reasonCode: "residuals_remained_after_cleanup",
+        detail: `${status} ${filePath}`,
+      });
+    }
     throw new Error(
       `${label} remained dirty after bounded untracked cleanup: ${remaining
         .slice(0, 16)
@@ -1178,30 +1370,96 @@ export function cleanupOwnedFeatureWorktreePaths(
   temporaryRoot: string,
   ownedPaths: ReadonlyArray<string>,
   removeWorktree: (worktreePath: string) => void,
+  options?: FeatureWorktreeCleanupInput,
 ) {
   const failures: string[] = [];
   const rootPath = path.resolve(temporaryRoot);
   const root = comparablePath(temporaryRoot);
   for (const worktreePath of [...ownedPaths].reverse()) {
+    const recorder = cleanupRecorder(options, {
+      resourceId: cleanupResource("worktree", worktreePath),
+      resourceType: "worktree",
+      resource: worktreePath,
+      ownership: "controller",
+      phase: "feature-worktree-cleanup",
+    });
+    recorder.intent();
     const lexicalPath = path.resolve(worktreePath);
-    if (!isWithinPath(rootPath, lexicalPath)) continue;
+    if (!isWithinPath(rootPath, lexicalPath)) {
+      recorder.outcome({
+        disposition: "skipped",
+        operationStatus: "not_attempted",
+        reasonCode: "path_outside_temporary_root",
+      });
+      continue;
+    }
     const resolvedPath = comparablePath(worktreePath);
-    if (!isWithinPath(root, resolvedPath)) continue;
+    if (!isWithinPath(root, resolvedPath)) {
+      recorder.outcome({
+        disposition: "skipped",
+        operationStatus: "not_attempted",
+        reasonCode: "resolved_path_outside_temporary_root",
+      });
+      continue;
+    }
     try {
       removeWorktree(worktreePath);
+      recorder.outcome({
+        disposition: "removed",
+        operationStatus: "succeeded",
+        reasonCode: "worktree_removed",
+      });
     } catch (error) {
+      const detail = boundedDiagnostic(error);
       failures.push(
-        `Failed to remove controller-owned worktree ${worktreePath}: ${boundedDiagnostic(error)}`,
+        `Failed to remove controller-owned worktree ${worktreePath}: ${detail}`,
       );
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "failed",
+        reasonCode: "worktree_remove_failed",
+        detail,
+      });
     }
   }
-  if (failures.length > 0) return failures;
+  const rootRecorder = cleanupRecorder(options, {
+    resourceId: cleanupResource("directory", temporaryRoot),
+    resourceType: "directory",
+    resource: temporaryRoot,
+    ownership: "controller",
+    phase: "feature-worktree-cleanup",
+  });
+  rootRecorder.intent();
+  if (failures.length > 0) {
+    rootRecorder.outcome({
+      disposition: "retained",
+      operationStatus: "not_attempted",
+      reasonCode: "worktree_removal_failed",
+      detail: `${failures.length} worktree removal failure(s).`,
+    });
+    return failures;
+  }
+  const rootExisted = fs.existsSync(temporaryRoot);
   try {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    rootRecorder.outcome({
+      disposition: rootExisted ? "removed" : "skipped",
+      operationStatus: rootExisted ? "succeeded" : "not_attempted",
+      reasonCode: rootExisted
+        ? "temporary_root_removed"
+        : "temporary_root_already_absent",
+    });
   } catch (error) {
+    const detail = boundedDiagnostic(error);
     failures.push(
-      `Failed to remove controller-owned temporary root ${temporaryRoot}: ${boundedDiagnostic(error)}`,
+      `Failed to remove controller-owned temporary root ${temporaryRoot}: ${detail}`,
     );
+    rootRecorder.outcome({
+      disposition: "retained",
+      operationStatus: "failed",
+      reasonCode: "temporary_root_remove_failed",
+      detail,
+    });
   }
   return failures;
 }
@@ -1210,6 +1468,7 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
   readonly caller: FeatureCallerWorktree;
   readonly runId: string;
   readonly temporaryRoot: string;
+  private readonly cleanupOptions: FeatureWorktreeCleanupInput;
   private readonly ownedWorktreePaths = new Set<string>();
   private readonly ownedBranchRefs = new Map<string, string>();
   private readonly candidateHeads = new Map<FeatureCandidateRole, string>();
@@ -1218,9 +1477,14 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
   private candidateWorktrees?: ReadonlyArray<FeatureTemporaryWorktree>;
   private cleaned = false;
 
-  constructor(caller: FeatureCallerWorktree, runId: string) {
+  constructor(
+    caller: FeatureCallerWorktree,
+    runId: string,
+    options: FeatureWorktreeCleanupInput = {},
+  ) {
     this.caller = caller;
     this.runId = runId;
+    this.cleanupOptions = options;
     const worktreeRoot = path.join(
       path.dirname(caller.commonGitDir),
       ".worktrees",
@@ -1257,6 +1521,7 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       ...rollbackOwnedFeatureBranches(
         this.caller.workingDir,
         this.ownedBranchRefs,
+        this.cleanupOptions,
       ),
     ];
   }
@@ -1334,7 +1599,12 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       headCommit,
       `${worktree.role} candidate ancestry is invalid`,
     );
-    finalizeOwnedWorktree(worktree.path, `${worktree.role} candidate`, true);
+    finalizeOwnedWorktree(
+      worktree.path,
+      `${worktree.role} candidate`,
+      true,
+      this.cleanupOptions,
+    );
     const finalizedHead = requireGit(
       worktree.path,
       ["rev-parse", "HEAD"],
@@ -1696,7 +1966,12 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
       finalCommit,
       "Synthesis ancestry is invalid",
     );
-    finalizeOwnedWorktree(worktree.path, "Synthesis worktree", true);
+    finalizeOwnedWorktree(
+      worktree.path,
+      "Synthesis worktree",
+      true,
+      this.cleanupOptions,
+    );
     const finalizedCommit = requireGit(
       worktree.path,
       ["rev-parse", "HEAD"],
@@ -1791,8 +2066,72 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
   }
 
   cleanup() {
-    if (this.cleaned) return [];
+    if (this.cleaned) {
+      const recorder = cleanupRecorder(this.cleanupOptions, {
+        resourceId: cleanupResource("directory", this.temporaryRoot),
+        resourceType: "directory",
+        resource: this.temporaryRoot,
+        ownership: "controller",
+        phase: "feature-worktree-lifecycle-cleanup",
+      });
+      recorder.intent();
+      recorder.outcome({
+        disposition: "skipped",
+        operationStatus: "not_attempted",
+        reasonCode: "cleanup_already_completed",
+      });
+      return [];
+    }
     this.cleaned = true;
+
+    const callerWorktreeRecorder = cleanupRecorder(this.cleanupOptions, {
+      resourceId: cleanupResource("worktree", this.caller.workingDir),
+      resourceType: "worktree",
+      resource: this.caller.workingDir,
+      ownership: "caller",
+      phase: "feature-worktree-lifecycle-cleanup",
+      expectedIdentity: this.caller.baseCommit,
+    });
+    callerWorktreeRecorder.intent();
+    callerWorktreeRecorder.outcome({
+      disposition: "retained",
+      operationStatus: "not_attempted",
+      reasonCode: "caller_owned",
+    });
+
+    const callerBranchRecorder = cleanupRecorder(this.cleanupOptions, {
+      resourceId: cleanupResource("ref", this.caller.branchRef),
+      resourceType: "ref",
+      resource: this.caller.branchRef,
+      ownership: "caller",
+      phase: "feature-worktree-lifecycle-cleanup",
+      expectedIdentity: this.caller.baseCommit,
+    });
+    callerBranchRecorder.intent();
+    callerBranchRecorder.outcome({
+      disposition: "retained",
+      operationStatus: "not_attempted",
+      reasonCode: "caller_owned",
+    });
+
+    for (const [branchRef, expectedCommit] of this.ownedBranchRefs) {
+      const ref = `refs/heads/${branchRef}`;
+      const recorder = cleanupRecorder(this.cleanupOptions, {
+        resourceId: cleanupResource("ref", ref),
+        resourceType: "ref",
+        resource: ref,
+        ownership: "controller",
+        phase: "feature-worktree-lifecycle-cleanup",
+        expectedIdentity: expectedCommit,
+      });
+      recorder.intent();
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "legacy_cleanup_retains_ref",
+      });
+    }
+
     return cleanupOwnedFeatureWorktreePaths(
       this.temporaryRoot,
       [...this.ownedWorktreePaths],
@@ -1803,6 +2142,7 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
           "--force",
           worktreePath,
         ]),
+      this.cleanupOptions,
     );
   }
 }
@@ -1810,6 +2150,6 @@ class GitFeatureWorktreeLifecycle implements FeatureWorktreeLifecycle {
 export const defaultFeatureGitOperations: FeatureGitOperations = {
   preflight: validateDedicatedFeatureWorktree,
   namespaceAvailable: featureNamespaceAvailable,
-  createLifecycle: (caller, runId) =>
-    new GitFeatureWorktreeLifecycle(caller, runId),
+  createLifecycle: (caller, runId, options) =>
+    new GitFeatureWorktreeLifecycle(caller, runId, options),
 };

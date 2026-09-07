@@ -320,6 +320,12 @@ export interface AuditGitIdentity {
 export type AuditSegmentPurpose = "standalone" | "feature-final" | "plan-final";
 
 export interface AuditSegmentContext {
+  /** Controller-owned process evidence, excluded from independent behavior tracks. */
+  readonly controllerEvidence?: {
+    readonly schemaVersion: 2;
+    readonly artifactId: string;
+    readonly revision: number;
+  };
   readonly task: string;
   readonly acceptanceContract: string;
   readonly assumptions: ReadonlyArray<string>;
@@ -1178,7 +1184,7 @@ export class AuditSegment {
     }));
     return {
       turn,
-      prompt: `${synthesisContract(this.context, turn.final)}\n\n${
+      prompt: `${synthesisContract(this.context, turn.final)}${this.context.controllerEvidence ? `\n\nController evidence reference (v2): ${JSON.stringify(this.context.controllerEvidence)}. The optional pipeline_artifact_read tool can read it. It is process provenance, not feature behavior evidence; do not turn process observations into affectedPaths findings. Final execution acceptance is computed by the controller after cleanup.` : ""}\n\n${
         turn.revision === 1
           ? sharedAuditContract(
               this.context,
