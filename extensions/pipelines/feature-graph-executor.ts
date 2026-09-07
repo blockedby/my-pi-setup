@@ -463,6 +463,8 @@ export async function executeFeatureGraph(
     }
   };
 
+  const verifiedBranches = new Set<string>();
+
   const executeRuntime = async (input: {
     runtime: FeatureTaskRuntime;
     branchId: string;
@@ -471,29 +473,52 @@ export async function executeFeatureGraph(
     role: string;
     prepare: boolean;
   }) => {
+    const block = (message: string) => {
+      launchingStopped = true;
+      terminalError ??= message;
+      return input.runtime.fail(message);
+    };
+    if (signal.aborted || launchingStopped) return input.runtime.cancel();
+    if (input.prepare && !lifecycle.branch(input.branchId).prepared) {
+      const preparationFailure = await prepareBranch(input.branchId);
+      if (signal.aborted) return input.runtime.cancel();
+      if (preparationFailure) {
+        return block(
+          `Worktree preparation failed before agent launch: ${preparationFailure}`,
+        );
+      }
+      input.runtime.setPreparationBaseline(
+        lifecycle.branch(input.branchId).preparationBaseline,
+      );
+    }
+    // Preparation on the host is not proof that checks work in the execution
+    // sandbox. Prove each branch before spending a model session on it.
+    if (input.kind === "task" && !verifiedBranches.has(input.branchId)) {
+      for (const check of options.graph.baselineChecks) {
+        if (signal.aborted) return input.runtime.cancel();
+        const result = await input.runtime.host.check({ checkId: check.id });
+        if (signal.aborted) return input.runtime.cancel();
+        if (
+          (result.required && result.status !== "passed") ||
+          result.changedPaths.length > 0
+        ) {
+          const detail = (result.error || result.stderr || result.stdout)
+            .trim()
+            .slice(0, 4096);
+          return block(
+            `Baseline check ${check.id} failed before agent launch (exit ${result.exitCode})${result.changedPaths.length ? `; changed tracked paths: ${result.changedPaths.join(", ")}` : ""}${detail ? `: ${detail}` : "."}`,
+          );
+        }
+      }
+      verifiedBranches.add(input.branchId);
+    }
     let previousFailure: string | undefined;
     for (let attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt++) {
       if (signal.aborted) return input.runtime.cancel();
       if (launchingStopped && attempt === 1) {
         return input.runtime.cancel();
       }
-      let capsule = input.runtime.beginAttempt(attempt, previousFailure);
-      if (input.prepare && !lifecycle.branch(input.branchId).prepared) {
-        const preparationFailure = await prepareBranch(input.branchId);
-        if (preparationFailure) {
-          previousFailure = `Worktree preparation failed: ${preparationFailure}`;
-          input.runtime.settleAttempt({
-            status: signal.aborted ? "cancelled" : "failed",
-            error: previousFailure,
-          });
-          if (signal.aborted) return input.runtime.snapshot();
-          continue;
-        }
-        input.runtime.setPreparationBaseline(
-          lifecycle.branch(input.branchId).preparationBaseline,
-        );
-        capsule = input.runtime.snapshot().capsule ?? capsule;
-      }
+      const capsule = input.runtime.beginAttempt(attempt, previousFailure);
       const branch = branchSnapshots.get(input.branchId)!;
       branch.status = "running";
       publish();
@@ -520,6 +545,15 @@ export async function executeFeatureGraph(
       const settled = input.runtime.settleAttempt(outcome);
       if (input.runtime.isValidated()) return settled;
       if (outcome.status === "cancelled" || signal.aborted) return settled;
+      // A terminal sibling failure stops new sessions, not the session that
+      // was already running. Keep its checks/provisional commit and factual
+      // settled attempt, close its authority, and do not spend another retry.
+      if (launchingStopped) {
+        return input.runtime.fail(
+          settled.error ??
+            "Task could not validate before a sibling stopped the graph.",
+        );
+      }
       previousFailure = settled.error;
     }
     const failed = input.runtime.fail(
@@ -690,9 +724,17 @@ export async function executeFeatureGraph(
       runCheck,
       signal,
     });
-    for (const check of options.graph.baselineChecks) {
-      if (signal.aborted) return { passed: false, runtime, baseCommit };
-      join.checks.push(await runtime.host.check({ checkId: check.id }));
+    try {
+      for (const check of options.graph.baselineChecks) {
+        if (signal.aborted) throw new Error("Join verification was cancelled.");
+        join.checks.push(await runtime.host.check({ checkId: check.id }));
+      }
+    } catch (error) {
+      join.status = signal.aborted ? "cancelled" : "failed";
+      join.error = boundedError(error);
+      terminalError ??= join.error;
+      publish();
+      throw error;
     }
     const passed = join.checks.every(
       (result) =>

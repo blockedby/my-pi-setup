@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   createFeatureReviewRuntime,
   createFeatureTaskRuntime,
+  runFeatureCheckCommand,
   type FeatureCheckRunner,
   type FeatureTaskSnapshot,
 } from "./feature-task-runtime.ts";
@@ -122,11 +123,11 @@ test("failed required verification leaves a provisional commit that a later atte
     assert.equal(first.validated, false);
     assert.equal(first.status, "provisional");
     assert.ok(first.commit);
-    runtime.settleAttempt({
+    const settled = runtime.settleAttempt({
       status: "settled",
       sessionId: "luna-attempt-1",
-      error: first.error,
     });
+    assert.equal(settled.error, first.error);
     fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "fixed\n");
     const retry = runtime.beginAttempt(2, first.error);
     assert.equal(retry.graphContext.provisionalCommit, first.commit);
@@ -145,6 +146,300 @@ test("failed required verification leaves a provisional commit that a later atte
     );
     assert.equal(git(repo.workingDir, ["rev-parse", "HEAD^"]), repo.base);
     assert.equal(runtime.snapshot().validatedCommit, repaired.commit);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("a provisional commit can be validated unchanged with empty paths on retry", async () => {
+  const repo = fixture("runtime-empty-retry-e2f3a4b5");
+  try {
+    let checks = 0;
+    const runtime = runtimeFor(repo, async () => {
+      checks += 1;
+      return {
+        exitCode: checks === 1 ? 1 : 0,
+        stdout: checks === 1 ? "transient failure\n" : "passed\n",
+        stderr: "",
+      };
+    });
+    runtime.beginAttempt(1);
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "first\n");
+
+    const first = await runtime.host.finalize({
+      commitPaths: ["selected.txt"],
+      summary: "Created the implementation before a transient check failure.",
+    });
+
+    assert.equal(first.validated, false);
+    assert.equal(first.status, "provisional");
+    assert.ok(first.commit);
+    assert.equal(checks, 1);
+    const provisional = first.commit;
+    assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), provisional);
+    assert.equal(
+      git(repo.workingDir, ["rev-list", "--count", `${repo.base}..HEAD`]),
+      "1",
+    );
+
+    const settled = runtime.settleAttempt({ status: "settled" });
+    assert.equal(settled.status, "provisional");
+    assert.equal(settled.error, first.error);
+    const retry = runtime.beginAttempt(2, first.error);
+    assert.equal(retry.graphContext.provisionalCommit, provisional);
+
+    const finalized = await runtime.host.finalize({
+      commitPaths: [],
+      summary: "Rechecked the unchanged provisional implementation.",
+    });
+
+    assert.equal(finalized.validated, true);
+    assert.equal(finalized.status, "validated");
+    assert.equal(finalized.commit, provisional);
+    assert.equal(checks, 2);
+    assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), provisional);
+    assert.equal(
+      git(repo.workingDir, ["rev-list", "--count", `${repo.base}..HEAD`]),
+      "1",
+    );
+    assert.equal(git(repo.workingDir, ["status", "--porcelain"]), "");
+    assert.equal(runtime.snapshot().validatedCommit, provisional);
+    assert.equal(runtime.snapshot().status, "validated");
+    assert.equal(runtime.isValidated(), true);
+    await assert.rejects(
+      runtime.host.finalize({
+        commitPaths: [],
+        summary: "Authority must remain closed after validation.",
+      }),
+      /authority is closed/i,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("empty retry paths reject new tracked and untracked work after a provisional commit", async () => {
+  const repo = fixture("runtime-pending-retry-f3a4b5c6");
+  try {
+    let checks = 0;
+    const runtime = runtimeFor(repo, async () => {
+      checks += 1;
+      return {
+        exitCode: checks === 1 ? 1 : 0,
+        stdout: checks === 1 ? "transient failure\n" : "passed\n",
+        stderr: "",
+      };
+    });
+    runtime.beginAttempt(1);
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "first\n");
+
+    const first = await runtime.host.finalize({
+      commitPaths: ["selected.txt"],
+      summary: "Created a provisional implementation for the retry fixture.",
+    });
+
+    assert.equal(first.validated, false);
+    assert.equal(first.status, "provisional");
+    assert.ok(first.commit);
+    runtime.settleAttempt({ status: "settled" });
+    runtime.beginAttempt(2, first.error);
+    fs.writeFileSync(
+      path.join(repo.workingDir, "selected.txt"),
+      "new tracked work\n",
+    );
+    fs.writeFileSync(
+      path.join(repo.workingDir, "new-output.txt"),
+      "new untracked work\n",
+    );
+
+    await assert.rejects(
+      runtime.host.finalize({
+        commitPaths: [],
+        summary: "Attempted to discard pending retry work.",
+      }),
+      /cannot discard meaningful task changes: new-output\.txt, selected\.txt/i,
+    );
+
+    assert.equal(checks, 1);
+    assert.equal(runtime.snapshot().status, "retrying");
+    assert.equal(runtime.snapshot().validatedCommit, undefined);
+    assert.equal(runtime.isValidated(), false);
+    assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), first.commit);
+    assert.equal(
+      git(repo.workingDir, ["status", "--porcelain"]),
+      "M selected.txt\n?? new-output.txt",
+    );
+
+    const finalized = await runtime.host.finalize({
+      commitPaths: ["selected.txt", "new-output.txt"],
+      summary: "Included the pending tracked and untracked retry work.",
+    });
+
+    assert.equal(finalized.validated, true);
+    assert.equal(finalized.status, "validated");
+    assert.equal(checks, 2);
+    assert.equal(git(repo.workingDir, ["status", "--porcelain"]), "");
+    assert.equal(
+      git(repo.workingDir, ["rev-list", "--count", `${repo.base}..HEAD`]),
+      "1",
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("controller whitespace checks see provisional commits without granting shell Git authority", async () => {
+  const repo = fixture("runtime-git-check-a3b4c5d6");
+  try {
+    const signal = new AbortController().signal;
+    const runtime = createFeatureTaskRuntime({
+      kind: "task",
+      task: executionTask("implement-feature"),
+      canonicalPlan: canonicalPlan(),
+      graph: executionGraph(),
+      target: repo.target,
+      taskBaseCommit: repo.base,
+      checks: [{ ...requiredCheck("whitespace"), command: "git diff --check" }],
+      signal,
+    });
+    runtime.beginAttempt(1);
+    fs.writeFileSync(
+      path.join(repo.workingDir, "selected.txt"),
+      "trailing space \n",
+    );
+    const first = await runtime.host.finalize({
+      commitPaths: ["selected.txt"],
+      summary: "Whitespace regression fixture.",
+    });
+    assert.equal(first.validated, false);
+    assert.equal(first.checks[0]!.exitCode, 2);
+    assert.ok(first.checks[0]!.stdout.includes("selected.txt"));
+    assert.equal(git(repo.workingDir, ["status", "--porcelain"]), "");
+    runtime.settleAttempt({ status: "settled" });
+    runtime.beginAttempt(2, first.error);
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "fixed\n");
+    const repaired = await runtime.host.finalize({
+      commitPaths: ["selected.txt"],
+      summary: "Remove trailing whitespace.",
+    });
+    assert.equal(repaired.validated, true);
+    const head = git(repo.workingDir, ["rev-parse", "HEAD"]);
+    const denied = await runFeatureCheckCommand({
+      kind: "check",
+      workspaceRoot: repo.workingDir,
+      cwd: repo.workingDir,
+      command: "git diff --check; git update-ref HEAD HEAD^",
+      signal,
+    });
+    assert.notEqual(denied.exitCode, 0);
+    assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), head);
+    await assert.rejects(
+      runFeatureCheckCommand({
+        kind: "check",
+        workspaceRoot: repo.workingDir,
+        cwd: repo.root,
+        command: "git diff --check",
+        signal,
+      }),
+      /unsafe|escapes/,
+    );
+    await assert.rejects(
+      runFeatureCheckCommand({
+        kind: "check",
+        workspaceRoot: repo.workingDir,
+        cwd: repo.workingDir,
+        command: "git diff --check",
+        signal: AbortSignal.abort(),
+      }),
+      /cancelled/,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("controller whitespace checks cannot invoke Git-configured executable helpers", async () => {
+  const repo = fixture("runtime-git-drivers-b4c5d6e7");
+  try {
+    const marker = path.join(repo.root, "helper-executed");
+    const program = path.join(repo.root, "helper.sh");
+    fs.writeFileSync(program, `#!/bin/sh\ntouch '${marker}'\ncat\n`, {
+      mode: 0o755,
+    });
+    fs.writeFileSync(
+      path.join(repo.workingDir, ".gitattributes"),
+      "*.txt filter=probe diff=probe\n",
+    );
+    for (const key of [
+      "filter.probe.clean",
+      "filter.probe.process",
+      "diff.probe.command",
+      "diff.probe.textconv",
+      "core.fsmonitor",
+    ]) {
+      git(repo.workingDir, ["config", key, program]);
+    }
+    git(repo.workingDir, ["config", "filter.probe.required", "true"]);
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "changed \n");
+    const result = await runFeatureCheckCommand({
+      kind: "check",
+      workspaceRoot: repo.workingDir,
+      cwd: repo.workingDir,
+      command: "git diff --check",
+      diffBaseCommit: repo.base,
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.exitCode, 2, result.stderr);
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("large Git whitespace diagnostics are drained without losing the real exit code", async () => {
+  const repo = fixture("runtime-large-check-c5d6e7f8");
+  try {
+    fs.writeFileSync(
+      path.join(repo.workingDir, "selected.txt"),
+      Array.from(
+        { length: 15000 },
+        (_, i) => `line ${i} with trailing space \n`,
+      ).join(""),
+    );
+    const result = await runFeatureCheckCommand({
+      kind: "check",
+      workspaceRoot: repo.workingDir,
+      cwd: repo.workingDir,
+      command: "git diff --check",
+      diffBaseCommit: repo.base,
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.exitCode, 2, result.stderr);
+    assert.ok(result.stdout.startsWith("selected.txt:"));
+    assert.ok(result.stdout.endsWith("[Output truncated.]"));
+    assert.ok(Buffer.byteLength(result.stdout) <= 256 * 1024 + 32);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("cancellation settles a mediated Git command blocked reading a config FIFO", async () => {
+  const repo = fixture("runtime-cancel-git-d6e7f8a9");
+  try {
+    const fifo = path.join(repo.root, "blocked-config");
+    execFileSync("mkfifo", [fifo]);
+    git(repo.workingDir, ["config", "include.path", fifo]);
+    const started = Date.now();
+    const result = await runFeatureCheckCommand({
+      kind: "check",
+      workspaceRoot: repo.workingDir,
+      cwd: repo.workingDir,
+      command: "git diff --check",
+      signal: AbortSignal.timeout(100),
+    });
+    assert.equal(result.exitCode, null);
+    assert.match(result.stderr, /cancelled/);
+    assert.ok(Date.now() - started < 3000);
   } finally {
     repo.cleanup();
   }

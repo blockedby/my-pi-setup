@@ -275,6 +275,88 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
   }
 });
 
+test("feature workers expose task finalization but not the unrelated execution-finish tool", async () => {
+  const fixture = await createFixture();
+  const provider = registerFauxProvider({
+    api: "feature-task-finish-test-api",
+    provider: "feature-task-finish-test-provider",
+    models: [
+      {
+        id: "gpt-5.6-luna",
+        name: "Task tool test",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32000,
+        maxTokens: 4000,
+      },
+    ],
+  });
+  let sdkSession: AgentSession | undefined;
+  let registered = 0;
+  const factory = createPipelineSessionFactory({
+    modelRegistry: { find: () => provider.getModel() },
+    parentCwd: fixture.root,
+    parentTrusted: false,
+    agentDir: fixture.agentDir,
+    sessionManager: (cwd) => SessionManager.inMemory(cwd),
+    sessionCreated(created) {
+      sdkSession = created;
+    },
+    rootTools: () => [],
+    definitionForRun: () => FEATURE_PIPELINE_ID,
+    executionFinish() {
+      throw new Error("Unexpected execution-finish call");
+    },
+    executionFinishSessionCreated() {
+      registered++;
+    },
+    featureTaskHost: () => ({
+      async diff() {
+        throw new Error("Not invoked");
+      },
+      async check() {
+        throw new Error("Not invoked");
+      },
+      async finalize() {
+        throw new Error("Not invoked");
+      },
+    }),
+  });
+  try {
+    const session = await factory.create({
+      scopeId: "task-tool-test",
+      parentId: "root",
+      role: "feature-task-docs",
+      attempt: 1,
+      title: "Task",
+      model: LUNA_MODEL,
+      thinkingLevel: "high",
+      cwd: fixture.cwd,
+      prompt: "",
+      deferPrompt: true,
+    });
+    try {
+      assert.equal(registered, 0);
+      assert.equal(
+        session.activeTools.includes("pipeline_execution_finish"),
+        false,
+      );
+      assert.equal(
+        sdkSession!.getToolDefinition("pipeline_execution_finish"),
+        undefined,
+      );
+      for (const name of FEATURE_TASK_TOOL_NAMES)
+        assert.equal(session.activeTools.includes(name), true);
+    } finally {
+      await session.dispose();
+    }
+  } finally {
+    provider.unregister();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("plan synthesis sessions expose only local reads and their terminating submission", async () => {
   const fixture = await createFixture();
   let session:
