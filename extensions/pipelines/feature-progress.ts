@@ -218,7 +218,7 @@ export function featureTaskDetails(run: PipelineRunSnapshot, taskId: string) {
     JSON.stringify(task.checks, null, 2),
     "",
     "Summary",
-    task.summary ?? "No validated summary yet.",
+    task.summary ?? task.error ?? "No validated summary yet.",
     "",
     "Warnings and residual paths",
     ...task.warnings,

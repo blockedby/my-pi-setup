@@ -85,6 +85,23 @@ function boundedPreview(text: string) {
   });
 }
 
+function projectPlanningReadiness(
+  checks: NonNullable<PipelineRunSnapshot["planningReadiness"]>,
+) {
+  return checks.map((check) => ({
+    ...check,
+    source: {
+      ...check.source,
+      excerpt: boundedPreview(check.source.excerpt),
+    },
+    stdout: boundedPreview(check.stdout),
+    stderr: boundedPreview(check.stderr),
+    ...(check.error !== undefined
+      ? { error: boundedPreview(check.error) }
+      : {}),
+  }));
+}
+
 function latestFinalizedAssistantText(agent: AgentNodeSnapshot) {
   for (let index = agent.transcript.length - 1; index >= 0; index--) {
     const item = agent.transcript[index];
@@ -319,6 +336,9 @@ export function projectPipelineCheck(
     ...(run.featureGraph
       ? { featureGraph: projectFeatureTasks(run.featureGraph) }
       : {}),
+    ...(run.planningReadiness
+      ? { planningReadiness: projectPlanningReadiness(run.planningReadiness) }
+      : {}),
     ...(completion ? { completion } : {}),
   };
 }
@@ -332,6 +352,57 @@ function activeAgent(agent: ProjectedAgent) {
 
 function agentLine(agent: ProjectedAgent) {
   return `- ${agent.id} · ${agent.role} · attempt ${agent.attempt} · ${agent.model} · ${agent.thinkingLevel} · ${agent.status}`;
+}
+
+function planningReadinessStatus(status: "passed" | "failed") {
+  return status === "failed" ? "FAILED before implementation" : status;
+}
+
+function planningReadinessExitCode(exitCode: number | null) {
+  return exitCode === null ? "unknown" : String(exitCode);
+}
+
+function planningReadinessArtifactHint(runId: string) {
+  const encodedRunId = JSON.stringify(runId);
+  return `Full captured output: first call pipeline_artifact_read({ runId: ${encodedRunId} }) for the manifest, then call pipeline_artifact_read({ runId: ${encodedRunId}, artifactId: "planning-readiness", revision: <revision from manifest> }).`;
+}
+
+function planningReadinessLines(
+  runId: string,
+  checks: NonNullable<ProjectedPipelineCheck["planningReadiness"]>,
+) {
+  const lines = [
+    "Planning readiness (phase: discovery):",
+    planningReadinessArtifactHint(runId),
+  ];
+  // Put actionable failures before verbose successful checks; artifact history
+  // and the structured projection retain the original execution order.
+  checks
+    .map((check, index) => ({ check, index }))
+    .sort(
+      (a, b) =>
+        Number(b.check.status === "failed") -
+        Number(a.check.status === "failed"),
+    )
+    .forEach(({ check, index }) => {
+      lines.push(
+        `Check ${index + 1}:`,
+        `  status: ${planningReadinessStatus(check.status)}`,
+        `  workspaceRoot: ${boundedPreview(check.workspaceRoot)}`,
+        `  cwd: ${boundedPreview(check.cwd)}`,
+        `  command: ${boundedPreview(check.command)}`,
+        `  source.path: ${boundedPreview(check.source.path)}`,
+        `  exitCode: ${planningReadinessExitCode(check.exitCode)}`,
+      );
+      if (check.stderr) lines.push(`  stderr: ${check.stderr}`);
+      if (check.error) lines.push(`  error: ${check.error}`);
+      if (check.stdout) lines.push(`  stdout: ${check.stdout}`);
+      lines.push(
+        `  purpose: ${boundedPreview(check.purpose)}`,
+        `  source.excerpt: ${check.source.excerpt}`,
+      );
+    });
+  return lines;
 }
 
 function compactAgentLines(agents: ReadonlyArray<ProjectedAgent>) {
@@ -397,6 +468,9 @@ export function formatPipelineCheck(details: ProjectedPipelineCheck) {
         ]
       : []),
     `Working directory: ${details.workingDir}`,
+    ...(details.planningReadiness?.length
+      ? planningReadinessLines(details.id, details.planningReadiness)
+      : []),
     `Root status: ${details.rootStatus}`,
     `Acceptance: implementation ${details.acceptance.implementation} · execution ${details.acceptance.execution}`,
     `Agent status counts: ${counts}`,

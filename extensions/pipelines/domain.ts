@@ -364,7 +364,24 @@ export interface PipelineWallclockLimitation {
   readonly partials: ReadonlyArray<PipelineExecutionPartial>;
 }
 
+export interface PlanningReadinessResult {
+  readonly command: string;
+  readonly cwd: string;
+  readonly purpose: string;
+  readonly source: { readonly path: string; readonly excerpt: string };
+  readonly sourceHash?: string;
+  readonly workspaceRoot: string;
+  readonly status: "passed" | "failed";
+  readonly exitCode: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly startedAt: number;
+  readonly finishedAt: number;
+  readonly error?: string;
+}
+
 export interface PipelineRunSnapshot {
+  readonly planningReadiness?: ReadonlyArray<PlanningReadinessResult>;
   readonly acceptance?: import("./run-acceptance.ts").AcceptanceEnvelope;
   readonly id: string;
   readonly definition: PipelineDefinitionId;

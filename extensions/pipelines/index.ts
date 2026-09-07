@@ -329,6 +329,7 @@ export default function pipelines(pi: ExtensionAPI) {
         executionFinishSessionCreated,
         featureTaskHost,
         artifactTools,
+        planningReadinessCheck,
       ) =>
         createPipelineSessionFactory({
           modelRegistry: ctx.modelRegistry,
@@ -346,6 +347,7 @@ export default function pipelines(pi: ExtensionAPI) {
           executionFinishSessionCreated,
           featureTaskHost,
           artifactTools,
+          planningReadinessCheck,
         }),
       onHandoff: deliver,
     });

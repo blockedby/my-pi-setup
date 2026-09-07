@@ -483,7 +483,11 @@ test("child preparation failure stops before spending agent attempts", async () 
       async runCheck(input) {
         if (input.kind === "prepare") {
           preparationAttempts += 1;
-          return { exitCode: 1, stdout: "", stderr: "preparation unavailable" };
+          return {
+            exitCode: 1,
+            stdout: "preparation stdout",
+            stderr: "preparation unavailable",
+          };
         }
         return passingCheck();
       },
@@ -501,6 +505,127 @@ test("child preparation failure stops before spending agent attempts", async () 
     assert.match(result.error!, /preparation unavailable/);
     assert.equal(result.branches[1]!.preparation.attempts, 1);
     assert.equal(result.branches[1]!.preparation.complete, false);
+    assert.deepEqual(result.branches[1]!.preparation.commands, [
+      {
+        command: "prepare fixture",
+        cwd: result.branches[1]!.worktree,
+        exitCode: 1,
+        stdout: "preparation stdout",
+        stderr: "preparation unavailable",
+      },
+    ]);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preparation retains ordered command history when a later command fails", async () => {
+  const repo = fixture();
+  try {
+    const task = graphTask("preparation-history");
+    const prepareCommands = [
+      "prepare first",
+      "prepare second",
+      "prepare never",
+    ];
+    const calls: string[] = [];
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      worktreePrepare: prepareCommands,
+      canonicalPlan,
+      graph: graph([task]),
+      tree: { kind: "fork", branches: [{ kind: "task", taskId: task.id }] },
+      async runCheck(input) {
+        if (input.kind !== "prepare") return passingCheck();
+        calls.push(input.command);
+        return input.command === prepareCommands[0]
+          ? {
+              exitCode: 0,
+              stdout: "first stdout",
+              stderr: "first stderr",
+            }
+          : {
+              exitCode: 7,
+              stdout: "second stdout",
+              stderr: "second stderr",
+            };
+      },
+      async runSession() {
+        throw new Error("preparation should prevent launch");
+      },
+    });
+
+    const branch = result.branches[1]!;
+    assert.equal(result.status, "failed");
+    assert.deepEqual(calls, prepareCommands.slice(0, 2));
+    assert.deepEqual(branch.preparation.commands, [
+      {
+        command: prepareCommands[0],
+        cwd: branch.worktree,
+        exitCode: 0,
+        stdout: "first stdout",
+        stderr: "first stderr",
+      },
+      {
+        command: prepareCommands[1],
+        cwd: branch.worktree,
+        exitCode: 7,
+        stdout: "second stdout",
+        stderr: "second stderr",
+      },
+    ]);
+    assert.equal(
+      branch.preparation.error,
+      "Preparation command exited 7: second stderr",
+    );
+    assert.equal(branch.preparation.complete, false);
+    assert.equal(result.tasks[0]!.attempt, 0);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preparation preserves nullable exit codes from command runners", async () => {
+  const repo = fixture();
+  try {
+    const task = graphTask("nullable-preparation");
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      worktreePrepare: ["prepare nullable"],
+      canonicalPlan,
+      graph: graph([task]),
+      tree: { kind: "fork", branches: [{ kind: "task", taskId: task.id }] },
+      async runCheck(input) {
+        if (input.kind === "prepare") {
+          return {
+            exitCode: null,
+            stdout: "partial stdout",
+            stderr: "partial stderr",
+          };
+        }
+        return passingCheck();
+      },
+      async runSession() {
+        throw new Error("preparation should prevent launch");
+      },
+    });
+
+    const branch = result.branches[1]!;
+    assert.equal(result.status, "failed");
+    assert.deepEqual(branch.preparation.commands, [
+      {
+        command: "prepare nullable",
+        cwd: branch.worktree,
+        exitCode: null,
+        stdout: "partial stdout",
+        stderr: "partial stderr",
+      },
+    ]);
+    assert.match(branch.preparation.error!, /exited null: partial stderr/);
   } finally {
     repo.cleanup();
   }

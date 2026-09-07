@@ -888,6 +888,7 @@ function cleanupFacts(event: RunEvent) {
     resourceType: factString(event, "resourceType"),
     resource: factString(event, "resource"),
     ownership: factString(event, "ownership"),
+    phase: factString(event, "phase"),
     expectedIdentity: factString(event, "expectedIdentity"),
     disposition: factString(event, "disposition"),
     operationStatus: factString(event, "operationStatus"),
@@ -973,12 +974,21 @@ function legitimateRetention(
 }
 
 function legitimateOutcomeOnlyNoOp(facts: ReturnType<typeof cleanupFacts>) {
-  return (
+  const noControllerOwnership =
     facts.ownership === "unknown" &&
     facts.operationStatus === "not_attempted" &&
     (facts.disposition === "skipped" || facts.disposition === "retained") &&
-    facts.reasonCode === "no_controller_ownership"
-  );
+    facts.reasonCode === "no_controller_ownership";
+  const deferredSandboxCleanup =
+    facts.ownership === "controller" &&
+    facts.resourceType === "sandbox" &&
+    facts.resource !== undefined &&
+    facts.phase === "feature-sandbox-runtime-cleanup" &&
+    facts.expectedIdentity !== undefined &&
+    facts.disposition === "retained" &&
+    facts.operationStatus === "not_attempted" &&
+    facts.reasonCode === "workspace_still_present";
+  return noControllerOwnership || deferredSandboxCleanup;
 }
 
 function assessCleanup(

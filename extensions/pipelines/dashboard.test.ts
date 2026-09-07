@@ -14,6 +14,7 @@ import {
   AUDIT_SEGMENT_LUNA_ROLES,
   STATIC_LUNA_AUDIT_ROLES,
   type PipelineRunSnapshot,
+  type PlanningReadinessResult,
 } from "./domain.ts";
 import { handoffText } from "./index.ts";
 import { FEATURE_PLAN_ROLES, FEATURE_FINALIZER_ROLE } from "./domain.ts";
@@ -56,6 +57,26 @@ function pipelineRun(
     rootId: "root-1",
     agents,
   };
+}
+
+function readinessResult(overrides: Partial<PlanningReadinessResult> = {}) {
+  return {
+    command: "bun run check",
+    cwd: ".",
+    purpose: "Verify the repository before implementation.",
+    source: {
+      path: "package.json",
+      excerpt: '"check":"bun run check"',
+    },
+    workspaceRoot: "/tmp/work",
+    status: "passed",
+    exitCode: 0,
+    stdout: "check passed",
+    stderr: "",
+    startedAt: 2,
+    finishedAt: 3,
+    ...overrides,
+  } satisfies PlanningReadinessResult;
 }
 
 function acceptance(
@@ -125,6 +146,54 @@ test("runs are collapsed by default with textual and colored summary status", ()
       glyph,
     ]),
   );
+});
+
+test("expanded dashboard marks discovery readiness failures before implementation", () => {
+  const run = {
+    ...pipelineRun("run-readiness", [agent("root-1")]),
+    status: "failed" as const,
+    planningReadiness: [
+      readinessResult({
+        status: "failed",
+        exitCode: null,
+        stderr: "repository check failed",
+        error: "Command exited with code unknown.",
+      }),
+    ],
+  };
+  const rows = buildPipelineRows([run], new Set([run.id]));
+  const runRow = rows.find(
+    (row): row is Extract<PipelineRow, { kind: "run" }> =>
+      row.kind === "run" && row.runId === run.id,
+  );
+  const readinessRow = rows.find(
+    (row) =>
+      row.kind === "boundary" && row.key === `planning-readiness:${run.id}:0`,
+  );
+
+  assert.ok(runRow);
+  assert.ok(readinessRow);
+  assert.match(runRow.label, /readiness:FAILED before implementation/);
+  assert.match(
+    readinessRow.label,
+    /Planning readiness · discovery · FAILED before implementation/,
+  );
+  for (const fact of [
+    "workspaceRoot: /tmp/work",
+    "cwd: .",
+    "command: bun run check",
+    "source.path: package.json",
+    "exitCode: unknown",
+  ]) {
+    assert.equal(readinessRow.label.includes(fact), true, fact);
+  }
+  assert.equal(
+    readinessRow.kind === "boundary"
+      ? readinessRow.planningReadinessStatus
+      : undefined,
+    "failed",
+  );
+  assert.equal(glyphStatusForPipelineRow(readinessRow), "error");
 });
 
 test("completed runs show independent acceptance statuses and legacy runs stay unavailable", () => {

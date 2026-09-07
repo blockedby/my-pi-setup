@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { buildPlanningReadinessHandoff } from "./planning-readiness-handoff.ts";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -16,6 +17,7 @@ import type {
 import {
   PipelineController,
   pipelineDiscoverySubmissionAllowed,
+  type PipelineControllerOptions,
 } from "./controller.ts";
 import { inspectPipeline, PIPELINE_CHECK_MAX_BYTES } from "./inspection.ts";
 import { executeFeatureGraph } from "./feature-graph-executor.ts";
@@ -98,6 +100,7 @@ function createLinkedWorktreeFixture(
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, contents);
   }
+  ensurePlanningReadinessFixture(primary);
   execFileSync("git", ["add", "."], { cwd: primary });
   execFileSync("git", ["commit", "-qm", "baseline"], { cwd: primary });
   execFileSync("git", ["worktree", "add", "-q", "-b", "feature/test", linked], {
@@ -139,19 +142,23 @@ class FakePipelineSession implements AgentTreeSession {
   readonly spec: AgentNodeSpec;
   readonly autoReport?: string | ((turn: number) => string);
   readonly discoverySubmit?: (value: unknown) => void;
+  readonly planningReadinessCheck?: () => Promise<unknown>;
   private turn = 0;
+  private planningReadinessInvoked = false;
 
   constructor(
     activeTools: ReadonlyArray<string>,
     spec: AgentNodeSpec,
     autoReport?: string | ((turn: number) => string),
     discoverySubmit?: (value: unknown) => void,
+    planningReadinessCheck?: () => Promise<unknown>,
     private readonly synchronousAutoComplete = false,
   ) {
     this.activeTools = activeTools;
     this.spec = spec;
     this.autoReport = autoReport;
     this.discoverySubmit = discoverySubmit;
+    this.planningReadinessCheck = planningReadinessCheck;
     this.sessionFile = `/tmp/${spec.scopeId}-${spec.role}-${spec.attempt}.jsonl`;
   }
 
@@ -184,6 +191,14 @@ class FakePipelineSession implements AgentTreeSession {
   async prompt(text: string) {
     this.prompts.push(text);
     this.isStreaming = true;
+    if (
+      this.spec.role === "discover-context" &&
+      this.planningReadinessCheck &&
+      !this.planningReadinessInvoked
+    ) {
+      this.planningReadinessInvoked = true;
+      await this.planningReadinessCheck();
+    }
     this.autoComplete();
   }
 
@@ -398,7 +413,9 @@ function featureGitHarness(
       } catch {
         // Most controller fixtures intentionally use a synthetic workspace.
       }
-      if (driftBeforeBuild && call > 1) baseCommit = "f".repeat(40);
+      // Startup and readiness each revalidate the caller before build gets a
+      // chance to observe the injected drift.
+      if (driftBeforeBuild && call > 3) baseCommit = "f".repeat(40);
       return {
         workingDir,
         repositoryRoot: workingDir,
@@ -423,6 +440,54 @@ function featureGitHarness(
   };
 }
 
+const PLANNING_READINESS_COMMAND = "printf planning-readiness-fixture";
+const PLANNING_READINESS_SOURCE_PATH = "planning-readiness-fixture.txt";
+const PLANNING_READINESS_SOURCE_EXCERPT = `existing command: ${PLANNING_READINESS_COMMAND}`;
+const PLANNING_READINESS_PURPOSE = "Verify the repository readiness fixture.";
+
+function ensurePlanningReadinessFixture(workingDir: string) {
+  fs.mkdirSync(workingDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(workingDir, PLANNING_READINESS_SOURCE_PATH),
+    `# Existing repository check\n${PLANNING_READINESS_SOURCE_EXCERPT}\n`,
+  );
+}
+
+function planningReadinessInput(workingDir: string, unverifiedSource = false) {
+  ensurePlanningReadinessFixture(workingDir);
+  return {
+    command: PLANNING_READINESS_COMMAND,
+    cwd: ".",
+    purpose: PLANNING_READINESS_PURPOSE,
+    source: {
+      path: PLANNING_READINESS_SOURCE_PATH,
+      excerpt: unverifiedSource
+        ? `unverified excerpt: ${PLANNING_READINESS_COMMAND}`
+        : PLANNING_READINESS_SOURCE_EXCERPT,
+    },
+  };
+}
+
+function readinessBaselineCheck() {
+  return {
+    id: "repository-readiness",
+    command: PLANNING_READINESS_COMMAND,
+    cwd: ".",
+    purpose: PLANNING_READINESS_PURPOSE,
+    required: true,
+  };
+}
+
+function unknownReadinessBaselineCheck() {
+  return {
+    id: "unknown-repository-readiness",
+    command: "printf unknown-repository-readiness",
+    cwd: ".",
+    purpose: "This baseline was not observed during discovery.",
+    required: true,
+  };
+}
+
 function harness(
   options: {
     rootGate?: Promise<void>;
@@ -444,6 +509,16 @@ function harness(
     useDefaultRunId?: boolean;
     failCandidateReservation?: boolean;
     driftFeatureBaseBeforeBuild?: boolean;
+    readinessMode?: "pass" | "none" | "unverified";
+    readinessResult?: {
+      readonly exitCode: number | null;
+      readonly stdout: string;
+      readonly stderr: string;
+    };
+    readinessCommand?: PipelineControllerOptions["runPlanningReadinessCommand"];
+    readinessGraphBaseline?: boolean;
+    unknownGraphBaselineOnce?: boolean;
+    unknownGraphBaselineAlways?: boolean;
     scheduler?: PipelineWallclockScheduler;
   } = {},
 ) {
@@ -454,6 +529,29 @@ function harness(
   const featureReviewSignals: AbortSignal[] = [];
   const featureReviewDiffBases: Array<string | undefined> = [];
   const featureReviewKnownResidualPaths: ReadonlyArray<string>[] = [];
+  const featureGraphBaselineChecks: Array<
+    ReadonlyArray<{ command: string; cwd: string }>
+  > = [];
+  const readinessCalls: Array<
+    Parameters<
+      NonNullable<PipelineControllerOptions["runPlanningReadinessCommand"]>
+    >[0]
+  > = [];
+  const discoveryTokens = new Map<string, string>();
+  let planningReadinessCheckCallback:
+    | ((
+        runId: string,
+        role: string,
+        token: string,
+        input: {
+          command: string;
+          cwd: string;
+          purpose: string;
+          source: { path: string; excerpt: string };
+        },
+        signal?: AbortSignal,
+      ) => Promise<unknown>)
+    | undefined;
   let agentSequence = 0;
   let runSequence = 0;
   let featureCleanupCompleted = 0;
@@ -495,8 +593,11 @@ function harness(
       _executionFinish,
       _executionFinishSessionCreated,
       featureTaskHost,
+      _artifactTools,
+      planningReadinessCheck,
     ) => {
       discoverySubmitCallback = discoverySubmit;
+      planningReadinessCheckCallback = planningReadinessCheck;
       return {
         async create(spec) {
           if (!spec.parentId && options.rootGate) await options.rootGate;
@@ -518,6 +619,18 @@ function harness(
           const planRole = PLAN_PIPELINE_DISCOVERY_ROLES.find(
             (role) => role === spec.role,
           );
+          const controllerGraph = () => {
+            const graph = options.realFeatureExecution
+              ? realControllerGraph()
+              : featureExecutionGraph();
+            return options.readinessGraphBaseline
+              ? { ...graph, baselineChecks: [readinessBaselineCheck()] }
+              : graph;
+          };
+          const unknownBaselineGraph = () => ({
+            ...controllerGraph(),
+            baselineChecks: [unknownReadinessBaselineCheck()],
+          });
           const autoReport =
             featurePlanRole && options.autoCompleteFeaturePlanning !== false
               ? (turn: number) =>
@@ -537,21 +650,19 @@ function harness(
                 ? (turn: number) =>
                     turn === 0
                       ? JSON.stringify(featureCanonicalPlan())
-                      : turn === 1
-                        ? options.malformedFeatureGraphOnce
-                          ? "{}"
-                          : JSON.stringify(
-                              options.realFeatureExecution
-                                ? realControllerGraph()
-                                : featureExecutionGraph(),
-                            )
-                        : turn === 2 && options.malformedFeatureGraphOnce
-                          ? JSON.stringify(
-                              options.realFeatureExecution
-                                ? realControllerGraph()
-                                : featureExecutionGraph(),
-                            )
-                          : "Final review settled after validated finalization."
+                      : turn === 1 && options.malformedFeatureGraphOnce
+                        ? "{}"
+                        : (options.unknownGraphBaselineAlways ||
+                              (options.unknownGraphBaselineOnce &&
+                                turn === 1)) &&
+                            turn >= 1
+                          ? JSON.stringify(unknownBaselineGraph())
+                          : turn === 1 ||
+                              (turn === 2 &&
+                                (options.malformedFeatureGraphOnce ||
+                                  options.unknownGraphBaselineOnce))
+                            ? JSON.stringify(controllerGraph())
+                            : "Final review settled after validated finalization."
                 : planRole && options.autoCompletePlan
                   ? planReportForRole(planRole)
                   : spec.role === PLAN_PIPELINE_SYNTHESIS_ROLE &&
@@ -613,6 +724,10 @@ function harness(
               spec.role,
               discoveryToken,
             );
+            discoveryTokens.set(
+              `${spec.scopeId ?? ""}:${spec.role}`,
+              discoveryToken,
+            );
           }
           const session = new FakePipelineSession(
             !isImplementationRoot
@@ -624,6 +739,9 @@ function harness(
                   "web_fetch_codex",
                   ...(discoveryAllowed
                     ? [
+                        ...(spec.role === "discover-context"
+                          ? ["pipeline_feature_readiness_check"]
+                          : []),
                         spec.role === FEATURE_DISCOVERY_SYNTHESIS_ROLE
                           ? "pipeline_discovery_synthesis_submit"
                           : "pipeline_discovery_submit",
@@ -640,6 +758,21 @@ function harness(
                     spec.role,
                     discoveryToken,
                     value,
+                  )
+              : undefined,
+            discoveryToken &&
+              spec.role === "discover-context" &&
+              options.readinessMode !== "none" &&
+              planningReadinessCheck
+              ? () =>
+                  planningReadinessCheck(
+                    spec.scopeId ?? "",
+                    spec.role,
+                    discoveryToken,
+                    planningReadinessInput(
+                      spec.cwd,
+                      options.readinessMode === "unverified",
+                    ),
                   )
               : undefined,
             Boolean(candidateRole && options.synchronousCandidateFirstTurn),
@@ -714,6 +847,12 @@ function harness(
     async executeFeatureGraph(input) {
       if (options.realFeatureExecution) return executeFeatureGraph(input);
       if (input.signal) featureExecutionSignals.push(input.signal);
+      featureGraphBaselineChecks.push(
+        input.graph.baselineChecks.map(({ command, cwd }) => ({
+          command,
+          cwd,
+        })),
+      );
       const head = execFileSync("git", ["rev-parse", "HEAD"], {
         cwd: input.workingDir,
         encoding: "utf8",
@@ -849,6 +988,17 @@ function harness(
         snapshot,
       };
     },
+    runPlanningReadinessCommand: async (input) => {
+      readinessCalls.push(input);
+      if (options.readinessCommand) return options.readinessCommand(input);
+      return (
+        options.readinessResult ?? {
+          exitCode: 0,
+          stdout: "planning readiness passed\n",
+          stderr: "",
+        }
+      );
+    },
     featureGit: options.realFeatureExecution
       ? undefined
       : featureGitHarness(
@@ -868,6 +1018,14 @@ function harness(
     featureReviewSignals,
     featureReviewDiffBases,
     featureReviewKnownResidualPaths,
+    featureGraphBaselineChecks,
+    readinessCalls,
+    get planningReadinessCheck() {
+      return planningReadinessCheckCallback;
+    },
+    planningReadinessToken(runId: string) {
+      return discoveryTokens.get(`${runId}:discover-context`);
+    },
     get featureCleanupCompleted() {
       return featureCleanupCompleted;
     },
@@ -889,16 +1047,24 @@ function harness(
   };
 }
 
-const request = (workingDir = implementationWorkingDir()) => ({
-  pipelineName: "approved-feature-run",
-  task: "Implement the approved feature",
-  workingDir,
-  gitCommit: true,
-  worktreeRoot: fs.mkdtempSync(
-    path.join(os.tmpdir(), "pipeline-graph-worktrees-"),
-  ),
-  worktreePrepare: [],
-});
+const request = (
+  workingDir = implementationWorkingDir(),
+  ensureReadiness = true,
+) => {
+  if (ensureReadiness && !fs.existsSync(path.join(workingDir, ".git"))) {
+    ensurePlanningReadinessFixture(workingDir);
+  }
+  return {
+    pipelineName: "approved-feature-run",
+    task: "Implement the approved feature",
+    workingDir,
+    gitCommit: true,
+    worktreeRoot: fs.mkdtempSync(
+      path.join(os.tmpdir(), "pipeline-graph-worktrees-"),
+    ),
+    worktreePrepare: [],
+  };
+};
 
 function nonFeatureRequest(
   pipeline: "small-feature-pipeline" | "plan-pipeline" | "audit-pipeline",
@@ -908,7 +1074,7 @@ function nonFeatureRequest(
     worktreeRoot: _worktreeRoot,
     worktreePrepare: _worktreePrepare,
     ...base
-  } = request(workingDir);
+  } = request(workingDir, false);
   return { ...base, pipeline };
 }
 
@@ -959,15 +1125,142 @@ test("plan and audit reject commit authority, while small-feature retains it", a
     ...nonFeatureRequest("small-feature-pipeline"),
     gitCommit: true,
   });
-  await settleInitialization();
+  await waitForControllerState(run, smallFeatureId, smallFeatureReady);
   assert.equal(run.controller.get(smallFeatureId)?.status, "running");
   await run.controller.dispose();
 });
 
-async function settleInitialization() {
-  for (let turn = 0; turn < 5; turn++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+type ControllerSnapshot = NonNullable<ReturnType<PipelineController["get"]>>;
+
+function hasAgentRoles(
+  snapshot: ControllerSnapshot,
+  roles: ReadonlyArray<string>,
+) {
+  const present = new Set(snapshot.agents.map(({ role }) => role));
+  return roles.every((role) => present.has(role));
+}
+
+function agentsReady(
+  snapshot: ControllerSnapshot,
+  roles: ReadonlyArray<string>,
+) {
+  return roles.every((role) => {
+    const agent = snapshot.agents.find((candidate) => candidate.role === role);
+    return agent !== undefined && agent.status !== "starting";
+  });
+}
+
+function featureDiscoveryReady(snapshot: ControllerSnapshot) {
+  return (
+    snapshot.status === "running" &&
+    snapshot.stage === "discover" &&
+    snapshot.agents.length === 6 &&
+    hasAgentRoles(snapshot, [
+      FEATURE_FINALIZER_ROLE,
+      ...FEATURE_PIPELINE_DISCOVERY_ROLES,
+    ]) &&
+    agentsReady(snapshot, [
+      FEATURE_FINALIZER_ROLE,
+      ...FEATURE_PIPELINE_DISCOVERY_ROLES,
+    ])
+  );
+}
+
+function featureAuditReady(snapshot: ControllerSnapshot) {
+  return (
+    snapshot.status === "running" &&
+    snapshot.stage === "audit" &&
+    snapshot.agents.length === 9 &&
+    hasAgentRoles(snapshot, [
+      FEATURE_FINALIZER_ROLE,
+      "pipeline-root",
+      ...FEATURE_PIPELINE_DISCOVERY_ROLES,
+      ...FEATURE_PLAN_ROLES,
+    ]) &&
+    agentsReady(snapshot, [
+      FEATURE_FINALIZER_ROLE,
+      "pipeline-root",
+      ...FEATURE_PIPELINE_DISCOVERY_ROLES,
+      ...FEATURE_PLAN_ROLES,
+    ])
+  );
+}
+
+function smallFeatureReady(snapshot: ControllerSnapshot) {
+  return (
+    snapshot.status === "running" &&
+    snapshot.stage === "build" &&
+    snapshot.agents.length === 1 &&
+    snapshot.agents.some(
+      (agent) => agent.id === snapshot.rootId && agent.role === "pipeline-root",
+    )
+  );
+}
+
+function planDiscoveryReady(snapshot: ControllerSnapshot) {
+  return (
+    snapshot.status === "running" &&
+    snapshot.stage === "discover" &&
+    snapshot.agents.length === 7 &&
+    hasAgentRoles(snapshot, [
+      PLAN_PIPELINE_SYNTHESIS_ROLE,
+      ...PLAN_PIPELINE_DISCOVERY_ROLES,
+    ]) &&
+    agentsReady(snapshot, [
+      PLAN_PIPELINE_SYNTHESIS_ROLE,
+      ...PLAN_PIPELINE_DISCOVERY_ROLES,
+    ])
+  );
+}
+
+function planCompleted(snapshot: ControllerSnapshot) {
+  return (
+    snapshot.status === "completed" &&
+    snapshot.stage === "complete" &&
+    snapshot.agents.length === 7 &&
+    hasAgentRoles(snapshot, [
+      PLAN_PIPELINE_SYNTHESIS_ROLE,
+      ...PLAN_PIPELINE_DISCOVERY_ROLES,
+    ])
+  );
+}
+
+async function waitForControllerState(
+  run: ReturnType<typeof harness>,
+  runId: string,
+  predicate: (snapshot: ControllerSnapshot) => boolean,
+  timeoutMs = 5_000,
+) {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let unsubscribe = () => {};
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      unsubscribe();
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const check = () => {
+      try {
+        const snapshot = run.controller.get(runId);
+        if (snapshot && predicate(snapshot)) finish();
+      } catch (error) {
+        finish(error);
+      }
+    };
+    const timeout = setTimeout(() => {
+      const snapshot = run.controller.get(runId);
+      finish(
+        new Error(
+          `Timed out waiting for controller state for ${runId}: ${JSON.stringify(snapshot)}`,
+        ),
+      );
+    }, timeoutMs);
+    unsubscribe = run.controller.subscribe(check);
+    check();
+  });
 }
 
 async function waitForHandoff(
@@ -1507,7 +1800,17 @@ async function finishEmbeddedAudit(
       }),
     },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.auditSegment?.acceptedReportCount === 1 &&
+      snapshot.auditSegment.reducerStatus === "busy" &&
+      snapshot.agents.some(
+        (agent) =>
+          agent.role === "audit-synthesis" && agent.status === "running",
+      ),
+  );
   for (const role of AUDIT_SEGMENT_LUNA_ROLES.slice(1)) {
     const session = [...run.sessions]
       .reverse()
@@ -1529,7 +1832,18 @@ async function finishEmbeddedAudit(
       finalText: synthesisReport("audit-synthesis-intermediate", [firstRole]),
     },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.auditSegment?.acceptedReportCount ===
+        AUDIT_SEGMENT_LUNA_ROLES.length &&
+      snapshot.auditSegment.integratedReportCount === 1 &&
+      snapshot.agents.some(
+        (agent) =>
+          agent.role === "audit-synthesis" && agent.status === "running",
+      ),
+  );
   let headSha = "UNAVAILABLE";
   try {
     headSha = execFileSync("git", ["rev-parse", "HEAD"], {
@@ -1555,7 +1869,13 @@ async function finishEmbeddedAudit(
       ),
     },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.stage === "final-resolve" &&
+      snapshot.auditSegment?.finalReportValidated === true,
+  );
   assert.equal(run.controller.get(runId)?.stage, "final-resolve");
   assert.equal(agents.length, 6);
   if (deliverFinalReport) {
@@ -1577,7 +1897,7 @@ async function finishEmbeddedAudit(
 
 async function prepareFeatureCompletion(run: ReturnType<typeof harness>) {
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   await finishEmbeddedAudit(run, runId);
   const rootId = run.controller.get(runId)?.rootId;
   assert.ok(rootId);
@@ -2044,7 +2364,6 @@ test("production controller completes real Git and sandbox execution through rev
       },
       "pipeline-complete-real",
     );
-    await settleInitialization();
     await waitForHandoff(run, runId);
     assert.equal(run.controller.get(runId)?.status, "completed");
     assert.equal(run.handoffs.length, 1);
@@ -2084,7 +2403,7 @@ test("feature controller accepts corrected Astra plans, persists artifacts, exec
     malformedFeatureGraphOnce: true,
   });
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
 
   const snapshot = run.controller.get(runId);
   assert.equal(snapshot?.status, "running");
@@ -2197,7 +2516,11 @@ test("feature controller accepts corrected Astra plans, persists artifacts, exec
 test("feature build rejects caller branch identity drift after planning", async () => {
   const run = harness({ driftFeatureBaseBeforeBuild: true });
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) => snapshot.status === "failed",
+  );
 
   const snapshot = run.controller.get(runId);
   assert.equal(snapshot?.status, "failed");
@@ -2234,7 +2557,7 @@ test("feature working directories are exclusively leased until terminal handoff"
   assert.equal(firstId, "approved-feature-run-00000001");
   assert.equal(gated.controller.get(firstId)?.status, "starting");
   releaseRoot();
-  await settleInitialization();
+  await waitForControllerState(gated, firstId, featureAuditReady);
   assert.equal(gated.controller.get(firstId)?.status, "running");
   assert.equal(gated.sessions.length, 9);
   assert.equal(
@@ -2267,7 +2590,15 @@ test("delayed discovery session creation cannot restore terminal run authority o
   const survivingRunId = run.controller.start(
     request("/tmp/surviving-feature-worktree"),
   );
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    failedRunId,
+    (snapshot) =>
+      snapshot.status === "running" &&
+      snapshot.stage === "discover" &&
+      snapshot.agents.length === 5 &&
+      snapshot.agents.some((agent) => agent.role === FEATURE_FINALIZER_ROLE),
+  );
 
   const failedRoot = run.sessions.find(
     (session) =>
@@ -2282,7 +2613,7 @@ test("delayed discovery session creation cannot restore terminal run authority o
   assert.equal(run.controller.get(failedRunId)?.status, "failed");
 
   releaseDelayedSession();
-  await settleInitialization();
+  await waitForControllerState(run, survivingRunId, featureDiscoveryReady);
   const submissions = Reflect.get(run.controller, "discoverySubmissions");
   const tokens = Reflect.get(run.controller, "discoverySessionTokens");
   assert.ok(submissions instanceof Map);
@@ -2318,7 +2649,8 @@ test("concurrent feature cancellation is coalesced and isolates another run", as
   const unrelatedId = run.controller.start(
     request("/tmp/unrelated-feature-worktree"),
   );
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureDiscoveryReady);
+  await waitForControllerState(run, unrelatedId, featureDiscoveryReady);
   const unrelatedBefore = run.controller
     .get(unrelatedId)!
     .agents.map(({ id, status }) => ({ id, status }));
@@ -2354,7 +2686,7 @@ test("root cancellation rejection still cleans and hands off exactly once", asyn
     rejectRootCancellation: true,
   });
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
 
   await assert.rejects(
     run.controller.cancelRun(runId),
@@ -2393,7 +2725,7 @@ test("feature discovery tool payload is bound to its session and consumed only a
     autoCompleteFeaturePlanning: false,
   });
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureDiscoveryReady);
 
   for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES.slice(1)) {
     settleRole(run, role);
@@ -2428,7 +2760,15 @@ test("feature discovery tool payload is bound to its session and consumed only a
       finalText: "Tool result text is not the compatibility report",
     },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.status === "running" &&
+      snapshot.stage === "plan" &&
+      snapshot.agents.length === 8 &&
+      hasAgentRoles(snapshot, [FEATURE_FINALIZER_ROLE, ...FEATURE_PLAN_ROLES]),
+  );
 
   assert.equal(run.controller.get(runId)?.stage, "plan");
   const planners = run.sessions.filter((session) =>
@@ -2532,13 +2872,342 @@ test("feature discovery submission scope is fixed to active feature discovery ro
   }
 });
 
+test("failed planning readiness retains both streams in a readable artifact and stops implementation admission", async () => {
+  const stdout = "readiness stdout diagnostic\n";
+  const stderr = "readiness stderr diagnostic\n";
+  const run = harness({
+    readinessResult: { exitCode: 17, stdout, stderr },
+  });
+  const runId = run.controller.start(request());
+  try {
+    await waitForHandoff(run, runId);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "failed");
+    assert.equal(snapshot?.stage, "discover");
+    const readiness = snapshot?.planningReadiness?.[0];
+    assert.ok(readiness);
+    assert.equal(readiness.status, "failed");
+    assert.equal(readiness.exitCode, 17);
+    assert.equal(readiness.stdout, stdout);
+    assert.equal(readiness.stderr, stderr);
+    assert.equal(run.readinessCalls.length, 1);
+    assert.equal(
+      run.sessions.some((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ),
+      false,
+    );
+    assert.equal(run.featureGraphBaselineChecks.length, 0);
+    assert.equal(run.featureExecutionSignals.length, 0);
+
+    const manifest = await run.controller.readArtifact(runId);
+    if (!Array.isArray(manifest))
+      throw new Error("Expected an artifact manifest.");
+    const entry = manifest.find(
+      (candidate) => candidate.artifactId === "planning-readiness",
+    );
+    assert.ok(entry);
+    const page = requireArtifactPage(
+      await run.controller.readArtifact(runId, {
+        artifactId: entry.artifactId,
+        revision: entry.revision,
+        maxBytes: 64 * 1024,
+      }),
+    );
+    assert.equal(page.completeness, "complete");
+    const persisted = JSON.parse(page.text) as Array<{
+      status: string;
+      exitCode: number | null;
+      stdout: string;
+      stderr: string;
+    }>;
+    assert.equal(persisted[0]?.status, "failed");
+    assert.equal(persisted[0]?.exitCode, 17);
+    assert.equal(persisted[0]?.stdout, stdout);
+    assert.equal(persisted[0]?.stderr, stderr);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("planning readiness rejects wrong roles and tokens before and after discovery submission", async () => {
+  const run = harness({
+    autoCompleteFeatureDiscovery: false,
+    autoCompleteFeaturePlanning: false,
+  });
+  const runId = run.controller.start(request());
+  try {
+    await waitForControllerState(run, runId, featureDiscoveryReady);
+    const check = run.planningReadinessCheck;
+    const token = run.planningReadinessToken(runId);
+    assert.ok(check);
+    assert.ok(token);
+    const input = planningReadinessInput(implementationWorkingDir());
+    await assert.rejects(
+      check(runId, "discover-problem", token, input),
+      /not active for this discovery session/,
+    );
+    await assert.rejects(
+      check(runId, "discover-context", "wrong-token", input),
+      /not active for this discovery session/,
+    );
+
+    const context = run.sessions.find(
+      (session) => session.spec.role === "discover-context",
+    );
+    const problem = run.sessions.find(
+      (session) => session.spec.role === "discover-problem",
+    );
+    assert.ok(context?.discoverySubmit);
+    assert.ok(problem);
+    assert.equal(
+      context.activeTools.includes("pipeline_feature_readiness_check"),
+      true,
+    );
+    assert.equal(
+      problem.activeTools.includes("pipeline_feature_readiness_check"),
+      false,
+    );
+    context.discoverySubmit(featureDiscoveryValue("discover-context"));
+    await assert.rejects(
+      check(runId, "discover-context", token, input),
+      /not active for this discovery session/,
+    );
+    assert.equal(run.readinessCalls.length, 1);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("unverified planning readiness source fails before invoking the command runner or planners", async () => {
+  const run = harness({ readinessMode: "unverified" });
+  const runId = run.controller.start(request());
+  try {
+    await waitForHandoff(run, runId);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "failed");
+    assert.equal(snapshot?.stage, "discover");
+    const readiness = snapshot?.planningReadiness?.[0];
+    assert.ok(readiness);
+    assert.equal(readiness.status, "failed");
+    assert.equal(readiness.sourceHash, undefined);
+    assert.match(readiness.error ?? "", /does not contain the exact excerpt/);
+    assert.equal(run.readinessCalls.length, 0);
+    assert.equal(
+      run.sessions.some((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ),
+      false,
+    );
+    assert.equal(run.featureExecutionSignals.length, 0);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("a passed source-confirmed readiness result admits planners and the graph with its exact baseline", async () => {
+  const stdout = "Actionable readiness output retained for planning.";
+  const stderr = "Readiness warning retained for planning.";
+  const run = harness({
+    readinessGraphBaseline: true,
+    readinessResult: { exitCode: 0, stdout, stderr },
+  });
+  const runId = run.controller.start(request());
+  try {
+    await waitForControllerState(run, runId, featureAuditReady);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "running");
+    assert.equal(snapshot?.stage, "audit");
+    assert.deepEqual(
+      snapshot?.planningReadiness?.map(
+        ({ command, cwd, status, exitCode }) => ({
+          command,
+          cwd,
+          status,
+          exitCode,
+        }),
+      ),
+      [
+        {
+          command: PLANNING_READINESS_COMMAND,
+          cwd: ".",
+          status: "passed",
+          exitCode: 0,
+        },
+      ],
+    );
+    assert.deepEqual(
+      run.readinessCalls.map(({ command, cwd }) => ({ command, cwd })),
+      [{ command: PLANNING_READINESS_COMMAND, cwd: "." }],
+    );
+    assert.equal(
+      run.sessions.filter((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ).length,
+      2,
+    );
+    assert.deepEqual(run.featureGraphBaselineChecks, [
+      [{ command: PLANNING_READINESS_COMMAND, cwd: "." }],
+    ]);
+    const manifest = await run.controller.readArtifact(runId);
+    assert.ok(Array.isArray(manifest));
+    const entry = manifest.find(
+      (artifact) => artifact.artifactId === "planning-readiness",
+    );
+    assert.ok(entry);
+    const expectedHandoff = buildPlanningReadinessHandoff(
+      runId,
+      snapshot?.planningReadiness ?? [],
+      entry.revision,
+    );
+    assert.equal(expectedHandoff.checks[0]?.stdout, stdout);
+    assert.equal(expectedHandoff.checks[0]?.stderr, stderr);
+    for (const session of run.sessions.filter((candidate) =>
+      FEATURE_PLAN_ROLES.some((role) => role === candidate.spec.role),
+    )) {
+      const delivered = session.prompts[0];
+      assert.ok(delivered);
+      const payload: unknown = JSON.parse(
+        delivered.slice(delivered.lastIndexOf("\n") + 1),
+      );
+      assert.deepEqual(payload, expectedHandoff);
+    }
+    assert.equal(run.featureExecutionSignals.length, 1);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("feature planning fails before planners when discovery records no readiness check", async () => {
+  const run = harness({ readinessMode: "none" });
+  const runId = run.controller.start(request());
+  try {
+    await waitForHandoff(run, runId);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "failed");
+    assert.equal(snapshot?.stage, "discover");
+    assert.deepEqual(snapshot?.planningReadiness ?? [], []);
+    assert.equal(run.readinessCalls.length, 0);
+    assert.equal(
+      run.sessions.some((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ),
+      false,
+    );
+    assert.equal(run.featureGraphBaselineChecks.length, 0);
+    assert.equal(run.featureExecutionSignals.length, 0);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("planning readiness cancellation aborts the injected command before planners start", async () => {
+  const run = harness({
+    readinessCommand: async ({ signal }) => {
+      if (signal?.aborted) {
+        return { exitCode: null, stdout: "", stderr: "" };
+      }
+      return new Promise((resolve) => {
+        signal?.addEventListener(
+          "abort",
+          () => resolve({ exitCode: null, stdout: "", stderr: "" }),
+          { once: true },
+        );
+      });
+    },
+  });
+  const runId = run.controller.start(request());
+  try {
+    const deadline = Date.now() + 5_000;
+    while (run.readinessCalls.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(run.readinessCalls.length, 1);
+    const commandSignal = run.readinessCalls[0]?.signal;
+    assert.ok(commandSignal);
+    const cancellation = run.controller.cancelRun(runId);
+    assert.equal(commandSignal.aborted, true);
+    const cancelled = await cancellation;
+    assert.equal(cancelled.status, "cancelled");
+    await waitForHandoff(run, runId);
+    assert.equal(run.controller.get(runId)?.status, "cancelled");
+    assert.equal(
+      run.sessions.some((session) =>
+        FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
+      ),
+      false,
+    );
+    assert.equal(run.featureGraphBaselineChecks.length, 0);
+    assert.equal(run.featureExecutionSignals.length, 0);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("feature graph corrects an unknown baseline to the passed readiness command and cwd", async () => {
+  const run = harness({
+    readinessGraphBaseline: true,
+    unknownGraphBaselineOnce: true,
+  });
+  const runId = run.controller.start(request());
+  try {
+    await waitForControllerState(run, runId, featureAuditReady);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "running");
+    assert.equal(snapshot?.stage, "audit");
+    assert.deepEqual(run.featureGraphBaselineChecks, [
+      [{ command: PLANNING_READINESS_COMMAND, cwd: "." }],
+    ]);
+    const finalizer = run.sessions.find(
+      (session) => session.spec.role === FEATURE_FINALIZER_ROLE,
+    );
+    assert.ok(finalizer);
+    assert.equal(finalizer.sends.length, 4);
+    assert.equal(run.featureExecutionSignals.length, 1);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("feature graph rejects an unknown baseline after the existing correction budget", async () => {
+  const run = harness({
+    readinessGraphBaseline: true,
+    unknownGraphBaselineAlways: true,
+  });
+  const runId = run.controller.start(request());
+  try {
+    await waitForHandoff(run, runId);
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "failed");
+    assert.equal(snapshot?.stage, "plan");
+    assert.match(snapshot?.error ?? "", /rejected settled turn 4/);
+    const finalizer = run.sessions.find(
+      (session) => session.spec.role === FEATURE_FINALIZER_ROLE,
+    );
+    assert.ok(finalizer);
+    assert.equal(finalizer.sends.length, 5);
+    assert.equal(run.featureGraphBaselineChecks.length, 0);
+    assert.equal(run.featureExecutionSignals.length, 0);
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+  }
+});
+
 test("programmatic feature discovery retries one malformed report in the same session", async () => {
   const run = harness({
     autoCompleteFeatureDiscovery: false,
     autoCompleteFeaturePlanning: false,
   });
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureDiscoveryReady);
 
   for (const role of [
     "discover-outcome",
@@ -2556,7 +3225,18 @@ test("programmatic feature discovery retries one malformed report in the same se
     type: "settled",
     outcome: { type: "completed", finalText: "not-json" },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.status === "running" &&
+      snapshot.stage === "discover" &&
+      problem.sends.length === 1 &&
+      snapshot.agents.some(
+        (agent) =>
+          agent.role === "discover-problem" && agent.status === "running",
+      ),
+  );
 
   assert.equal(run.controller.get(runId)?.stage, "discover");
   assert.equal(problem.sends.length, 1);
@@ -2567,7 +3247,15 @@ test("programmatic feature discovery retries one malformed report in the same se
       finalText: reportForRole("discover-problem"),
     },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.status === "running" &&
+      snapshot.stage === "plan" &&
+      snapshot.agents.length === 8 &&
+      hasAgentRoles(snapshot, [FEATURE_FINALIZER_ROLE, ...FEATURE_PLAN_ROLES]),
+  );
 
   assert.equal(run.controller.get(runId)?.stage, "plan");
   assert.equal(
@@ -2585,7 +3273,7 @@ test("feature discovery uses independent correction counters and fails on reject
     autoCompleteFeaturePlanning: false,
   });
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureDiscoveryReady);
 
   for (const role of [
     "discover-outcome",
@@ -2611,7 +3299,18 @@ test("feature discovery uses independent correction counters and fails on reject
         finalText: `not-json-${rejection}`,
       },
     });
-    await settleInitialization();
+    await waitForControllerState(
+      run,
+      runId,
+      (snapshot) =>
+        snapshot.status === "running" &&
+        snapshot.stage === "discover" &&
+        problem.sends.length === rejection &&
+        snapshot.agents.some(
+          (agent) =>
+            agent.role === "discover-problem" && agent.status === "running",
+        ),
+    );
     assert.equal(run.controller.get(runId)?.status, "running");
     assert.equal(run.controller.get(runId)?.stage, "discover");
     assert.equal(problem.sends.length, rejection);
@@ -2622,7 +3321,11 @@ test("feature discovery uses independent correction counters and fails on reject
     type: "settled",
     outcome: { type: "completed", finalText: "fourth-invalid-report" },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) => snapshot.status === "failed",
+  );
 
   assert.equal(run.controller.get(runId)?.status, "failed");
   assert.match(
@@ -2655,7 +3358,6 @@ test("dashboard cancellation of a starting run prevents its root prompt", async 
 
   releaseRoot();
   await cancellation;
-  await settleInitialization();
   await waitForHandoff(run, runId);
 
   assert.equal(run.sessions.length, 1);
@@ -2678,7 +3380,7 @@ test("dashboard cancellation of a starting run prevents its root prompt", async 
 test("root tools are run-scoped and feature discovery children are read-only", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
 
   assert.equal(run.controller.get(runId)?.agents.length, 9);
   assert.deepEqual(run.rootToolNames, [
@@ -2743,7 +3445,7 @@ test("terminal evidence is durable, bounded, and ignores late terminal events", 
   });
 
   try {
-    await settleInitialization();
+    await waitForControllerState(run, runId, planCompleted);
     const handoff = await waitForHandoff(run, runId);
     assert.equal(handoff.evidenceIncomplete, false);
     assert.ok(handoff.evidence);
@@ -2822,7 +3524,6 @@ test("terminal evidence is durable, bounded, and ignores late terminal events", 
         finalText: "late duplicate terminal event",
       },
     });
-    await settleInitialization();
     assert.equal(run.handoffs.length, handoffCount);
   } finally {
     await run.controller.dispose();
@@ -2915,7 +3616,6 @@ test("REV-001 waits for root pipeline_complete settlement before immutable evide
     const handoffBeforeLateEvents = structuredClone(handoff);
     emitCompletionResult(rootSession, "pipeline-complete-1");
     emitCompletionSettlement(rootSession);
-    await settleInitialization();
     assert.equal(run.handoffs.length, 1);
     assert.deepEqual(run.handoffs[0], handoffBeforeLateEvents);
     const rereadEvidence = requireArtifactPage(
@@ -2980,7 +3680,6 @@ test("REV-001 marks stalled terminal observation incomplete at the cleanup bound
     );
 
     emitCompletionSettlement(rootSession);
-    await settleInitialization();
     assert.equal(run.handoffs.length, 1);
   } finally {
     await run.controller.dispose();
@@ -3186,7 +3885,7 @@ test("small-feature Luna root and audit Lunas are read-only while the implemente
 test("roles select fixed models, remain direct root children, and record attempts", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   const rootId = run.controller.get(runId)?.rootId;
   assert.ok(rootId);
 
@@ -3239,7 +3938,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     ...nonFeatureRequest("small-feature-pipeline"),
     gitCommit: false,
   });
-  await settleInitialization();
+  await waitForControllerState(run, runId, smallFeatureReady);
 
   const initial = run.controller.get(runId);
   assert.equal(initial?.stage, "build");
@@ -3385,6 +4084,7 @@ test("feature audits and the embedded Luna segment receive captured fresh Git ev
   execFileSync("git", ["config", "user.name", "Test"], {
     cwd: workingDir,
   });
+  ensurePlanningReadinessFixture(workingDir);
   fs.mkdirSync(path.join(workingDir, "src"));
   fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "before\n");
   execFileSync("git", ["add", "."], { cwd: workingDir });
@@ -3396,7 +4096,7 @@ test("feature audits and the embedded Luna segment receive captured fresh Git ev
 
   const run = harness();
   const runId = run.controller.start(request(workingDir));
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "after\n");
   run.controller.setStage(runId, "audit");
   await Promise.all(
@@ -3456,7 +4156,7 @@ test("small-feature Luna audits receive the captured base, implementation report
     ...nonFeatureRequest("small-feature-pipeline", workingDir),
     gitCommit: false,
   });
-  await settleInitialization();
+  await waitForControllerState(run, runId, smallFeatureReady);
   fs.writeFileSync(path.join(workingDir, "src", "feature.ts"), "committed\n");
   execFileSync("git", ["add", "src/feature.ts"], { cwd: workingDir });
   execFileSync("git", ["commit", "-qm", "implementation commit"], {
@@ -3518,7 +4218,7 @@ test("small-feature-pipeline fails closed on a malformed implementation report",
     ...nonFeatureRequest("small-feature-pipeline"),
     gitCommit: false,
   });
-  await settleInitialization();
+  await waitForControllerState(run, runId, smallFeatureReady);
   const implementer = await run.controller.spawnChild(
     runId,
     "implement-small-feature",
@@ -3533,7 +4233,11 @@ test("small-feature-pipeline fails closed on a malformed implementation report",
   });
 
   await run.controller.waitForChildren(runId, [implementer.id]);
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) => snapshot.status === "failed",
+  );
   await waitForHandoff(run, runId);
 
   assert.equal(run.controller.get(runId)?.status, "failed");
@@ -3554,7 +4258,7 @@ test("small-feature-pipeline fails closed on a malformed Luna audit report", asy
     ...nonFeatureRequest("small-feature-pipeline"),
     gitCommit: false,
   });
-  await settleInitialization();
+  await waitForControllerState(run, runId, smallFeatureReady);
   const implementer = await run.controller.spawnChild(
     runId,
     SMALL_FEATURE_IMPLEMENTER_ROLE,
@@ -3574,7 +4278,11 @@ test("small-feature-pipeline fails closed on a malformed Luna audit report", asy
   });
 
   await run.controller.waitForChildren(runId, [auditor.id]);
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) => snapshot.status === "failed",
+  );
   await waitForHandoff(run, runId);
 
   assert.equal(run.controller.get(runId)?.status, "failed");
@@ -3587,7 +4295,7 @@ test("small-feature-pipeline fails closed on a malformed Luna audit report", asy
 test("successful audit fan-in atomically enters audit-resolve", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   run.controller.setStage(runId, "audit");
   const auditRoles = STATIC_LUNA_AUDIT_ROLES;
   const children = await Promise.all(
@@ -3620,7 +4328,7 @@ test("successful audit fan-in atomically enters audit-resolve", async () => {
 test("child wait delivers the validated final audit report even when synthesis finalText is empty", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   await finishEmbeddedAudit(run, runId, false);
 
   const synthesizer = run.controller.agentView
@@ -3651,7 +4359,7 @@ test("child wait delivers the validated final audit report even when synthesis f
 test("child wait joins the active audit pump before delivering final synthesis", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   run.controller.setStage(runId, "final-audit");
   await run.controller.startFinalAudit(runId, {
     acceptanceContract: "The approved feature contract",
@@ -3661,7 +4369,17 @@ test("child wait joins the active audit pump before delivering final synthesis",
 
   const firstRole = AUDIT_SEGMENT_LUNA_ROLES[0];
   settleRole(run, firstRole);
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.auditSegment?.acceptedReportCount === 1 &&
+      snapshot.auditSegment.reducerStatus === "busy" &&
+      snapshot.agents.some(
+        (agent) =>
+          agent.role === "audit-synthesis" && agent.status === "running",
+      ),
+  );
   for (const role of AUDIT_SEGMENT_LUNA_ROLES.slice(1)) settleRole(run, role);
 
   const synthesisSession = run.sessions.find(
@@ -3675,7 +4393,18 @@ test("child wait joins the active audit pump before delivering final synthesis",
       finalText: synthesisReport("audit-synthesis-intermediate", [firstRole]),
     },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.auditSegment?.acceptedReportCount ===
+        AUDIT_SEGMENT_LUNA_ROLES.length &&
+      snapshot.auditSegment.integratedReportCount === 1 &&
+      snapshot.agents.some(
+        (agent) =>
+          agent.role === "audit-synthesis" && agent.status === "running",
+      ),
+  );
 
   const synthesisNode = run.controller.agentView
     .list()
@@ -3728,7 +4457,7 @@ test("child wait joins the active audit pump before delivering final synthesis",
 test("controller-owned audit tracks do not report false finalText contract violations", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   await finishEmbeddedAudit(run, runId, false);
 
   const track = [...run.controller.agentView.list()]
@@ -3754,7 +4483,7 @@ test("controller-owned audit tracks do not report false finalText contract viola
 test("embedded roots cannot cancel a busy controller-owned audit synthesizer", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   run.controller.setStage(runId, "final-audit");
   const agents = await run.controller.startFinalAudit(runId, {
     acceptanceContract: "approved contract",
@@ -3763,7 +4492,22 @@ test("embedded roots cannot cancel a busy controller-owned audit synthesizer", a
   });
   const firstRole = STATIC_LUNA_AUDIT_ROLES[0];
   settleRole(run, firstRole);
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.auditSegment?.acceptedReportCount === 1 &&
+      snapshot.auditSegment.reducerStatus === "busy" &&
+      snapshot.agents.some(
+        (agent) =>
+          agent.role === "audit-synthesis" && agent.status === "running",
+      ) &&
+      run.sessions.some(
+        (session) =>
+          session.spec.role === "audit-synthesis" && session.sends.length === 1,
+      ),
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
   const synthesizer = agents.find((agent) => agent.role === "audit-synthesis");
   assert.ok(synthesizer);
   const synthesisSession = run.sessions.find(
@@ -3773,7 +4517,11 @@ test("embedded roots cannot cancel a busy controller-owned audit synthesizer", a
   assert.equal(synthesisSession.sends.length, 1);
 
   settleRole(run, STATIC_LUNA_AUDIT_ROLES[1]);
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) => snapshot.auditSegment?.pendingReportCount === 1,
+  );
   assert.equal(run.controller.get(runId)?.auditSegment?.pendingReportCount, 1);
   await assert.rejects(
     run.controller.cancelChild(runId, synthesizer.id),
@@ -3791,7 +4539,7 @@ test("embedded roots cannot cancel a busy controller-owned audit synthesizer", a
 test("a settled child can be retried in its existing session", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   run.controller.setStage(runId, "audit");
   const child = await run.controller.spawnChild(
     runId,
@@ -3827,7 +4575,7 @@ test("a settled child can be retried in its existing session", async () => {
 test("persistent Luna session survives idle remediation turns", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   const rootId = run.controller.get(runId)?.rootId;
   assert.ok(rootId);
   const rootSession = run.sessions.find(
@@ -3840,7 +4588,15 @@ test("persistent Luna session survives idle remediation turns", async () => {
   assert.equal(run.controller.agentView.get(rootId)?.status, "idle");
 
   run.controller.agentView.requestSend(rootId, "Resolve the audit reports");
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      rootSession.sends.length === 2 &&
+      snapshot.agents.some(
+        (agent) => agent.id === rootId && agent.status === "running",
+      ),
+  );
   assert.equal(rootSession.sends.length, 2);
   assert.equal(rootSession.sends.at(-1), "Resolve the audit reports");
   assert.equal(
@@ -3856,7 +4612,7 @@ test("persistent Luna session survives idle remediation turns", async () => {
 test("completion is rejected while a child is still active", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   run.controller.setStage(runId, "audit");
   await run.controller.spawnChild(runId, "audit-feature-outcome");
   const facts = {
@@ -3882,7 +4638,7 @@ test("completion is rejected while a child is still active", async () => {
 test("dashboard cancellation of an idle root cancels the run and active children", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   const rootId = run.controller.get(runId)?.rootId;
   assert.ok(rootId);
   const rootSession = run.sessions.find(
@@ -3926,13 +4682,14 @@ test("feature completion appends committed and dirty Git facts without readiness
   execFileSync("git", ["config", "user.name", "Test"], {
     cwd: workingDir,
   });
+  ensurePlanningReadinessFixture(workingDir);
   fs.writeFileSync(path.join(workingDir, "feature.txt"), "base\n");
   execFileSync("git", ["add", "."], { cwd: workingDir });
   execFileSync("git", ["commit", "-qm", "baseline"], { cwd: workingDir });
 
   const run = harness();
   const runId = run.controller.start(request(workingDir));
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   const facts = {
     outcome: "Feature behavior implemented",
     changedPaths: ["feature.txt"],
@@ -3991,7 +4748,6 @@ test("feature completion appends committed and dirty Git facts without readiness
     ],
   };
   completeSyntheticRoot(run, runId, resolvedFacts, "pipeline-complete-git");
-  await settleInitialization();
   await waitForHandoff(run, runId);
 
   assert.equal(run.handoffs.length, 1);
@@ -4051,7 +4807,7 @@ test("plan-pipeline uses six Luna discoveries and one xhigh synthesis for termin
     gitCommit: false,
     planPath: null,
   });
-  await settleInitialization();
+  await waitForControllerState(run, runId, planCompleted);
   await waitForHandoff(run, runId);
   const snapshot = run.controller.get(runId);
   assert.equal(snapshot?.status, "completed");
@@ -4092,7 +4848,7 @@ test("plan-pipeline freezes accepted typed discovery sessions while whole-run ca
     gitCommit: false,
     planPath: null,
   });
-  await settleInitialization();
+  await waitForControllerState(run, runId, planDiscoveryReady);
 
   const acceptedSession = run.sessions.find(
     (session) => session.spec.role === PLAN_PIPELINE_DISCOVERY_ROLES[0],
@@ -4105,7 +4861,18 @@ test("plan-pipeline freezes accepted typed discovery sessions while whole-run ca
     type: "settled",
     outcome: { type: "completed", finalText: "" },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.status === "running" &&
+      snapshot.stage === "discover" &&
+      snapshot.agents.length === 7 &&
+      snapshot.agents.some(
+        (agent) =>
+          agent.role === acceptedSession.spec.role && agent.status === "done",
+      ),
+  );
 
   const acceptedNode = run.controller
     .get(runId)
@@ -4128,7 +4895,16 @@ test("plan-pipeline freezes accepted typed discovery sessions while whole-run ca
     "Restart accepted discovery",
   );
   run.controller.agentView.requestCancel(acceptedNode.id);
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.agents.some(
+        (agent) => agent.id === acceptedNode.id && agent.status === "done",
+      ) &&
+      acceptedSession.sends.length === sendsBefore &&
+      acceptedSession.interrupted === interruptsBefore,
+  );
   assert.equal(acceptedSession.sends.length, sendsBefore);
   assert.equal(acceptedSession.interrupted, interruptsBefore);
 
@@ -4146,7 +4922,7 @@ test("plan-pipeline corrects malformed discovery and synthesis turns in place", 
     gitCommit: false,
     planPath: null,
   });
-  await settleInitialization();
+  await waitForControllerState(run, runId, planDiscoveryReady);
   const discovery = PLAN_PIPELINE_DISCOVERY_ROLES.map((role) => {
     const child = run.controller
       .get(runId)
@@ -4175,7 +4951,20 @@ test("plan-pipeline corrects malformed discovery and synthesis turns in place", 
         },
       });
   }
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.status === "running" &&
+      snapshot.stage === "discover" &&
+      snapshot.agents.some(
+        (agent) => agent.role === malformed.role && agent.status === "running",
+      ) &&
+      run.sessions.some(
+        (session) =>
+          session.spec.role === malformed.role && session.sends.length === 1,
+      ),
+  );
   const malformedSession = run.sessions.find(
     (session) => session.spec.role === malformed.role,
   );
@@ -4191,7 +4980,16 @@ test("plan-pipeline corrects malformed discovery and synthesis turns in place", 
       ),
     },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.status === "running" &&
+      snapshot.stage === "synthesize" &&
+      snapshot.agents.some(
+        (agent) => agent.role === PLAN_PIPELINE_SYNTHESIS_ROLE,
+      ),
+  );
   assert.equal(run.controller.get(runId)?.stage, "synthesize");
 
   const synthesis = run.sessions.find(
@@ -4202,13 +5000,24 @@ test("plan-pipeline corrects malformed discovery and synthesis turns in place", 
     type: "settled",
     outcome: { type: "completed", finalText: " " },
   });
-  await settleInitialization();
+  await waitForControllerState(
+    run,
+    runId,
+    (snapshot) =>
+      snapshot.status === "running" &&
+      snapshot.stage === "synthesize" &&
+      synthesis.sends.length === 2 &&
+      snapshot.agents.some(
+        (agent) =>
+          agent.role === PLAN_PIPELINE_SYNTHESIS_ROLE &&
+          agent.status === "running",
+      ),
+  );
   assert.equal(synthesis.sends.length, 2);
   synthesis.emit({
     type: "settled",
     outcome: { type: "completed", finalText: "# Corrected plan" },
   });
-  await settleInitialization();
   await waitForHandoff(run, runId);
   assert.equal(run.controller.get(runId)?.status, "completed");
   assert.equal(run.handoffs[0]?.facts.plan, "# Corrected plan");
@@ -4225,7 +5034,7 @@ test("plan-pipeline writes exact accepted bytes to arbitrary safe destinations",
     gitCommit: false,
     planPath: relativePath,
   });
-  await settleInitialization();
+  await waitForControllerState(run, runId, planCompleted);
   await waitForHandoff(run, runId);
   const snapshot = run.controller.get(runId);
   const outputPath = path.join(workingDir, relativePath);
@@ -4243,7 +5052,7 @@ test("plan-pipeline writes exact accepted bytes to arbitrary safe destinations",
     gitCommit: false,
     planPath: absolutePath,
   });
-  await settleInitialization();
+  await waitForControllerState(run, absoluteRunId, planCompleted);
   const absoluteSnapshot = run.controller.get(absoluteRunId);
   assert.equal(absoluteSnapshot?.completion?.planPath, "absolute.plan");
   assert.equal(
@@ -4286,7 +5095,7 @@ test("plan-pipeline rejects omitted and escaping output paths before a run", asy
 test("pipeline inspection does not mutate lifecycle state or consume the automatic handoff", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   const facts = {
     outcome: "Feature behavior implemented",
     changedPaths: ["src/feature.ts"],
@@ -4299,7 +5108,6 @@ test("pipeline inspection does not mutate lifecycle state or consume the automat
   };
   await finishEmbeddedAudit(run, runId);
   completeSyntheticRoot(run, runId, facts, "pipeline-complete-inspection");
-  await settleInitialization();
   await waitForHandoff(run, runId);
   const before = structuredClone(run.controller.get(runId));
   assert.equal(run.handoffs.length, 1);
@@ -4324,7 +5132,7 @@ test("pipeline inspection does not mutate lifecycle state or consume the automat
 test("pipeline inspection compactly represents every controller-reachable settled attempt", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
 
   run.controller.setStage(runId, "audit");
   for (let attempt = 1; attempt <= 300; attempt++) {
@@ -4357,7 +5165,7 @@ test("pipeline inspection compactly represents every controller-reachable settle
 test("unknown IDs fail closed and cancellation/disposal stop active sessions", async () => {
   const run = harness();
   const runId = run.controller.start(request());
-  await settleInitialization();
+  await waitForControllerState(run, runId, featureAuditReady);
   run.controller.setStage(runId, "audit");
   const child = await run.controller.spawnChild(
     runId,
@@ -4398,13 +5206,26 @@ test("pipeline roots and children do not apply direct-subagent capacity limits",
       planPath: null,
     }),
   );
-  await settleInitialization();
+  await Promise.all(
+    ids.map((id) =>
+      waitForControllerState(
+        run,
+        id,
+        (snapshot) =>
+          snapshot.status === "starting" &&
+          snapshot.agents.length === 1 &&
+          snapshot.agents[0]?.status === "starting",
+      ),
+    ),
+  );
   assert.equal(
     ids.every((id) => run.controller.get(id)?.status === "starting"),
     true,
   );
   releaseRoot();
-  await settleInitialization();
+  await Promise.all(
+    ids.map((id) => waitForControllerState(run, id, planDiscoveryReady)),
+  );
   assert.equal(
     ids.every((id) => run.controller.get(id)?.status === "running"),
     true,

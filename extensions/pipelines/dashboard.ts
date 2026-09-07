@@ -73,6 +73,7 @@ export type PipelineRow =
       readonly status?: NonNullable<
         PipelineRunSnapshot["featureGraph"]
       >["tasks"][number]["status"];
+      readonly planningReadinessStatus?: "passed" | "failed";
     }
   | {
       readonly key: string;
@@ -88,6 +89,37 @@ export type PipelineRow =
 
 function stageLabel(stage: DashboardStage) {
   return stage === "complete" ? "completion stage" : stage;
+}
+
+function planningReadinessStatus(status: "passed" | "failed") {
+  return status === "failed" ? "FAILED before implementation" : status;
+}
+
+function planningReadinessExitCode(exitCode: number | null) {
+  return exitCode === null ? "unknown" : String(exitCode);
+}
+
+function planningReadinessSummary(run: PipelineRunSnapshot) {
+  const checks = run.planningReadiness;
+  if (!checks?.length) return "";
+  return ` · readiness:${checks
+    .map((check) => planningReadinessStatus(check.status))
+    .join(",")}`;
+}
+
+function planningReadinessRowLabel(
+  check: NonNullable<PipelineRunSnapshot["planningReadiness"]>[number],
+) {
+  return [
+    "Planning readiness",
+    "discovery",
+    planningReadinessStatus(check.status),
+    `workspaceRoot: ${check.workspaceRoot}`,
+    `cwd: ${check.cwd}`,
+    `command: ${check.command}`,
+    `source.path: ${check.source.path}`,
+    `exitCode: ${planningReadinessExitCode(check.exitCode)}`,
+  ].join(" · ");
 }
 
 function dashboardStages(run: PipelineRunSnapshot) {
@@ -254,7 +286,7 @@ export function buildPipelineRows(
         key: `run:${run.id}`,
         kind: "run",
         depth: 1,
-        label: `${expanded ? "▾" : "▸"} ${run.id} · ${run.status} · impl:${run.acceptance?.implementationAcceptance.status ?? "unavailable"} exec:${run.acceptance?.pipelineExecutionAcceptance.status ?? "unavailable"} · ${run.workingDir}`,
+        label: `${expanded ? "▾" : "▸"} ${run.id} · ${run.status}${planningReadinessSummary(run)} · impl:${run.acceptance?.implementationAcceptance.status ?? "unavailable"} exec:${run.acceptance?.pipelineExecutionAcceptance.status ?? "unavailable"} · ${run.workingDir}`,
         runId: run.id,
         status: run.status,
         expanded,
@@ -294,6 +326,18 @@ export function buildPipelineRows(
           status,
           agentId: stageAgentId(run, stage, root, children),
         });
+        if (stage === "discover" && run.planningReadiness?.length) {
+          for (const [index, check] of run.planningReadiness.entries()) {
+            rows.push({
+              key: `planning-readiness:${run.id}:${index}`,
+              kind: "boundary",
+              depth: 3,
+              label: planningReadinessRowLabel(check),
+              runId: run.id,
+              planningReadinessStatus: check.status,
+            });
+          }
+        }
         if (stage === "plan" && run.featureGraph) {
           for (const phase of ["canonical", "graph"] as const) {
             rows.push({
@@ -412,6 +456,9 @@ export function togglePipelineRunExpansion(
 export function glyphStatusForPipelineRow(row: PipelineRow) {
   if (row.kind === "task")
     return row.status ? featureTaskGlyph(row.status) : undefined;
+  if (row.kind === "boundary" && row.planningReadinessStatus) {
+    return row.planningReadinessStatus === "failed" ? "error" : "done";
+  }
   if (row.kind === "run") {
     if (row.status === "completed") return "done";
     if (row.status === "failed") return "error";

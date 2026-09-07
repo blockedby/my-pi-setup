@@ -15,10 +15,15 @@ import {
   AUDIT_SYNTHESIS_ROLE,
   FEATURE_FINALIZER_ROLE,
   FEATURE_LOGIC_AUDIT_ROLE,
+  FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
+  FEATURE_PLAN_ROLES,
+  FINAL_AUDIT_ROLE,
   LUNA_MODEL,
+  PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
   PLAN_PIPELINE_SYNTHESIS_ROLE,
+  type PipelineDefinitionId,
   ASTRA_MODEL,
 } from "./domain.ts";
 import { ToolCallTimeoutError } from "../shared/tool-call-timeout.ts";
@@ -968,6 +973,320 @@ test("plan synthesis sessions expose only local reads and their terminating subm
   } finally {
     await session?.dispose();
     fauxProvider?.unregister();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("authorized context discovery exposes a usable readiness callback tool", async () => {
+  const fixture = await createFixture();
+  const provider = registerFauxProvider({
+    api: "feature-readiness-tool-test-api",
+    provider: "feature-readiness-tool-test-provider",
+    models: [
+      {
+        id: "gpt-5.6-luna",
+        name: "Feature readiness tool test",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32_000,
+        maxTokens: 4_000,
+      },
+    ],
+  });
+  const scopeId = "readiness-tool-authorized";
+  const input = {
+    command: "bun run check",
+    cwd: ".",
+    purpose: "validate repository checks",
+    source: {
+      path: "package.json",
+      excerpt: '"check": "bun run check"',
+    },
+  };
+  const fixtureFacts = {
+    ...input,
+    sourceHash: "a".repeat(64),
+    workspaceRoot: fixture.cwd,
+    status: "passed" as const,
+    exitCode: 0,
+    stdout: "controller stdout",
+    stderr: "",
+    startedAt: 10,
+    finishedAt: 11,
+  };
+  const callbackCalls: Array<{
+    readonly runId: string;
+    readonly role: string;
+    readonly token: string;
+    readonly input: unknown;
+    readonly signal?: AbortSignal;
+  }> = [];
+  let discoveryToken: string | undefined;
+  let sdkSession: AgentSession | undefined;
+  let session:
+    | Awaited<
+        ReturnType<ReturnType<typeof createPipelineSessionFactory>["create"]>
+      >
+    | undefined;
+
+  try {
+    const factory = createPipelineSessionFactory({
+      modelRegistry: { find: () => provider.getModel() },
+      parentCwd: fixture.root,
+      parentTrusted: false,
+      agentDir: fixture.agentDir,
+      sessionManager: (cwd) => SessionManager.inMemory(cwd),
+      sessionCreated(created) {
+        sdkSession = created;
+      },
+      rootTools: () => [],
+      definitionForRun: () => FEATURE_PIPELINE_ID,
+      discoverySubmit() {},
+      discoverySessionCreated(runId, role, token) {
+        if (runId === scopeId && role === "discover-context")
+          discoveryToken = token;
+      },
+      discoveryToolAllowed(runId, role) {
+        assert.equal(runId, scopeId);
+        assert.equal(role, "discover-context");
+        return true;
+      },
+      planningReadinessCheck(runId, role, token, receivedInput, signal) {
+        callbackCalls.push({
+          runId,
+          role,
+          token,
+          input: receivedInput,
+          signal,
+        });
+        return Promise.resolve(fixtureFacts);
+      },
+    });
+    session = await factory.create({
+      scopeId,
+      parentId: "pipeline-root",
+      role: "discover-context",
+      attempt: 1,
+      title: "Authorized context discovery",
+      model: LUNA_MODEL,
+      thinkingLevel: "medium",
+      cwd: fixture.cwd,
+      prompt: "",
+      deferPrompt: true,
+    });
+
+    assert.ok(sdkSession);
+    assert.ok(discoveryToken);
+    assert.equal(
+      session.activeTools.includes("pipeline_discovery_submit"),
+      true,
+    );
+    assert.equal(
+      session.activeTools.includes("pipeline_feature_readiness_check"),
+      true,
+    );
+    const readiness = sdkSession.getToolDefinition(
+      "pipeline_feature_readiness_check",
+    );
+    assert.ok(readiness);
+    assert.equal(Value.Check(readiness.parameters, input), true);
+
+    const controller = new AbortController();
+    const result = await readiness.execute(
+      "readiness-check",
+      input,
+      controller.signal,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
+    );
+
+    assert.equal(callbackCalls.length, 1);
+    const callbackCall = callbackCalls[0];
+    assert.ok(callbackCall);
+    assert.equal(callbackCall.runId, scopeId);
+    assert.equal(callbackCall.role, "discover-context");
+    assert.equal(callbackCall.token, discoveryToken);
+    assert.deepEqual(callbackCall.input, input);
+    assert.ok(callbackCall.signal);
+    assert.equal(callbackCall.signal.aborted, false);
+    controller.abort();
+    assert.equal(callbackCall.signal.aborted, true);
+    assert.deepEqual(result.details, fixtureFacts);
+    const resultText = result.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+    assert.deepEqual(JSON.parse(resultText), fixtureFacts);
+  } finally {
+    await session?.dispose();
+    provider.unregister();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("readiness callback tool is absent outside authorized feature context discovery", async () => {
+  const fixture = await createFixture();
+  const provider = registerFauxProvider({
+    api: "feature-readiness-boundary-test-api",
+    provider: "feature-readiness-boundary-test-provider",
+    models: [
+      {
+        id: "gpt-5.6-luna",
+        name: "Feature readiness boundary test",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32_000,
+        maxTokens: 4_000,
+      },
+    ],
+  });
+  let definition: PipelineDefinitionId = FEATURE_PIPELINE_ID;
+  let gateAllowed = true;
+  let sdkSession: AgentSession | undefined;
+  const discoveryTokens = new Map<string, string>();
+  let readinessCallbackCalls = 0;
+  const taskHost = {
+    describe() {
+      return { workspaceRoot: fixture.cwd, checkIds: [] };
+    },
+    async diff() {
+      throw new Error("Unexpected task diff call.");
+    },
+    async check() {
+      throw new Error("Unexpected task check call.");
+    },
+    async finalize() {
+      throw new Error("Unexpected task finalize call.");
+    },
+  };
+
+  try {
+    const factory = createPipelineSessionFactory({
+      modelRegistry: { find: () => provider.getModel() },
+      parentCwd: fixture.root,
+      parentTrusted: false,
+      agentDir: fixture.agentDir,
+      sessionManager: (cwd) => SessionManager.inMemory(cwd),
+      sessionCreated(created) {
+        sdkSession = created;
+      },
+      rootTools: () => [],
+      definitionForRun: () => definition,
+      discoverySubmit() {},
+      discoverySessionCreated(runId, _role, token) {
+        discoveryTokens.set(runId, token);
+      },
+      discoveryToolAllowed() {
+        return gateAllowed;
+      },
+      planningReadinessCheck: async () => {
+        readinessCallbackCalls++;
+        throw new Error("Unexpected readiness callback call.");
+      },
+      featureTaskHost: (_runId, role) =>
+        role.startsWith("feature-task-") ? taskHost : undefined,
+    });
+    const assertAbsent = async (
+      scopeId: string,
+      role: string,
+      nextDefinition: PipelineDefinitionId,
+      isRoot = false,
+    ) => {
+      definition = nextDefinition;
+      const created = await factory.create({
+        scopeId,
+        ...(isRoot ? {} : { parentId: "pipeline-root" }),
+        role,
+        attempt: 1,
+        title: `Readiness boundary ${role}`,
+        model: LUNA_MODEL,
+        thinkingLevel: "medium",
+        cwd: fixture.cwd,
+        prompt: "",
+        deferPrompt: true,
+      });
+      try {
+        assert.ok(sdkSession);
+        const label = `${nextDefinition}:${role}`;
+        assert.equal(
+          created.activeTools.includes("pipeline_feature_readiness_check"),
+          false,
+          label,
+        );
+        assert.equal(
+          sdkSession.getToolDefinition("pipeline_feature_readiness_check"),
+          undefined,
+          label,
+        );
+      } finally {
+        await created.dispose();
+      }
+    };
+
+    gateAllowed = false;
+    await assertAbsent(
+      "unauthorized-context",
+      "discover-context",
+      FEATURE_PIPELINE_ID,
+    );
+    assert.equal(discoveryTokens.has("unauthorized-context"), false);
+    gateAllowed = true;
+
+    for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) {
+      if (role === "discover-context") continue;
+      const scopeId = `other-discovery-${role}`;
+      await assertAbsent(scopeId, role, FEATURE_PIPELINE_ID);
+      assert.ok(discoveryTokens.get(scopeId));
+    }
+    for (const role of FEATURE_PLAN_ROLES) {
+      const scopeId = `candidate-${role}`;
+      await assertAbsent(scopeId, role, FEATURE_PIPELINE_ID);
+      assert.ok(discoveryTokens.get(scopeId));
+    }
+    await assertAbsent(
+      "canonical-plan",
+      FEATURE_FINALIZER_ROLE,
+      FEATURE_PIPELINE_ID,
+    );
+    assert.ok(discoveryTokens.get("canonical-plan"));
+
+    await assertAbsent(
+      "feature-task",
+      "feature-task-docs",
+      FEATURE_PIPELINE_ID,
+    );
+    for (const role of [FEATURE_LOGIC_AUDIT_ROLE, AUDIT_SYNTHESIS_ROLE]) {
+      await assertAbsent(`audit-${role}`, role, FEATURE_PIPELINE_ID);
+    }
+    for (const role of PLAN_PIPELINE_DISCOVERY_ROLES) {
+      const scopeId = `plan-${role}`;
+      await assertAbsent(scopeId, role, PLAN_PIPELINE_ID);
+      assert.ok(discoveryTokens.get(scopeId));
+    }
+    await assertAbsent(
+      "plan-synthesis",
+      PLAN_PIPELINE_SYNTHESIS_ROLE,
+      PLAN_PIPELINE_ID,
+      true,
+    );
+    assert.ok(discoveryTokens.get("plan-synthesis"));
+
+    await assertAbsent(
+      "direct-final-audit",
+      FINAL_AUDIT_ROLE,
+      FEATURE_PIPELINE_ID,
+    );
+    await assertAbsent(
+      "direct-root",
+      "pipeline-root",
+      FEATURE_PIPELINE_ID,
+      true,
+    );
+    assert.equal(readinessCallbackCalls, 0);
+  } finally {
+    provider.unregister();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });

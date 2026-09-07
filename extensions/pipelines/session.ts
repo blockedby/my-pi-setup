@@ -67,6 +67,11 @@ import {
   type TaskToolRoute,
 } from "./task-tool-contract.ts";
 import { featureDiscoveryReportSchema } from "./discovery-report.ts";
+import {
+  PlanningReadinessCheckSchema,
+  type PlanningReadinessCheck,
+} from "./planning-readiness.ts";
+import type { PlanningReadinessResult } from "./domain.ts";
 import { planDiscoveryReportSchema } from "./plan-discovery-report.ts";
 import {
   FEATURE_DISCOVERY_SYNTHESIS_ROLE,
@@ -126,6 +131,13 @@ interface PipelineSessionFactoryOptions {
     token: string,
   ) => void;
   readonly discoveryToolAllowed?: (runId: string, role: string) => boolean;
+  readonly planningReadinessCheck?: (
+    runId: string,
+    role: string,
+    token: string,
+    input: PlanningReadinessCheck,
+    signal?: AbortSignal,
+  ) => Promise<PlanningReadinessResult>;
   /** Phase-bound host authority for dynamic feature tasks and final Astra review. */
   readonly featureTaskHost?: (
     runId: string,
@@ -873,7 +885,35 @@ export function createPipelineSessionFactory(
         : [];
       const artifactReadTools =
         options.artifactTools?.(spec.scopeId ?? "", spec.role) ?? [];
+      const readinessTool =
+        definition === FEATURE_PIPELINE_ID &&
+        spec.role === "discover-context" &&
+        discoveryToolAllowed &&
+        discoverySessionToken &&
+        options.planningReadinessCheck
+          ? defineTool({
+              name: "pipeline_feature_readiness_check",
+              label: "Check repository readiness",
+              description:
+                "Execute a source-confirmed existing repository check in the implementation worktree sandbox during discovery. Returns controller-observed results; never installs or changes tools to repair a failed check.",
+              parameters: PlanningReadinessCheckSchema,
+              async execute(_id, input, signal) {
+                const result = await options.planningReadinessCheck!(
+                  spec.scopeId ?? "",
+                  spec.role,
+                  discoverySessionToken,
+                  input,
+                  signal,
+                );
+                return {
+                  content: [{ type: "text", text: JSON.stringify(result) }],
+                  details: result,
+                };
+              },
+            })
+          : undefined;
       const sessionTools = [
+        ...(readinessTool ? [readinessTool] : []),
         ...artifactReadTools,
         ...(customTools ?? []),
         ...(featureBoundary?.tools ?? []),

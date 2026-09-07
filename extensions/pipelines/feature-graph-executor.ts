@@ -38,6 +38,11 @@ export type FeatureBranchStatus =
   | "failed"
   | "cancelled";
 
+export type FeaturePreparationCommandResult = Pick<
+  FeatureCheckResult,
+  "command" | "cwd" | "exitCode" | "stdout" | "stderr" | "error"
+>;
+
 export interface FeatureBranchSnapshot {
   readonly id: string;
   readonly parentId?: string;
@@ -52,6 +57,7 @@ export interface FeatureBranchSnapshot {
     readonly attempts: number;
     readonly complete: boolean;
     readonly baselinePaths: ReadonlyArray<string>;
+    readonly commands?: ReadonlyArray<FeaturePreparationCommandResult>;
     readonly error?: string;
   };
   readonly taskIds: ReadonlyArray<string>;
@@ -181,6 +187,7 @@ interface MutableBranchSnapshot {
     attempts: number;
     complete: boolean;
     baselinePaths: string[];
+    commands: FeaturePreparationCommandResult[];
     error?: string;
   };
   taskIds: string[];
@@ -286,6 +293,7 @@ function branchSnapshot(
       attempts: branch.preparationAttempts,
       complete: branch.prepared,
       baselinePaths: [...branch.preparationBaseline],
+      commands: [],
     },
     taskIds: [],
   };
@@ -297,6 +305,7 @@ function copyBranch(branch: MutableBranchSnapshot): FeatureBranchSnapshot {
     preparation: {
       ...branch.preparation,
       baselinePaths: [...branch.preparation.baselinePaths],
+      commands: branch.preparation.commands.map((command) => ({ ...command })),
     },
     taskIds: [...branch.taskIds],
   };
@@ -586,6 +595,7 @@ export async function executeFeatureGraph(
     updateBranch(branchId, attempted);
     for (const command of options.worktreePrepare ?? []) {
       if (signal.aborted) return "Feature branch preparation was cancelled.";
+      let recorded = false;
       try {
         const result = await runCheck({
           kind: "prepare",
@@ -594,6 +604,12 @@ export async function executeFeatureGraph(
           cwd: branch.worktree,
           signal,
         });
+        mutable.preparation.commands.push({
+          command,
+          cwd: branch.worktree,
+          ...result,
+        });
+        recorded = true;
         if (result.exitCode !== 0) {
           const detail = (result.stderr || result.stdout).slice(0, 16 * 1024);
           throw new Error(
@@ -602,6 +618,16 @@ export async function executeFeatureGraph(
         }
       } catch (error) {
         const message = boundedError(error);
+        if (!recorded) {
+          mutable.preparation.commands.push({
+            command,
+            cwd: branch.worktree,
+            exitCode: null,
+            stdout: "",
+            stderr: "",
+            ...(message ? { error: message } : {}),
+          });
+        }
         mutable.preparation.error = message;
         publish();
         return message;
