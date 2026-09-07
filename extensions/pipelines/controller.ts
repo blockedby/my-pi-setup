@@ -126,6 +126,7 @@ import {
   type PlanningReadinessCheck,
 } from "./planning-readiness.ts";
 import type { PlanningReadinessResult } from "./domain.ts";
+import { buildPlanningReadinessHandoff } from "./planning-readiness-handoff.ts";
 import {
   runFeatureSandboxCommand,
   cleanupFeatureSandboxRuntime,
@@ -322,6 +323,7 @@ interface MutableRun {
   planWrittenPath?: string;
   featureCaller?: FeatureCallerWorktree;
   planningReadiness?: PlanningReadinessResult[];
+  planningReadinessArtifactRevision?: number;
   readinessQueue?: Promise<void>;
   readinessRuntimeUsed?: boolean;
   featureSynthesisChecks: ReadonlyArray<string>;
@@ -1320,11 +1322,12 @@ export class PipelineController {
             throw new Error(
               "Planning readiness artifact store is unavailable.",
             );
-          await run.evidenceStore.writeSnapshot({
+          const artifact = await run.evidenceStore.writeSnapshot({
             artifactId: "planning-readiness",
             schemaVersion: 1,
             value: run.planningReadiness,
           });
+          run.planningReadinessArtifactRevision = artifact.revision;
         } catch (failure) {
           run.evidence?.markIncomplete(boundedPipelineError(failure));
           this.failRun(
@@ -2352,7 +2355,9 @@ export class PipelineController {
   }
 
   private planningReadinessHandoff(run: MutableRun) {
-    return `\n\nController-observed repository readiness (existing checks only; future task checks are separate):\n${JSON.stringify((run.planningReadiness ?? []).map(({ command, cwd, source, sourceHash, status, exitCode }) => ({ command, cwd, source: source.path, sourceHash, status, exitCode })))}`;
+    if (!run.planningReadinessArtifactRevision)
+      throw new Error("Planning readiness artifact revision is unavailable.");
+    return `\n\nController-observed repository readiness (existing checks only; future task checks are separate):\n${JSON.stringify(buildPlanningReadinessHandoff(run.id, run.planningReadiness ?? [], run.planningReadinessArtifactRevision))}`;
   }
 
   private assertPlanningBaselineChecks(

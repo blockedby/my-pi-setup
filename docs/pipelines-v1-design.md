@@ -110,15 +110,15 @@ discover → plan → build → review → audit → audit-resolve
   → final-audit → final-resolve → complete
 ```
 
-### Planning-time readiness (implementation intent; pending verification)
+### Planning-time readiness
 
 Feature planning adds a pre-submission readiness gate to discovery. The `discover-context` Luna inspects applicable repository instructions, scripts, and CI for existing noninteractive commands. Before submitting its one discovery report, it invokes the controller-only `pipeline_feature_readiness_check` with the verbatim `command`, repository-relative `cwd`, purpose, and `{path, excerpt}` source. The controller re-reads the exact caller-prepared implementation worktree, requires the source and cwd to resolve within that worktree, requires the source file to contain the exact excerpt identifying the command (decoding JSON escapes for declared package scripts, not rewriting the shell command), confirms the linked-worktree identity, and executes the command through the existing assigned-worktree sandbox.
 
-Each attempt records controller-observed status, exit code, worktree, source provenance, and bounded captured `stdout`/`stderr` in the revisioned `planning-readiness` artifact. A failed readiness command stops the run before candidate plans or build; discovery also stops before candidates/build when no check passed. Source/provenance, worktree, sandbox, and other environment errors remain distinct from a command that ran and returned a non-zero exit: both are factual diagnostics, not invented project findings or replacement instructions.
+Each attempt records controller-observed status, exit code, worktree, source provenance, and bounded captured `stdout`/`stderr` in the revisioned `planning-readiness` artifact. Planner prompts receive a factual JSON projection capped at 15 KiB, including diagnostics and warnings, explicit truncation indicators, and the actual immutable artifact revision. Available budget is used without dropping fitting output. A failed readiness command stops the run before candidate plans or build; discovery also stops before candidates/build when no check passed. Source/provenance, worktree, sandbox, and other environment errors remain distinct from a command that ran and returned a non-zero exit: both are factual diagnostics, not invented project findings or replacement instructions.
 
 Candidate graph `baselineChecks` are allowed only when each command and `cwd` matches a successful readiness record from discovery. Task checks and review checks remain later, separate checks; they cannot satisfy or rewrite the planning gate. This design adds no caller parameter and no `checkRef` registry, does not install/bootstrap dependencies or substitute tools, and does not expand sandbox, network, or Git authority. The existing runner caps each captured stream and marks truncation; diagnostics show the discovery/readiness stage, exact worktree, command, source, exit, and bounded stdout/stderr, with the artifact available for bounded retrieval. No unlimited/full-output guarantee is made.
 
-This section records implementation intent pending verification and makes no test, rollout, or merge-success claim.
+Verification and rollout evidence are recorded separately in `docs/pipi-setup-record.md`; this mechanism does not claim live-provider acceptance.
 
 The existing five discovery tracks produce validated repository evidence. Two independent Astra/low planners receive identical task, base, worktree and discovery context. Minimal favors the smallest complete repository-native solution; Robust emphasizes concrete correctness and recovery risks. Both must validate before synthesis. Neither sees the other's proposal.
 
