@@ -457,7 +457,7 @@ test("a failed provisional check is repaired by amending the same logical task c
   }
 });
 
-test("child preparation failures consume the first task budget and retry in the same worktree", async () => {
+test("child preparation failure stops before spending agent attempts", async () => {
   const repo = fixture();
   try {
     const task = graphTask("prepared-task");
@@ -479,51 +479,161 @@ test("child preparation failures consume the first task budget and retry in the 
       async runCheck(input) {
         if (input.kind === "prepare") {
           preparationAttempts += 1;
-          if (preparationAttempts === 4) {
-            fs.writeFileSync(
-              path.join(input.workspaceRoot, ".prepared"),
-              "environment\n",
-            );
-          }
-          return {
-            exitCode: preparationAttempts < 4 ? 1 : 0,
-            stdout: "",
-            stderr:
-              preparationAttempts < 4 ? "temporary preparation failure" : "",
-          };
+          return { exitCode: 1, stdout: "", stderr: "preparation unavailable" };
         }
         return passingCheck();
       },
-      async runSession(input) {
+      async runSession() {
         sessionAttempts += 1;
-        assert.equal(input.attempt, 4);
-        assert.equal(
-          input.capsule.graphContext.preparationBaseline.includes(".prepared"),
-          true,
-        );
-        const finalized = await input.tools.finalize({
-          commitPaths: [],
-          summary: "Dependencies already satisfy the prepared task.",
-        });
-        assert.equal(finalized.status, "satisfied_without_changes");
-        return { status: "settled", sessionId: "prepared-task-session" };
+        return { status: "settled" };
       },
     });
 
-    assert.equal(result.status, "completed");
-    assert.equal(result.tasks[0]!.status, "satisfied_without_changes");
-    assert.equal(preparationAttempts, 4);
-    assert.equal(sessionAttempts, 1);
-    assert.deepEqual(
-      result.tasks[0]!.attempts.map(({ status }) => status),
-      ["failed", "failed", "failed", "completed"],
-    );
-    assert.equal(result.branches[1]!.preparation.attempts, 4);
-    assert.equal(result.branches[1]!.preparation.complete, true);
+    assert.equal(result.status, "failed");
+    assert.equal(result.tasks[0]!.status, "failed");
+    assert.equal(preparationAttempts, 1);
+    assert.equal(sessionAttempts, 0);
+    assert.deepEqual(result.tasks[0]!.attempts, []);
+    assert.match(result.error!, /preparation unavailable/);
+    assert.equal(result.branches[1]!.preparation.attempts, 1);
+    assert.equal(result.branches[1]!.preparation.complete, false);
   } finally {
     repo.cleanup();
   }
 });
+
+test("baseline failure is reported before any task session or commit", async () => {
+  const repo = fixture();
+  try {
+    const task = graphTask("blocked-task");
+    let sessions = 0;
+    let checks = 0;
+    const head = git(repo.workingDir, ["rev-parse", "HEAD"]);
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([task]),
+      tree: { kind: "task", taskId: task.id },
+      async runCheck() {
+        checks++;
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: "dependency unavailable in sandbox",
+        };
+      },
+      async runSession() {
+        sessions++;
+        return { status: "settled" };
+      },
+    });
+    assert.equal(result.status, "failed");
+    assert.equal(sessions, 0);
+    assert.equal(checks, 1);
+    assert.equal(result.tasks[0]!.attempt, 0);
+    assert.deepEqual(result.tasks[0]!.attempts, []);
+    assert.equal(result.tasks[0]!.checks[0]!.exitCode, 1);
+    assert.match(result.error!, /dependency unavailable in sandbox/);
+    assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), head);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+function barrier() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+for (const validates of [false, true]) {
+  test(`baseline failure lets an active sibling settle (${validates ? "validated" : "provisional"}) without a new attempt`, async () => {
+    const repo = fixture();
+    const started = barrier();
+    const stopped = barrier();
+    const blocked = graphTask("blocked-branch");
+    const active = graphTask("active-branch");
+    let sessions = 0;
+    let lateCheck: (() => Promise<unknown>) | undefined;
+    try {
+      const result = await executeFeatureGraph({
+        runId: repo.runId,
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+        canonicalPlan,
+        graph: graph([blocked, active]),
+        tree: {
+          kind: "fork",
+          branches: [
+            { kind: "task", taskId: blocked.id },
+            { kind: "task", taskId: active.id },
+          ],
+        },
+        onSnapshot(snapshot) {
+          if (
+            snapshot.tasks.some(
+              (task) => task.id === blocked.id && task.status === "failed",
+            )
+          )
+            stopped.resolve();
+        },
+        async runCheck(input) {
+          if (
+            input.command === baselineCheck.command &&
+            path.basename(input.workspaceRoot).endsWith(blocked.id)
+          ) {
+            await started.promise;
+            return { exitCode: 1, stdout: "", stderr: "blocked baseline" };
+          }
+          if (input.command === active.checks[0]!.command && !validates)
+            return { exitCode: 1, stdout: "", stderr: "task needs repair" };
+          return passingCheck();
+        },
+        async runSession(input) {
+          assert.equal(input.task!.id, active.id);
+          sessions++;
+          started.resolve();
+          await stopped.promise;
+          assert.equal(input.signal.aborted, false);
+          lateCheck = () => input.tools.check({ checkId: baselineCheck.id });
+          fs.writeFileSync(
+            path.join(input.cwd, `${active.id}.txt`),
+            "implementation\n",
+          );
+          await input.tools.finalize({
+            commitPaths: [`${active.id}.txt`],
+            summary: "Settle the session that was already active.",
+          });
+          return { status: "settled", sessionId: "active-attempt-1" };
+        },
+      });
+      assert.equal(result.status, "failed");
+      assert.match(result.error!, /blocked baseline/);
+      assert.equal(sessions, 1);
+      const task = result.tasks.find(({ id }) => id === active.id)!;
+      assert.equal(task.status, validates ? "validated" : "failed");
+      assert.equal(task.attempt, 1);
+      assert.deepEqual(
+        task.attempts.map(({ status }) => status),
+        ["completed"],
+      );
+      assert.ok(task.provisionalCommit);
+      if (!validates)
+        assert.equal(
+          task.error,
+          `Required check ${active.checks[0]!.id} failed.`,
+        );
+      assert.ok(lateCheck);
+      await assert.rejects(lateCheck(), /authority is closed/);
+    } finally {
+      repo.cleanup();
+    }
+  });
+}
 
 test("cancellation prevents late finalization and preserves the factual task state", async () => {
   const repo = fixture();
@@ -562,6 +672,120 @@ test("cancellation prevents late finalization and preserves the factual task sta
     assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), base);
     assert.equal(
       fs.existsSync(path.join(repo.workingDir, "cancel-task.txt")),
+      true,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("join verification cancellation records a terminal join without mutating caller state", async () => {
+  const repo = fixture();
+  const controller = new AbortController();
+  const joinCheckStarted = barrier();
+  const releaseJoinCheck = barrier();
+  const left = graphTask("cancel-left");
+  const right = graphTask("cancel-right");
+  let joinCheckCalls = 0;
+  const callerBranch = git(repo.workingDir, [
+    "symbolic-ref",
+    "--short",
+    "HEAD",
+  ]);
+  const execution = executeFeatureGraph({
+    runId: repo.runId,
+    workingDir: repo.workingDir,
+    worktreeRoot: repo.worktreeRoot,
+    canonicalPlan,
+    graph: graph([left, right]),
+    tree: {
+      kind: "fork",
+      branches: [
+        { kind: "task", taskId: left.id },
+        { kind: "task", taskId: right.id },
+      ],
+    } satisfies ExecutionTree,
+    signal: controller.signal,
+    async runCheck(input) {
+      if (input.workspaceRoot === repo.workingDir) {
+        assert.equal(input.kind, "check");
+        joinCheckCalls += 1;
+        joinCheckStarted.resolve();
+        await releaseJoinCheck.promise;
+      }
+      return passingCheck();
+    },
+    async runSession(input) {
+      const filePath = `${input.task!.id}.txt`;
+      fs.writeFileSync(path.join(input.cwd, filePath), `${input.task!.id}\n`);
+      const finalized = await input.tools.finalize({
+        commitPaths: [filePath],
+        summary: `Finalize ${input.task!.id} before joining.`,
+      });
+      assert.equal(finalized.validated, true);
+      return { status: "settled", sessionId: `synthetic-${input.task!.id}` };
+    },
+  });
+  try {
+    await joinCheckStarted.promise;
+    const callerHead = git(repo.workingDir, ["rev-parse", "HEAD"]);
+    const callerRef = git(repo.workingDir, [
+      "rev-parse",
+      `refs/heads/${callerBranch}`,
+    ]);
+    const ownedRefs = git(repo.workingDir, [
+      "for-each-ref",
+      "--format=%(refname)=%(objectname)",
+      `refs/heads/pipi-feature/${repo.runId}`,
+    ]);
+    controller.abort();
+    releaseJoinCheck.resolve();
+    const result = await execution;
+
+    assert.equal(result.status, "cancelled");
+    assert.equal(joinCheckCalls, 1);
+    assert.equal(result.joins.length, 1);
+    const join = result.joins[0]!;
+    assert.equal(join.commits.length, 2);
+    assert.equal(join.status, "cancelled");
+    assert.ok(join.error);
+    assert.match(join.error, /cancelled/i);
+    assert.ok(join.error.length <= 16 * 1024);
+    assert.equal(
+      result.branches.find(({ id }) => id === "root")?.status,
+      "cancelled",
+    );
+    assert.equal(
+      result.tasks.every(({ status }) => status === "validated"),
+      true,
+    );
+    assert.equal(
+      result.branches
+        .filter(({ id }) => id !== "root")
+        .every(({ status }) => status === "completed"),
+      true,
+    );
+    assert.equal(
+      git(repo.workingDir, ["symbolic-ref", "--short", "HEAD"]),
+      callerBranch,
+    );
+    assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), callerHead);
+    assert.equal(
+      git(repo.workingDir, ["rev-parse", `refs/heads/${callerBranch}`]),
+      callerRef,
+    );
+    assert.equal(
+      git(repo.workingDir, [
+        "for-each-ref",
+        "--format=%(refname)=%(objectname)",
+        `refs/heads/pipi-feature/${repo.runId}`,
+      ]),
+      ownedRefs,
+    );
+    assert.equal(
+      result.branches
+        .filter(({ id }) => id !== "root")
+        .every(({ worktree }) => fs.existsSync(worktree)),
       true,
     );
   } finally {

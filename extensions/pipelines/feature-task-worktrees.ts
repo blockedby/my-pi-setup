@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isSafeRepositoryRelativePath } from "./feature-planning.ts";
+import { cleanupFeatureSandboxRuntime } from "./feature-sandbox.ts";
 
 const GIT_OUTPUT_LIMIT = 2 * 1024 * 1024;
 const DIAGNOSTIC_LIMIT = 8 * 1024;
@@ -1264,6 +1265,13 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
         );
       } catch (error) {
         warnings.push(diagnostic(error));
+      }
+    }
+    // Failed/cancelled graphs retain diagnostic worktrees and scratch. Only
+    // successful completion reclaims process-owned sandbox runtime roots.
+    for (const branch of this.mutableBranches.values()) {
+      if (branch.owned && branch.removed) {
+        warnings.push(...cleanupFeatureSandboxRuntime(branch.worktree));
       }
     }
     try {

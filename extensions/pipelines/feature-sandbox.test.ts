@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,6 +11,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
+  cleanupFeatureSandboxRuntime,
   createFeatureToolBoundary,
   runFeatureSandboxCommand,
 } from "./feature-sandbox.ts";
@@ -276,6 +279,276 @@ test("graph commands use the contained package cwd and reject symlink escapes", 
       /cancelled/,
     );
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit cleanup removes owned runtime scratch after a real sandbox check", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-runtime-cleanup-"));
+  const workspace = path.join(root, "workspace");
+  const runtimeParent = path.join(root, ".pipi-runtime");
+  const runtimeRoot = path.join(runtimeParent, "workspace");
+  fs.mkdirSync(workspace);
+  try {
+    const boundary = createFeatureToolBoundary({
+      cwd: workspace,
+      mode: "candidate",
+    });
+    await execute(tool(boundary, "bash"), {
+      command: 'touch "$TMPDIR/from-tool" "$XDG_CACHE_HOME/from-tool"',
+    });
+    const result = await runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      command: 'touch "$TMPDIR/from-check" "$XDG_CACHE_HOME/from-check"',
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(
+      fs.existsSync(path.join(runtimeRoot, "tmp", "from-tool")),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(path.join(runtimeRoot, "tmp", "from-check")),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(path.join(runtimeRoot, "cache", "from-tool")),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(path.join(runtimeRoot, "cache", "from-check")),
+      true,
+    );
+
+    assert.deepEqual(cleanupFeatureSandboxRuntime(workspace), []);
+    assert.equal(fs.existsSync(runtimeRoot), true);
+
+    fs.rmSync(workspace, { recursive: true, force: true });
+    assert.deepEqual(cleanupFeatureSandboxRuntime(workspace), []);
+    assert.equal(fs.existsSync(runtimeRoot), false);
+    assert.equal(fs.existsSync(runtimeParent), false);
+    assert.deepEqual(cleanupFeatureSandboxRuntime(workspace), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime cleanup leaves sibling scratch and a shared namespace parent intact", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-runtime-siblings-"));
+  const workspaceA = path.join(root, "workspace-a");
+  const workspaceB = path.join(root, "workspace-b");
+  const runtimeParent = path.join(root, ".pipi-runtime");
+  const runtimeA = path.join(runtimeParent, "workspace-a");
+  const runtimeB = path.join(runtimeParent, "workspace-b");
+  fs.mkdirSync(workspaceA);
+  fs.mkdirSync(workspaceB);
+  try {
+    for (const workspace of [workspaceA, workspaceB]) {
+      const result = await runFeatureSandboxCommand({
+        workspaceRoot: workspace,
+        cwd: ".",
+        command: 'touch "$TMPDIR/probe"',
+      });
+      assert.equal(result.exitCode, 0, result.stderr);
+    }
+    const sharedScratch = path.join(runtimeParent, "shared.txt");
+    fs.writeFileSync(sharedScratch, "preserve\n");
+    fs.rmSync(workspaceA, { recursive: true, force: true });
+
+    assert.deepEqual(cleanupFeatureSandboxRuntime(workspaceA), []);
+    assert.equal(fs.existsSync(runtimeA), false);
+    assert.equal(fs.existsSync(runtimeB), true);
+    assert.equal(fs.existsSync(sharedScratch), true);
+    assert.equal(fs.existsSync(runtimeParent), true);
+
+    fs.rmSync(workspaceB, { recursive: true, force: true });
+    assert.deepEqual(cleanupFeatureSandboxRuntime(workspaceB), []);
+    assert.equal(fs.existsSync(runtimeB), false);
+    assert.equal(fs.existsSync(sharedScratch), true);
+    assert.equal(fs.existsSync(runtimeParent), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime cleanup does not claim pre-existing scratch", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-runtime-existing-"));
+  const workspace = path.join(root, "workspace");
+  const runtimeRoot = path.join(root, ".pipi-runtime", "workspace");
+  const sentinel = path.join(runtimeRoot, "tmp", "pre-existing");
+  fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+  fs.writeFileSync(sentinel, "preserve\n");
+  fs.mkdirSync(workspace);
+  try {
+    const result = await runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      command: 'touch "$XDG_CACHE_HOME/from-check"',
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
+    fs.rmSync(workspace, { recursive: true, force: true });
+
+    assert.deepEqual(cleanupFeatureSandboxRuntime(workspace), []);
+    assert.equal(fs.existsSync(sentinel), true);
+    assert.equal(
+      fs.existsSync(path.join(runtimeRoot, "cache", "from-check")),
+      true,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime cleanup fails closed for symlink and identity replacement", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-runtime-replaced-"));
+  const workspace = path.join(root, "workspace");
+  const outside = path.join(root, "outside");
+  const runtimeRoot = path.join(root, ".pipi-runtime", "workspace");
+  const outsideSentinel = path.join(outside, "do-not-delete");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(outside);
+  fs.writeFileSync(outsideSentinel, "preserve\n");
+  try {
+    const result = await runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      command: 'touch "$TMPDIR/probe"',
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+    fs.symlinkSync(outside, runtimeRoot);
+
+    const symlinkWarnings = cleanupFeatureSandboxRuntime(workspace);
+    assert.equal(symlinkWarnings.length > 0, true);
+    assert.equal(fs.readFileSync(outsideSentinel, "utf8"), "preserve\n");
+    assert.equal(fs.lstatSync(runtimeRoot).isSymbolicLink(), true);
+
+    fs.unlinkSync(runtimeRoot);
+    fs.mkdirSync(runtimeRoot);
+    fs.writeFileSync(path.join(runtimeRoot, "replacement"), "preserve\n");
+    const identityWarnings = cleanupFeatureSandboxRuntime(workspace);
+    assert.equal(identityWarnings.length > 0, true);
+    assert.equal(
+      fs.readFileSync(path.join(runtimeRoot, "replacement"), "utf8"),
+      "preserve\n",
+    );
+    assert.equal(fs.readFileSync(outsideSentinel, "utf8"), "preserve\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime cleanup refuses an ancestor symlink even when directory identities match", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-runtime-ancestor-"));
+  const container = path.join(root, "container");
+  const workspace = path.join(container, "workspace");
+  const moved = path.join(root, "moved-container");
+  fs.mkdirSync(workspace, { recursive: true });
+  try {
+    createFeatureToolBoundary({ cwd: workspace, mode: "candidate" });
+    fs.rmSync(workspace, { recursive: true });
+    fs.renameSync(container, moved);
+    fs.symlinkSync(moved, container);
+    assert.ok(cleanupFeatureSandboxRuntime(workspace).length > 0);
+    assert.equal(
+      fs.existsSync(path.join(moved, ".pipi-runtime", "workspace", "tmp")),
+      true,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const replaced of ["parent", "root"]) {
+  test(`runtime reuse refuses a missing or replaced ${replaced} without transferring cleanup ownership`, () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pipi-runtime-recreate-"),
+    );
+    const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace);
+    try {
+      createFeatureToolBoundary({ cwd: workspace, mode: "candidate" });
+      const runtimeParent = path.join(root, ".pipi-runtime");
+      const runtimeRoot = path.join(runtimeParent, "workspace");
+      const target = replaced === "parent" ? runtimeParent : runtimeRoot;
+      fs.renameSync(target, `${target}-saved`);
+      assert.throws(
+        () => createFeatureToolBoundary({ cwd: workspace, mode: "candidate" }),
+        /disappeared|replaced/,
+      );
+      assert.equal(
+        fs.existsSync(target),
+        false,
+        "A failed reuse must not recreate a disappeared owned directory",
+      );
+      fs.mkdirSync(runtimeRoot, { recursive: true });
+      const sentinel = path.join(runtimeRoot, "unowned-data");
+      fs.writeFileSync(sentinel, "preserve\n");
+      assert.throws(
+        () => createFeatureToolBoundary({ cwd: workspace, mode: "candidate" }),
+        /replaced/,
+      );
+      fs.rmSync(workspace, { recursive: true });
+      assert.ok(cleanupFeatureSandboxRuntime(workspace).length > 0);
+      assert.equal(fs.readFileSync(sentinel, "utf8"), "preserve\n");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("runtime parent and root symlinks are rejected before sandbox mounting", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-runtime-links-"));
+  const workspace = path.join(root, "workspace");
+  const outside = path.join(root, "outside");
+  const runtimeParent = path.join(root, ".pipi-runtime");
+  const runtimeRoot = path.join(runtimeParent, "workspace");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(outside);
+  try {
+    fs.symlinkSync(outside, runtimeParent);
+    assert.throws(
+      () => createFeatureToolBoundary({ cwd: workspace, mode: "candidate" }),
+      /symbolic link/,
+    );
+    fs.unlinkSync(runtimeParent);
+    fs.mkdirSync(runtimeParent);
+    fs.symlinkSync(outside, runtimeRoot);
+    assert.throws(
+      () => createFeatureToolBoundary({ cwd: workspace, mode: "candidate" }),
+      /symbolic link/,
+    );
+    assert.equal(fs.readdirSync(outside).length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("declared shell checks retain network isolation", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-check-network-"));
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace);
+  let requests = 0;
+  const server = createServer((_request, response) => {
+    requests++;
+    response.end("not exposed");
+  });
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const script = `fetch("http://127.0.0.1:${address.port}", { signal: AbortSignal.timeout(1000) }).then(() => process.exit(0), () => process.exit(7))`;
+    const result = await runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      command: `${JSON.stringify(process.execPath)} -e '${script}'`,
+    });
+    assert.equal(result.exitCode, 7, result.stderr);
+    assert.equal(requests, 0);
+  } finally {
+    server.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -174,22 +174,418 @@ function visibleRoots(mode: FeatureSandboxMode, tempRoot: string, cwd: string) {
   ];
 }
 
+interface FeatureSandboxDirectoryIdentity {
+  readonly dev: number;
+  readonly ino: number;
+}
+
 interface FeatureRuntimeDirectories {
   readonly root: string;
   readonly temp: string;
   readonly cache: string;
+  readonly parentIdentity: FeatureSandboxDirectoryIdentity;
+  readonly rootIdentity: FeatureSandboxDirectoryIdentity;
+  readonly tempIdentity: FeatureSandboxDirectoryIdentity;
+  readonly cacheIdentity: FeatureSandboxDirectoryIdentity;
+}
+
+interface OwnedFeatureSandboxRuntime {
+  readonly workspaceRoot: string;
+  readonly runtimeParent: string;
+  readonly runtimeRoot: string;
+  readonly parentIdentity: FeatureSandboxDirectoryIdentity;
+  readonly rootIdentity: FeatureSandboxDirectoryIdentity;
+  readonly tempIdentity?: FeatureSandboxDirectoryIdentity;
+  readonly cacheIdentity?: FeatureSandboxDirectoryIdentity;
+}
+
+const ownedFeatureSandboxRuntimes = new Map<
+  string,
+  OwnedFeatureSandboxRuntime
+>();
+
+function lstatIfPresent(value: string) {
+  try {
+    return fs.lstatSync(value);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function runtimeDirectoryIdentity(stats: fs.Stats) {
+  return { dev: stats.dev, ino: stats.ino };
+}
+
+function sameRuntimeDirectory(
+  left: FeatureSandboxDirectoryIdentity,
+  right: FeatureSandboxDirectoryIdentity,
+) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function assertRuntimeDirectory(value: string, label: string) {
+  const stats = lstatIfPresent(value);
+  if (!stats) throw new Error(`Feature sandbox runtime ${label} disappeared.`);
+  if (stats.isSymbolicLink())
+    throw new Error(
+      `Feature sandbox runtime ${label} must not be a symbolic link.`,
+    );
+  if (!stats.isDirectory())
+    throw new Error(`Feature sandbox runtime ${label} must be a directory.`);
+  if (comparableExistingPath(value) !== path.resolve(value)) {
+    throw new Error(
+      `Feature sandbox runtime ${label} has a symbolic-link ancestor.`,
+    );
+  }
+  return stats;
+}
+
+function ensureRuntimeDirectory(value: string, label: string) {
+  let created = false;
+  if (!lstatIfPresent(value)) {
+    try {
+      fs.mkdirSync(value);
+      created = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+  return { created, stats: assertRuntimeDirectory(value, label) };
+}
+
+function assertCurrentRuntimeDirectory(
+  value: string,
+  expected: FeatureSandboxDirectoryIdentity,
+  label: string,
+) {
+  const stats = assertRuntimeDirectory(value, label);
+  if (!sameRuntimeDirectory(runtimeDirectoryIdentity(stats), expected)) {
+    throw new Error(
+      `Feature sandbox runtime ${label} was replaced after setup.`,
+    );
+  }
+  return stats;
 }
 
 function createFeatureRuntimeDirectories(tempRoot: string, cwd: string) {
-  const root = path.join(tempRoot, ".pipi-runtime", path.basename(cwd));
-  const directories = {
+  const workspaceRoot = comparableExistingPath(cwd);
+  const canonicalTempRoot = comparableExistingPath(tempRoot);
+  const runtimeParent = path.join(canonicalTempRoot, ".pipi-runtime");
+  const workspaceName = path.basename(workspaceRoot);
+  if (!workspaceName) {
+    throw new Error(
+      "Feature sandbox workspace must have a stable directory name.",
+    );
+  }
+  const root = path.join(runtimeParent, workspaceName);
+  if (
+    isWithin(runtimeParent, workspaceRoot) ||
+    isWithin(workspaceRoot, runtimeParent) ||
+    isWithin(root, workspaceRoot)
+  ) {
+    throw new Error(
+      "Feature sandbox runtime must remain outside its assigned workspace.",
+    );
+  }
+  const existing = ownedFeatureSandboxRuntimes.get(workspaceRoot);
+  // Reuse is not a fresh allocation. Validate before mkdir can recreate a
+  // missing path, and never transfer the old cleanup grant to a new inode.
+  if (existing) {
+    assertCurrentRuntimeDirectory(
+      runtimeParent,
+      existing.parentIdentity,
+      "parent directory",
+    );
+    assertCurrentRuntimeDirectory(
+      root,
+      existing.rootIdentity,
+      "root directory",
+    );
+  }
+  const parentResult = ensureRuntimeDirectory(
+    runtimeParent,
+    "parent directory",
+  );
+  if (
+    existing &&
+    !sameRuntimeDirectory(
+      runtimeDirectoryIdentity(parentResult.stats),
+      existing.parentIdentity,
+    )
+  ) {
+    throw new Error(
+      "Feature sandbox runtime parent was replaced after setup; refusing to use it.",
+    );
+  }
+  const rootResult = ensureRuntimeDirectory(root, "root directory");
+  if (
+    existing &&
+    !sameRuntimeDirectory(
+      runtimeDirectoryIdentity(rootResult.stats),
+      existing.rootIdentity,
+    )
+  ) {
+    throw new Error(
+      "Feature sandbox runtime root was replaced after setup; refusing to use it.",
+    );
+  }
+  if (rootResult.created || existing) {
+    ownedFeatureSandboxRuntimes.set(workspaceRoot, {
+      ...(existing && !rootResult.created ? existing : {}),
+      workspaceRoot,
+      runtimeParent,
+      runtimeRoot: root,
+      parentIdentity: runtimeDirectoryIdentity(parentResult.stats),
+      rootIdentity: runtimeDirectoryIdentity(rootResult.stats),
+    });
+  }
+  const tempResult = ensureRuntimeDirectory(path.join(root, "tmp"), "temp");
+  const cacheResult = ensureRuntimeDirectory(path.join(root, "cache"), "cache");
+  const tracked = ownedFeatureSandboxRuntimes.get(workspaceRoot);
+  if (
+    tracked?.tempIdentity &&
+    !sameRuntimeDirectory(
+      runtimeDirectoryIdentity(tempResult.stats),
+      tracked.tempIdentity,
+    )
+  ) {
+    throw new Error(
+      "Feature sandbox runtime temp directory was replaced after setup; refusing to use it.",
+    );
+  }
+  if (
+    tracked?.cacheIdentity &&
+    !sameRuntimeDirectory(
+      runtimeDirectoryIdentity(cacheResult.stats),
+      tracked.cacheIdentity,
+    )
+  ) {
+    throw new Error(
+      "Feature sandbox runtime cache directory was replaced after setup; refusing to use it.",
+    );
+  }
+  if (tracked) {
+    ownedFeatureSandboxRuntimes.set(workspaceRoot, {
+      ...tracked,
+      tempIdentity: runtimeDirectoryIdentity(tempResult.stats),
+      cacheIdentity: runtimeDirectoryIdentity(cacheResult.stats),
+    });
+  }
+  return {
     root,
     temp: path.join(root, "tmp"),
     cache: path.join(root, "cache"),
+    parentIdentity: runtimeDirectoryIdentity(parentResult.stats),
+    rootIdentity: runtimeDirectoryIdentity(rootResult.stats),
+    tempIdentity: runtimeDirectoryIdentity(tempResult.stats),
+    cacheIdentity: runtimeDirectoryIdentity(cacheResult.stats),
   } satisfies FeatureRuntimeDirectories;
-  fs.mkdirSync(directories.temp, { recursive: true });
-  fs.mkdirSync(directories.cache, { recursive: true });
-  return directories;
+}
+
+function assertFeatureRuntimeDirectories(runtime: FeatureRuntimeDirectories) {
+  assertCurrentRuntimeDirectory(
+    path.dirname(runtime.root),
+    runtime.parentIdentity,
+    "parent directory",
+  );
+  assertCurrentRuntimeDirectory(runtime.root, runtime.rootIdentity, "root");
+  assertCurrentRuntimeDirectory(runtime.temp, runtime.tempIdentity, "temp");
+  assertCurrentRuntimeDirectory(runtime.cache, runtime.cacheIdentity, "cache");
+}
+
+function cleanupWorkspaceKeys(workspaceRoot: string) {
+  const absolute = path.resolve(workspaceRoot);
+  try {
+    return [...new Set([comparableExistingPath(absolute), absolute])];
+  } catch {
+    return [absolute];
+  }
+}
+
+function cleanupWarning(runtime: OwnedFeatureSandboxRuntime, message: string) {
+  return `Feature sandbox runtime cleanup skipped for ${runtime.runtimeRoot}: ${message}`;
+}
+
+function cleanupErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Remove only runtime scratch that this process created for a removed workspace. */
+export function cleanupFeatureSandboxRuntime(workspaceRoot: string) {
+  const key = cleanupWorkspaceKeys(workspaceRoot).find((candidate) =>
+    ownedFeatureSandboxRuntimes.has(candidate),
+  );
+  if (!key) return [];
+  const owned = ownedFeatureSandboxRuntimes.get(key);
+  if (!owned) return [];
+  const warnings: string[] = [];
+
+  let workspace: fs.Stats | undefined;
+  try {
+    workspace = lstatIfPresent(owned.workspaceRoot);
+  } catch (error) {
+    warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
+    return warnings;
+  }
+  if (workspace) return warnings;
+
+  let parent: fs.Stats | undefined;
+  try {
+    parent = lstatIfPresent(owned.runtimeParent);
+  } catch (error) {
+    warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
+    return warnings;
+  }
+  if (!parent) {
+    ownedFeatureSandboxRuntimes.delete(key);
+    return warnings;
+  }
+  try {
+    if (comparableExistingPath(owned.runtimeParent) !== owned.runtimeParent) {
+      warnings.push(
+        cleanupWarning(
+          owned,
+          "the runtime ancestry was redirected; refusing to remove it",
+        ),
+      );
+      return warnings;
+    }
+  } catch (error) {
+    warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
+    return warnings;
+  }
+  if (parent.isSymbolicLink() || !parent.isDirectory()) {
+    warnings.push(
+      cleanupWarning(
+        owned,
+        "the runtime parent is not a non-symlink directory; refusing to remove it",
+      ),
+    );
+    return warnings;
+  }
+  if (
+    !sameRuntimeDirectory(
+      runtimeDirectoryIdentity(parent),
+      owned.parentIdentity,
+    )
+  ) {
+    warnings.push(
+      cleanupWarning(
+        owned,
+        "the runtime parent identity changed; refusing to remove it",
+      ),
+    );
+    return warnings;
+  }
+  if (
+    owned.runtimeParent === owned.workspaceRoot ||
+    isWithin(owned.runtimeParent, owned.workspaceRoot) ||
+    isWithin(owned.workspaceRoot, owned.runtimeParent) ||
+    path.dirname(owned.runtimeRoot) !== owned.runtimeParent
+  ) {
+    warnings.push(
+      cleanupWarning(
+        owned,
+        "the recorded runtime path is not safely separate from the workspace",
+      ),
+    );
+    return warnings;
+  }
+
+  let runtimeRoot: fs.Stats | undefined;
+  try {
+    runtimeRoot = lstatIfPresent(owned.runtimeRoot);
+  } catch (error) {
+    warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
+    return warnings;
+  }
+  if (runtimeRoot) {
+    if (runtimeRoot.isSymbolicLink() || !runtimeRoot.isDirectory()) {
+      warnings.push(
+        cleanupWarning(
+          owned,
+          "the recorded runtime root is not a non-symlink directory; refusing to remove it",
+        ),
+      );
+      return warnings;
+    }
+    if (
+      !sameRuntimeDirectory(
+        runtimeDirectoryIdentity(runtimeRoot),
+        owned.rootIdentity,
+      )
+    ) {
+      warnings.push(
+        cleanupWarning(
+          owned,
+          "the runtime root identity changed; refusing to remove it",
+        ),
+      );
+      return warnings;
+    }
+    try {
+      fs.rmSync(owned.runtimeRoot, { recursive: true, force: true });
+    } catch (error) {
+      warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
+      return warnings;
+    }
+  }
+
+  let remainingRoot: fs.Stats | undefined;
+  try {
+    remainingRoot = lstatIfPresent(owned.runtimeRoot);
+  } catch (error) {
+    warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
+    return warnings;
+  }
+  if (remainingRoot) {
+    warnings.push(
+      cleanupWarning(
+        owned,
+        "the runtime root remained after removal; refusing to remove its parent",
+      ),
+    );
+    return warnings;
+  }
+
+  let currentParent: fs.Stats | undefined;
+  try {
+    currentParent = lstatIfPresent(owned.runtimeParent);
+  } catch (error) {
+    warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
+    return warnings;
+  }
+  if (!currentParent) {
+    ownedFeatureSandboxRuntimes.delete(key);
+    return warnings;
+  }
+  if (
+    currentParent.isSymbolicLink() ||
+    !currentParent.isDirectory() ||
+    !sameRuntimeDirectory(
+      runtimeDirectoryIdentity(currentParent),
+      owned.parentIdentity,
+    )
+  ) {
+    warnings.push(
+      cleanupWarning(
+        owned,
+        "the runtime parent changed during removal; refusing to remove it",
+      ),
+    );
+    return warnings;
+  }
+  try {
+    fs.rmdirSync(owned.runtimeParent);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
+      warnings.push(cleanupWarning(owned, cleanupErrorMessage(error)));
+    }
+  }
+  ownedFeatureSandboxRuntimes.delete(key);
+  return warnings;
 }
 
 function sandboxCommandArguments(
@@ -201,6 +597,7 @@ function sandboxCommandArguments(
   executionCwd = cwd,
   resources: SkillResources = [],
 ) {
+  assertFeatureRuntimeDirectories(runtime);
   const roots = visibleRoots(mode, tempRoot, cwd);
   const args = [
     "--die-with-parent",

@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -189,6 +190,7 @@ export interface FeatureTaskSnapshot {
 
 export interface FeatureCheckCommandInput {
   readonly kind: "check" | "prepare";
+  readonly diffBaseCommit?: string;
   readonly command: string;
   readonly workspaceRoot: string;
   readonly cwd: string;
@@ -272,6 +274,134 @@ function resolveCheckCwd(worktree: string, relativeCwd: string) {
 }
 
 export async function runFeatureCheckCommand(input: FeatureCheckCommandInput) {
+  // Only this exact, read-only operation crosses the Git boundary. Arbitrary
+  // shell checks remain sandboxed: never expose repository metadata to them.
+  if (input.kind === "check" && input.command.trim() === "git diff --check") {
+    const root = fs.realpathSync.native(input.workspaceRoot);
+    const cwd = resolveCheckCwd(root, path.relative(root, input.cwd) || ".");
+    const base = input.diffBaseCommit ?? "HEAD";
+    if (base !== "HEAD" && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(base)) {
+      throw new Error(
+        "Git whitespace check requires a controller-owned commit.",
+      );
+    }
+    if (input.signal.aborted) throw new Error("Feature command cancelled.");
+    const env = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+      ),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_OPTIONAL_LOCKS: "0",
+    };
+    const git = (args: string[]) =>
+      new Promise<FeatureCheckCommandResult & { outputTruncated: boolean }>(
+        (resolve) => {
+          const child = spawn("git", args, {
+            cwd,
+            env,
+            detached: true,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          const maxBytes = 256 * 1024;
+          const stdout: Buffer[] = [];
+          const stderr: Buffer[] = [];
+          let stdoutBytes = 0;
+          let stderrBytes = 0;
+          let outputTruncated = false;
+          let failure: string | undefined;
+          let escalation: ReturnType<typeof setTimeout> | undefined;
+          const terminate = (signal: NodeJS.Signals) => {
+            if (!child.pid) return;
+            try {
+              process.kill(-child.pid, signal);
+            } catch {
+              child.kill(signal);
+            }
+          };
+          const cancel = () => {
+            failure = "Feature command cancelled.";
+            terminate("SIGTERM");
+            escalation ??= setTimeout(() => terminate("SIGKILL"), 250);
+            escalation.unref();
+          };
+          // Drain both streams to EOF; retained evidence is bounded, not the
+          // operation itself. Large whitespace reports must retain Git's exit.
+          child.stdout.on("data", (chunk: Buffer) => {
+            const kept = chunk.subarray(0, Math.max(0, maxBytes - stdoutBytes));
+            if (kept.length) stdout.push(Buffer.from(kept));
+            stdoutBytes += kept.length;
+            outputTruncated ||= kept.length !== chunk.length;
+          });
+          child.stderr.on("data", (chunk: Buffer) => {
+            const kept = chunk.subarray(0, Math.max(0, maxBytes - stderrBytes));
+            if (kept.length) stderr.push(Buffer.from(kept));
+            stderrBytes += kept.length;
+            outputTruncated ||= kept.length !== chunk.length;
+          });
+          child.once("error", (error) => {
+            failure = error.message;
+          });
+          child.once("close", (exitCode) => {
+            input.signal.removeEventListener("abort", cancel);
+            if (escalation) clearTimeout(escalation);
+            const marker = outputTruncated ? "\n[Output truncated.]" : "";
+            resolve({
+              exitCode: failure ? null : exitCode,
+              stdout: Buffer.concat(stdout).toString("utf8") + marker,
+              stderr:
+                Buffer.concat(stderr).toString("utf8") +
+                (failure ? `\n${failure}` : "") +
+                marker,
+              outputTruncated,
+            });
+          });
+          input.signal.addEventListener("abort", cancel, { once: true });
+          if (input.signal.aborted) cancel();
+        },
+      );
+    // Even diff --check can invoke clean/process filters while reading a
+    // working file. Disable every repository-configured executable driver;
+    // never let this narrow controller operation execute project programs.
+    const filters = await git([
+      "config",
+      "--includes",
+      "--null",
+      "--name-only",
+      "--get-regexp",
+      "^filter\\..*\\.(clean|smudge|process|required)$",
+    ]);
+    if (filters.exitCode !== 0 && filters.exitCode !== 1) return filters;
+    if (filters.outputTruncated) {
+      return {
+        exitCode: null,
+        stdout: "",
+        stderr: "Git filter configuration exceeds the safe inspection limit.",
+      };
+    }
+    if (input.signal.aborted) throw new Error("Feature command cancelled.");
+    const disabledFilters = filters.stdout
+      .split("\0")
+      .filter(Boolean)
+      .flatMap((key) => [
+        "-c",
+        `${key}=${key.endsWith(".required") ? "false" : ""}`,
+      ]);
+    return git([
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      ...disabledFilters,
+      "diff",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--check",
+      base,
+      "--",
+      ".",
+    ]);
+  }
   return runFeatureSandboxCommand({
     workspaceRoot: input.workspaceRoot,
     cwd: input.cwd,
@@ -492,6 +622,7 @@ export function createFeatureTaskRuntime(options: {
     try {
       commandResult = await runCheck({
         kind: "check",
+        diffBaseCommit: options.diffBaseCommit ?? options.taskBaseCommit,
         command: definition.command,
         workspaceRoot: options.target.worktree,
         cwd,
@@ -834,6 +965,7 @@ export function createFeatureTaskRuntime(options: {
         state.status = state.provisionalCommit ? "provisional" : "retrying";
         state.error =
           outcome.error ??
+          state.error ??
           (outcome.status === "failed"
             ? "Feature task session failed."
             : "Feature task session ended without validated finalization.");

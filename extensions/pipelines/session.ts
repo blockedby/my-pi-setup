@@ -726,9 +726,12 @@ export function createPipelineSessionFactory(
               ),
             )
           : undefined;
-      const executionFinishToken = options.executionFinish
-        ? randomUUID()
-        : undefined;
+      // Task completion belongs to pipeline_task_finalize. These sessions do
+      // not have an execution-finish host and must not advertise that tool.
+      const executionFinishToken =
+        options.executionFinish && (!featureTaskHost || isFeatureFinalizer)
+          ? randomUUID()
+          : undefined;
       if (executionFinishToken)
         options.executionFinishSessionCreated?.(
           spec.scopeId ?? "",

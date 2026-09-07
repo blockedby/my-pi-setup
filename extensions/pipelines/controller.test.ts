@@ -18,6 +18,8 @@ import {
   pipelineDiscoverySubmissionAllowed,
 } from "./controller.ts";
 import { inspectPipeline, PIPELINE_CHECK_MAX_BYTES } from "./inspection.ts";
+import { executeFeatureGraph } from "./feature-graph-executor.ts";
+import { createFeatureReviewRuntime } from "./feature-task-runtime.ts";
 import { pipelineSessionToolPolicy, pipelineThinkingLevel } from "./session.ts";
 import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
@@ -428,6 +430,7 @@ function harness(
     sessionGate?: (spec: AgentNodeSpec) => Promise<void> | undefined;
     autoCompleteFeatureDiscovery?: boolean;
     autoCompleteFeaturePlanning?: boolean;
+    realFeatureExecution?: boolean;
     malformedFeatureCandidateOnce?: boolean;
     malformedFeatureGraphOnce?: boolean;
     autoCompleteDiscoverySynthesis?: boolean;
@@ -489,6 +492,9 @@ function harness(
       discoverySubmit,
       discoverySessionCreated,
       discoveryToolAllowed,
+      _executionFinish,
+      _executionFinishSessionCreated,
+      featureTaskHost,
     ) => {
       discoverySubmitCallback = discoverySubmit;
       return {
@@ -534,9 +540,17 @@ function harness(
                       : turn === 1
                         ? options.malformedFeatureGraphOnce
                           ? "{}"
-                          : JSON.stringify(featureExecutionGraph())
+                          : JSON.stringify(
+                              options.realFeatureExecution
+                                ? realControllerGraph()
+                                : featureExecutionGraph(),
+                            )
                         : turn === 2 && options.malformedFeatureGraphOnce
-                          ? JSON.stringify(featureExecutionGraph())
+                          ? JSON.stringify(
+                              options.realFeatureExecution
+                                ? realControllerGraph()
+                                : featureExecutionGraph(),
+                            )
                           : "Final review settled after validated finalization."
                 : planRole && options.autoCompletePlan
                   ? planReportForRole(planRole)
@@ -633,6 +647,62 @@ function harness(
           if (!spec.parentId && options.rejectRootCancellation) {
             session.interruptError = new Error("root cancellation rejected");
           }
+          if (options.realFeatureExecution) {
+            const originalPrompt = session.prompt.bind(session);
+            const originalSend = session.send.bind(session);
+            const finishRealTask = async () => {
+              session.isStreaming = true;
+              try {
+                const host = featureTaskHost?.(spec.scopeId!, spec.role);
+                assert.ok(host);
+                const worker = spec.role.startsWith("feature-task-");
+                const file = `output-${spec.role.slice("feature-task-".length)}.txt`;
+                if (worker)
+                  fs.writeFileSync(
+                    path.join(spec.cwd, file),
+                    "verified output\n",
+                  );
+                const result = await host.finalize({
+                  commitPaths: worker ? [file] : [],
+                  summary:
+                    "Synthetic session finalized through real controller task tools.",
+                });
+                assert.equal(
+                  result.validated,
+                  true,
+                  JSON.stringify(result.checks),
+                );
+                session.emit({
+                  type: "settled",
+                  outcome: {
+                    type: "completed",
+                    finalText: "Validated through controller tools.",
+                  },
+                });
+              } catch (error) {
+                session.emit({
+                  type: "settled",
+                  outcome: { type: "failed", error: String(error) },
+                });
+              }
+            };
+            session.prompt = async (text) => {
+              if (spec.role.startsWith("feature-task-")) {
+                session.prompts.push(text);
+                await finishRealTask();
+              } else await originalPrompt(text);
+            };
+            session.send = async (text) => {
+              if (
+                spec.role === FEATURE_FINALIZER_ROLE &&
+                session.mutationEnabled > 0
+              ) {
+                session.sends.push(text);
+                session.emit({ type: "run_started" });
+                await finishRealTask();
+              } else await originalSend(text);
+            };
+          }
           sessions.push(session);
           return session;
         },
@@ -642,6 +712,7 @@ function harness(
       handoffs.push(handoff);
     },
     async executeFeatureGraph(input) {
+      if (options.realFeatureExecution) return executeFeatureGraph(input);
       if (input.signal) featureExecutionSignals.push(input.signal);
       const head = execFileSync("git", ["rev-parse", "HEAD"], {
         cwd: input.workingDir,
@@ -705,6 +776,8 @@ function harness(
       };
     },
     createFeatureReviewRuntime(input) {
+      if (options.realFeatureExecution)
+        return createFeatureReviewRuntime(input);
       if (input.signal) featureReviewSignals.push(input.signal);
       featureReviewDiffBases.push(input.diffBaseCommit);
       featureReviewKnownResidualPaths.push([
@@ -772,12 +845,14 @@ function harness(
         snapshot,
       };
     },
-    featureGit: featureGitHarness(
-      lifecycles,
-      options.namespaceAvailable,
-      options.failCandidateReservation,
-      options.driftFeatureBaseBeforeBuild,
-    ),
+    featureGit: options.realFeatureExecution
+      ? undefined
+      : featureGitHarness(
+          lifecycles,
+          options.namespaceAvailable,
+          options.failCandidateReservation,
+          options.driftFeatureBaseBeforeBuild,
+        ),
   });
   return {
     controller,
@@ -1156,6 +1231,37 @@ function featureExecutionGraph() {
   };
 }
 
+function realControllerGraph() {
+  const template = featureExecutionGraph();
+  return {
+    ...template,
+    reviewChecks: [
+      {
+        id: "real-review",
+        command: "test -f output-left.txt && test -f output-right.txt",
+        cwd: ".",
+        purpose: "Verify real joined task outputs.",
+        required: true,
+      },
+    ],
+    tasks: ["left", "right"].map((id) => ({
+      ...template.tasks[0]!,
+      id,
+      readPaths: ["baseline.txt"],
+      writePaths: [`output-${id}.txt`],
+      checks: [
+        {
+          id: `${id}-output`,
+          command: `test -f output-${id}.txt`,
+          cwd: ".",
+          purpose: "Verify real task output in sandbox.",
+          required: true,
+        },
+      ],
+    })),
+  };
+}
+
 function reportForRole(role: string) {
   if (role === "implement-small-feature") {
     return JSON.stringify({
@@ -1340,6 +1446,7 @@ async function finishEmbeddedAudit(
   runId: string,
   deliverFinalReport = true,
   findings: ReadonlyArray<Record<string, unknown>> = [],
+  baseSha?: string,
 ) {
   run.controller.setStage(runId, "final-audit");
   const agents = await run.controller.startFinalAudit(runId, {
@@ -1416,7 +1523,7 @@ async function finishEmbeddedAudit(
         "audit-synthesis-final",
         AUDIT_SEGMENT_LUNA_ROLES,
         {
-          baseSha: headSha,
+          baseSha: baseSha ?? headSha,
           headSha,
         },
         findings,
@@ -1648,6 +1755,164 @@ test("feature audit handoff admits only canonical requirements and final impleme
     }),
     [],
   );
+});
+
+async function waitForRealAudit(
+  run: ReturnType<typeof harness>,
+  runId: string,
+) {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(new Error("Real feature fixture did not reach audit"));
+    }, 15000);
+    const unsubscribe = run.controller.subscribe(() => {
+      const snapshot = run.controller.get(runId);
+      if (
+        snapshot?.stage === "audit" ||
+        (snapshot && !["starting", "running"].includes(snapshot.status))
+      ) {
+        clearTimeout(timeout);
+        unsubscribe();
+        if (snapshot?.stage === "audit") resolve();
+        else reject(new Error(JSON.stringify(snapshot)));
+      }
+    });
+  });
+}
+
+test("cancelled production runs preserve diagnostic refs and completed implementation instead of deleting them", async () => {
+  const fixture = createLinkedWorktreeFixture(
+    "controller-cancel-real-feature-",
+  );
+  const worktreeRoot = path.join(fixture.root, "task-worktrees");
+  fs.mkdirSync(worktreeRoot);
+  const run = harness({ realFeatureExecution: true });
+  try {
+    const runId = run.controller.start({
+      ...request(fixture.linked),
+      worktreeRoot,
+    });
+    await waitForRealAudit(run, runId);
+    const head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: fixture.linked,
+      encoding: "utf8",
+    });
+    await run.controller.cancelRun(runId);
+    assert.equal(run.controller.get(runId)?.status, "cancelled");
+    assert.equal(
+      execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: fixture.linked,
+        encoding: "utf8",
+      }),
+      head,
+    );
+    const refs = execFileSync(
+      "git",
+      [
+        "for-each-ref",
+        "--format=%(refname)",
+        `refs/heads/pipi-feature/${runId}`,
+      ],
+      { cwd: fixture.linked, encoding: "utf8" },
+    )
+      .trim()
+      .split("\n");
+    assert.equal(refs.length, 2);
+    assert.equal(fs.existsSync(path.join(worktreeRoot, runId)), true);
+    for (const id of ["left", "right"])
+      assert.equal(
+        fs.readFileSync(path.join(fixture.linked, `output-${id}.txt`), "utf8"),
+        "verified output\n",
+      );
+    const artifact = JSON.parse(
+      fs.readFileSync(
+        path.join(run.artifactRoot, runId, "run-summary.json"),
+        "utf8",
+      ),
+    );
+    assert.equal(artifact.status, "cancelled");
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("production controller completes real Git and sandbox execution through review, audit handoff and cleanup", async () => {
+  const fixture = createLinkedWorktreeFixture("controller-real-feature-");
+  const worktreeRoot = path.join(fixture.root, "task-worktrees");
+  fs.mkdirSync(worktreeRoot);
+  const run = harness({ realFeatureExecution: true });
+  try {
+    const runId = run.controller.start({
+      ...request(fixture.linked),
+      worktreeRoot,
+    });
+    await waitForRealAudit(run, runId);
+    const reviewed = run.controller.get(runId)!;
+    assert.equal(reviewed.featureGraph?.planning.review, "accepted");
+    assert.equal(
+      reviewed.featureGraph?.tasks.filter(({ kind }) => kind === "task").length,
+      2,
+    );
+    assert.ok(
+      reviewed.featureGraph?.tasks.every(
+        ({ status }) => status === "validated",
+      ),
+    );
+    assert.equal(
+      run.sessions.filter(({ spec }) => spec.role === FEATURE_FINALIZER_ROLE)
+        .length,
+      1,
+    );
+    assert.equal(
+      run.sessions.find(({ spec }) => spec.role === FEATURE_FINALIZER_ROLE)!
+        .mutationEnabled,
+      1,
+    );
+    const base = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: fixture.primary,
+      encoding: "utf8",
+    }).trim();
+    await finishEmbeddedAudit(run, runId, true, [], base);
+    run.controller.complete(runId, {
+      outcome: "Real offline execution verified",
+      changedPaths: ["output-left.txt", "output-right.txt"],
+      checks: ["Real sandbox task and review checks passed"],
+      assumptions: ["Model decisions are synthetic fixture responses"],
+      git: [],
+      reports: [],
+      unresolvedItems: [],
+      workingDir: fixture.linked,
+    });
+    await settleInitialization();
+    assert.equal(run.controller.get(runId)?.status, "completed");
+    assert.equal(run.handoffs.length, 1);
+    assert.equal(fs.existsSync(path.join(worktreeRoot, runId)), false);
+    const registered = execFileSync(
+      "git",
+      ["worktree", "list", "--porcelain"],
+      { cwd: fixture.linked, encoding: "utf8" },
+    );
+    assert.equal(registered.includes(worktreeRoot), false);
+    for (const id of ["left", "right"])
+      assert.equal(
+        fs.readFileSync(path.join(fixture.linked, `output-${id}.txt`), "utf8"),
+        "verified output\n",
+      );
+    const artifact = JSON.parse(
+      fs.readFileSync(
+        path.join(run.artifactRoot, runId, "run-summary.json"),
+        "utf8",
+      ),
+    );
+    assert.equal(artifact.status, "completed");
+  } finally {
+    await run.controller.dispose();
+    fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test("feature controller accepts corrected Astra plans, persists artifacts, executes the graph, and reuses the finalizer for review", async () => {
