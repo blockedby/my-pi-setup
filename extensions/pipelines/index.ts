@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { serializeRunEvidenceHandoff } from "./run-evidence-handoff.ts";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
@@ -210,6 +211,16 @@ export function resolvePipelineWorkingDir(
 }
 
 export function handoffText(handoff: PipelineHandoff) {
+  if (handoff.evidenceIncomplete)
+    return JSON.stringify({
+      runId: handoff.runId,
+      status: handoff.status,
+      evidence: "incomplete",
+      error: handoff.error?.slice(0, 2048),
+      detail:
+        "Full evidence could not be sealed; no complete artifact index is claimed.",
+    });
+  if (handoff.evidence) return serializeRunEvidenceHandoff(handoff.evidence);
   const facts = handoff.facts;
   const sections = [
     `Pipeline ${handoff.runId} ${handoff.status}.`,
@@ -317,6 +328,7 @@ export default function pipelines(pi: ExtensionAPI) {
         executionFinish,
         executionFinishSessionCreated,
         featureTaskHost,
+        artifactTools,
       ) =>
         createPipelineSessionFactory({
           modelRegistry: ctx.modelRegistry,
@@ -333,6 +345,7 @@ export default function pipelines(pi: ExtensionAPI) {
           executionFinish,
           executionFinishSessionCreated,
           featureTaskHost,
+          artifactTools,
         }),
       onHandoff: deliver,
     });
@@ -479,6 +492,59 @@ export default function pipelines(pi: ExtensionAPI) {
           workingDir,
           wallclockLimitMs: admitted?.wallclockLimitMs,
         },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "pipeline_artifact_read",
+    label: "Read Pipeline Artifact",
+    description:
+      "Read evidence for a known session-scoped pipeline run. Omit artifactId to obtain the compact index. Reads accept manifest IDs, never filesystem paths.",
+    parameters: Type.Object(
+      {
+        runId: Type.String({ minLength: 1 }),
+        artifactId: Type.Optional(
+          Type.String({ minLength: 1, maxLength: 128 }),
+        ),
+        revision: Type.Optional(Type.Integer({ minimum: 1 })),
+        cursor: Type.Optional(Type.Integer({ minimum: 0 })),
+        maxBytes: Type.Optional(
+          Type.Integer({ minimum: 4, maximum: 64 * 1024 }),
+        ),
+      },
+      { additionalProperties: false },
+    ),
+    async execute(_id, params, _signal, _update, ctx) {
+      const active = getController(ctx);
+      if (!params.artifactId) {
+        const entries = await active.readArtifact(params.runId);
+        if (!Array.isArray(entries))
+          throw new Error("Artifact manifest unavailable.");
+        const selected = entries
+          .filter((entry) => !entry.artifactId.startsWith("event-"))
+          .slice(0, 64);
+        const details = {
+          entries: selected,
+          totalCount: entries.length,
+          omittedCount: entries.length - selected.length,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(details) }],
+          details,
+        };
+      }
+      if (!params.revision)
+        throw new Error("revision is required for artifact reads.");
+      const details = await active.readArtifact(params.runId, {
+        artifactId: params.artifactId,
+        revision: params.revision,
+        cursor: params.cursor,
+        maxBytes: params.maxBytes ?? 16 * 1024,
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(details) }],
+        details,
       };
     },
   });

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ExecutionTree } from "./feature-graph.ts";
 import type {
   FeatureCanonicalPlan,
@@ -22,6 +23,7 @@ import {
   type FeatureTaskWorktreeLifecycle,
   type FeatureTrackedResidualState,
 } from "./feature-task-worktrees.ts";
+import type { CleanupEvidenceSink } from "./cleanup-evidence.ts";
 
 const MAX_TASK_ATTEMPTS = 4;
 const LUNA_MODEL = "openai-codex/gpt-5.6-luna" as const;
@@ -102,6 +104,8 @@ export interface FeatureGraphExecutionResult extends FeatureGraphExecutionSnapsh
   readonly error?: string;
   /** Call only after the entire feature pipeline, including review/audit, succeeds. */
   cleanupCompleted(): ReadonlyArray<string>;
+  /** Record controller-owned resources retained for a failed or cancelled run. */
+  recordRetainedResources(reason: string): void;
 }
 
 export interface FeatureGraphExecutionOptions {
@@ -117,8 +121,49 @@ export interface FeatureGraphExecutionOptions {
   ) => Promise<FeatureTaskSessionOutcome>;
   readonly runCheck?: FeatureCheckRunner;
   readonly signal?: AbortSignal;
+  readonly now?: () => number;
+  readonly controllerInstanceId?: string;
+  readonly cleanupEvidence?: CleanupEvidenceSink;
   readonly onSnapshot?: (snapshot: FeatureGraphExecutionSnapshot) => void;
+  readonly onEvidence?: (event: FeatureGraphEvidenceEvent) => void;
 }
+
+export type FeatureGraphEvidenceKind =
+  "fork_eligible" | "branch_task_membership" | "join_started" | "join_finished";
+
+export type FeatureGraphEvidenceStatus =
+  "eligible" | "member" | "joining" | "completed" | "failed" | "cancelled";
+
+export type FeatureGraphEvidenceTaskStatus = FeatureTaskSnapshot["status"];
+
+export interface FeatureGraphEvidenceDependency {
+  readonly branchId: string;
+  readonly taskId: string;
+  readonly status: FeatureGraphEvidenceTaskStatus;
+}
+
+function createFeatureGraphEvidence(input: {
+  readonly runId: string;
+  readonly controllerInstanceId: string;
+  readonly kind: FeatureGraphEvidenceKind;
+  readonly forkId: string;
+  readonly branchId: string;
+  readonly taskId?: string;
+  readonly joinId: string;
+  readonly atMs: number;
+  readonly status: FeatureGraphEvidenceStatus;
+  readonly dependencies: ReadonlyArray<FeatureGraphEvidenceDependency>;
+}) {
+  return {
+    ...input,
+    dependencies: input.dependencies.map((dependency) => ({ ...dependency })),
+  } as const;
+}
+
+export type FeatureGraphEvidenceEvent = ReturnType<
+  typeof createFeatureGraphEvidence
+>;
+export type FeatureGraphEvidence = FeatureGraphEvidenceEvent;
 
 export type FeatureGraphExecutor = typeof executeFeatureGraph;
 
@@ -161,12 +206,14 @@ interface BranchCommit {
 
 interface BranchExecution {
   branchId: string;
+  taskIds: ReadonlyArray<string>;
   commits: BranchCommit[];
   visibleCommits: Map<string, string>;
   repairs: FeatureCompletedDependency[];
 }
 
 interface ForkPlan {
+  forkId: string;
   joinId: string;
   branches: ReadonlyArray<{
     tree: ExecutionTree;
@@ -189,9 +236,16 @@ function firstTaskId(tree: ExecutionTree): string {
   return tree.branches.map(firstTaskId).sort()[0] ?? "task";
 }
 
+function taskIds(tree: ExecutionTree): ReadonlyArray<string> {
+  if (tree.kind === "task") return [tree.taskId];
+  const children = tree.kind === "sequence" ? tree.steps : tree.branches;
+  return children.flatMap(taskIds);
+}
+
 function planForks(tree: ExecutionTree) {
   const plans = new Map<ExecutionTree, ForkPlan>();
   let branchNumber = 0;
+  let forkNumber = 0;
   let joinNumber = 0;
   const visit = (node: ExecutionTree) => {
     if (node.kind === "task") return;
@@ -203,7 +257,11 @@ function planForks(tree: ExecutionTree) {
       .map((branch) => ({ tree: branch, firstTaskId: firstTaskId(branch) }))
       .sort((left, right) => left.firstTaskId.localeCompare(right.firstTaskId))
       .map((branch) => ({ ...branch, number: ++branchNumber }));
-    plans.set(node, { joinId: `join-${++joinNumber}`, branches });
+    plans.set(node, {
+      forkId: `fork-${++forkNumber}`,
+      joinId: `join-${++joinNumber}`,
+      branches,
+    });
     for (const branch of branches) visit(branch.tree);
   };
   visit(tree);
@@ -321,10 +379,13 @@ export async function executeFeatureGraph(
   const ownedAbort = new AbortController();
   const signal = options.signal ?? ownedAbort.signal;
   const runCheck = options.runCheck ?? runFeatureCheckCommand;
+  const now = options.now ?? (() => performance.now());
+  const controllerInstanceId = options.controllerInstanceId ?? randomUUID();
   const lifecycle = createFeatureTaskWorktreeLifecycle({
     runId: options.runId,
     workingDir: options.workingDir,
     worktreeRoot: options.worktreeRoot,
+    cleanupEvidence: options.cleanupEvidence,
   });
   const tasksById = new Map(options.graph.tasks.map((task) => [task.id, task]));
   const taskOrder = new Map(
@@ -343,8 +404,29 @@ export async function executeFeatureGraph(
   const results = new Map<string, FeatureTaskSnapshot>();
   const branchCommits = new Map<string, BranchCommit[]>([["root", []]]);
   const forkPlans = planForks(options.tree);
+  const finishedJoins = new Set<string>();
   let launchingStopped = false;
   let terminalError: string | undefined;
+
+  const emitEvidence = (
+    input: Omit<
+      Parameters<typeof createFeatureGraphEvidence>[0],
+      "runId" | "controllerInstanceId" | "atMs"
+    >,
+  ) => {
+    if (!options.onEvidence) return;
+    const event = createFeatureGraphEvidence({
+      ...input,
+      runId: options.runId,
+      controllerInstanceId,
+      atMs: now(),
+    });
+    try {
+      options.onEvidence(event);
+    } catch {
+      // Evidence observation must not change graph execution authority.
+    }
+  };
 
   branchSnapshots.set("root", branchSnapshot(lifecycle.root, "waiting"));
 
@@ -390,6 +472,80 @@ export async function executeFeatureGraph(
     mutable.preparation.complete = current.prepared;
     mutable.preparation.baselinePaths = [...current.preparationBaseline];
     publish();
+  };
+
+  const branchTaskDependencies = (
+    branchId: string,
+    ids: ReadonlyArray<string>,
+  ) =>
+    ids.map((taskId) => ({
+      branchId,
+      taskId,
+      status: taskSnapshots.get(taskId)?.status ?? "waiting",
+    }));
+
+  const emitForkMembership = (
+    plan: ForkPlan,
+    branchId: string,
+    ids: ReadonlyArray<string>,
+  ) => {
+    emitEvidence({
+      kind: "fork_eligible",
+      forkId: plan.forkId,
+      branchId,
+      joinId: plan.joinId,
+      status: "eligible",
+      dependencies: branchTaskDependencies(branchId, ids),
+    });
+    for (const taskId of ids) {
+      emitEvidence({
+        kind: "branch_task_membership",
+        forkId: plan.forkId,
+        branchId,
+        taskId,
+        joinId: plan.joinId,
+        status: "member",
+        dependencies: [],
+      });
+    }
+  };
+
+  const joinDependencies = (children: ReadonlyArray<BranchExecution>) =>
+    children.flatMap(({ branchId, taskIds: ids }) =>
+      branchTaskDependencies(branchId, ids),
+    );
+
+  const emitJoinFinished = (
+    plan: ForkPlan,
+    parentBranchId: string,
+    children: ReadonlyArray<BranchExecution>,
+    status: "completed" | "failed" | "cancelled",
+  ) => {
+    if (finishedJoins.has(plan.joinId)) return;
+    finishedJoins.add(plan.joinId);
+    emitEvidence({
+      kind: "join_finished",
+      forkId: plan.forkId,
+      branchId: parentBranchId,
+      joinId: plan.joinId,
+      status,
+      dependencies: joinDependencies(children),
+    });
+  };
+
+  const emitJoinStarted = (
+    plan: ForkPlan,
+    parentBranchId: string,
+    children: ReadonlyArray<BranchExecution>,
+  ) => {
+    emitEvidence({
+      kind: "join_started",
+      forkId: plan.forkId,
+      branchId: parentBranchId,
+      joinId: plan.joinId,
+      status: "joining",
+      dependencies: joinDependencies(children),
+    });
   };
 
   const taskDependencies = (
@@ -763,153 +919,182 @@ export async function executeFeatureGraph(
     joinSnapshots.set(join.id, join);
     const parentSnapshot = branchSnapshots.get(parent.branchId)!;
     parentSnapshot.status = "joining";
+    emitJoinStarted(plan, parent.branchId, children);
     publish();
-    const orderedChildren = [...children].sort((left, right) => {
-      const leftId = branchSnapshots.get(left.branchId)!.firstTaskId;
-      const rightId = branchSnapshots.get(right.branchId)!.firstTaskId;
-      return leftId.localeCompare(rightId);
-    });
-    for (const child of orderedChildren) {
-      for (const source of child.commits) {
+    try {
+      const orderedChildren = [...children].sort((left, right) => {
+        const leftId = branchSnapshots.get(left.branchId)!.firstTaskId;
+        const rightId = branchSnapshots.get(right.branchId)!.firstTaskId;
+        return leftId.localeCompare(rightId);
+      });
+      for (const child of orderedChildren) {
+        for (const source of child.commits) {
+          if (signal.aborted) {
+            join.status = "cancelled";
+            publish();
+            emitJoinFinished(plan, parent.branchId, children, "cancelled");
+            return false;
+          }
+          const parentBefore = lifecycle.branch(parent.branchId).head;
+          const cherryPick = lifecycle.cherryPick(
+            parent.branchId,
+            source.commit,
+          );
+          let integratedCommit: string;
+          if (cherryPick.status === "conflict") {
+            join.status = "conflict";
+            publish();
+            const conflictTask = internalTask({
+              id: `__${join.id}-conflict-${join.commits.length + 1}`,
+              objective: `Resolve the active cherry-pick conflict for task ${source.taskId}.`,
+              plan: options.canonicalPlan,
+              checks: options.graph.baselineChecks,
+              instructions: [
+                "Resolve every active conflict without aborting or restarting the controller-owned cherry-pick.",
+                "Use pipeline_task_finalize to stage selected resolution paths and continue the existing cherry-pick.",
+              ],
+              evidence: [
+                `Conflicting source commit: ${source.commit}`,
+                `Conflicting task summary: ${source.summary}`,
+                `Already integrated commits: ${join.commits.map(({ integratedCommit: commit }) => commit).join(", ") || "none"}`,
+                `Already integrated summaries: ${parent.commits.map(({ taskId, summary }) => `${taskId}: ${summary}`).join(" | ") || "none"}`,
+                `Conflict paths: ${cherryPick.conflictPaths.join(", ")}`,
+              ],
+            });
+            join.status = "resolving";
+            publish();
+            const resolved = await runInternalRuntime({
+              branch: parent,
+              join,
+              task: conflictTask,
+              kind: "conflict-resolution",
+              baseCommit: parentBefore,
+              conflict: true,
+            });
+            if (resolved.status !== "validated" || !resolved.validatedCommit) {
+              join.status = signal.aborted ? "cancelled" : "failed";
+              join.error =
+                resolved.error ?? "Conflict resolution did not validate.";
+              terminalError ??= join.error;
+              publish();
+              emitJoinFinished(
+                plan,
+                parent.branchId,
+                children,
+                signal.aborted ? "cancelled" : "failed",
+              );
+              return false;
+            }
+            integratedCommit = resolved.validatedCommit;
+            // The source task owns the cherry-picked commit; the resolver is provenance only.
+            const repairIndex = parent.commits.findIndex(
+              ({ taskId }) => taskId === conflictTask.id,
+            );
+            if (repairIndex >= 0) parent.commits.splice(repairIndex, 1);
+          } else {
+            integratedCommit = cherryPick.integratedCommit;
+          }
+          const mapping: FeatureIntegratedCommit = {
+            taskId: source.taskId,
+            sourceCommit: source.commit,
+            integratedCommit,
+            childBranchId: child.branchId,
+          };
+          join.commits.push(mapping);
+          parent.commits.push({ ...source, commit: integratedCommit });
+          parent.visibleCommits.set(source.taskId, integratedCommit);
+          if (
+            source.taskId.startsWith("__join-") &&
+            source.taskId.endsWith("-repair")
+          ) {
+            parent.repairs.push({
+              taskId: source.taskId,
+              commit: integratedCommit,
+              summary: source.summary,
+            });
+          }
+          updateBranch(parent.branchId);
+        }
+      }
+      const verification = await runJoinChecks(join, parent);
+      if (!verification.passed) {
         if (signal.aborted) {
           join.status = "cancelled";
           publish();
+          emitJoinFinished(plan, parent.branchId, children, "cancelled");
           return false;
         }
-        const parentBefore = lifecycle.branch(parent.branchId).head;
-        const cherryPick = lifecycle.cherryPick(parent.branchId, source.commit);
-        let integratedCommit: string;
-        if (cherryPick.status === "conflict") {
-          join.status = "conflict";
+        join.status = "repairing";
+        const repairTask = internalTask({
+          id: `__${join.id}-repair`,
+          objective: `Repair semantic integration failures after ${join.id}.`,
+          plan: options.canonicalPlan,
+          checks: options.graph.baselineChecks,
+          instructions: [
+            "Repair the combined child histories without rewriting any source task commit.",
+            "Use the failed join-check evidence and finalize one controller-owned repair commit.",
+          ],
+          evidence: [
+            ...join.commits.map(
+              ({ taskId, sourceCommit, integratedCommit }) =>
+                `${taskId}: source ${sourceCommit}, integrated ${integratedCommit}`,
+            ),
+            ...join.checks.map(
+              ({ checkId, status, stderr }) =>
+                `${checkId}: ${status}; ${stderr.slice(0, 4 * 1024)}`,
+            ),
+          ],
+        });
+        join.repairTaskId = repairTask.id;
+        publish();
+        const repaired = await runInternalRuntime({
+          branch: parent,
+          join,
+          task: repairTask,
+          kind: "join-repair",
+          baseCommit: verification.baseCommit,
+        });
+        if (repaired.status !== "validated" || !repaired.validatedCommit) {
+          join.status = signal.aborted ? "cancelled" : "failed";
+          join.error = repaired.error ?? "Join repair did not validate.";
+          terminalError ??= join.error;
           publish();
-          const conflictTask = internalTask({
-            id: `__${join.id}-conflict-${join.commits.length + 1}`,
-            objective: `Resolve the active cherry-pick conflict for task ${source.taskId}.`,
-            plan: options.canonicalPlan,
-            checks: options.graph.baselineChecks,
-            instructions: [
-              "Resolve every active conflict without aborting or restarting the controller-owned cherry-pick.",
-              "Use pipeline_task_finalize to stage selected resolution paths and continue the existing cherry-pick.",
-            ],
-            evidence: [
-              `Conflicting source commit: ${source.commit}`,
-              `Conflicting task summary: ${source.summary}`,
-              `Already integrated commits: ${join.commits.map(({ integratedCommit: commit }) => commit).join(", ") || "none"}`,
-              `Already integrated summaries: ${parent.commits.map(({ taskId, summary }) => `${taskId}: ${summary}`).join(" | ") || "none"}`,
-              `Conflict paths: ${cherryPick.conflictPaths.join(", ")}`,
-            ],
-          });
-          join.status = "resolving";
-          publish();
-          const resolved = await runInternalRuntime({
-            branch: parent,
-            join,
-            task: conflictTask,
-            kind: "conflict-resolution",
-            baseCommit: parentBefore,
-            conflict: true,
-          });
-          if (resolved.status !== "validated" || !resolved.validatedCommit) {
-            join.status = signal.aborted ? "cancelled" : "failed";
-            join.error =
-              resolved.error ?? "Conflict resolution did not validate.";
-            terminalError ??= join.error;
-            publish();
-            return false;
-          }
-          integratedCommit = resolved.validatedCommit;
-          // The source task owns the cherry-picked commit; the resolver is provenance only.
-          const repairIndex = parent.commits.findIndex(
-            ({ taskId }) => taskId === conflictTask.id,
+          emitJoinFinished(
+            plan,
+            parent.branchId,
+            children,
+            signal.aborted ? "cancelled" : "failed",
           );
-          if (repairIndex >= 0) parent.commits.splice(repairIndex, 1);
-        } else {
-          integratedCommit = cherryPick.integratedCommit;
+          return false;
         }
-        const mapping: FeatureIntegratedCommit = {
-          taskId: source.taskId,
-          sourceCommit: source.commit,
-          integratedCommit,
-          childBranchId: child.branchId,
-        };
-        join.commits.push(mapping);
-        parent.commits.push({ ...source, commit: integratedCommit });
-        parent.visibleCommits.set(source.taskId, integratedCommit);
-        if (
-          source.taskId.startsWith("__join-") &&
-          source.taskId.endsWith("-repair")
-        ) {
-          parent.repairs.push({
-            taskId: source.taskId,
-            commit: integratedCommit,
-            summary: source.summary,
-          });
-        }
+        join.checks = repaired.checks.map((check) => ({ ...check }));
+        parent.visibleCommits.set(repairTask.id, repaired.validatedCommit);
+        parent.repairs.push({
+          taskId: repairTask.id,
+          commit: repaired.validatedCommit,
+          summary: repaired.summary ?? repairTask.objective,
+        });
         updateBranch(parent.branchId);
       }
-    }
-    const verification = await runJoinChecks(join, parent);
-    if (!verification.passed) {
-      if (signal.aborted) {
-        join.status = "cancelled";
-        publish();
-        return false;
+      for (const child of children) {
+        const cleanupWarnings = lifecycle.removeJoinedWorktree(child.branchId);
+        join.warnings.push(...cleanupWarnings);
+        warnings.push(...cleanupWarnings);
       }
-      join.status = "repairing";
-      const repairTask = internalTask({
-        id: `__${join.id}-repair`,
-        objective: `Repair semantic integration failures after ${join.id}.`,
-        plan: options.canonicalPlan,
-        checks: options.graph.baselineChecks,
-        instructions: [
-          "Repair the combined child histories without rewriting any source task commit.",
-          "Use the failed join-check evidence and finalize one controller-owned repair commit.",
-        ],
-        evidence: [
-          ...join.commits.map(
-            ({ taskId, sourceCommit, integratedCommit }) =>
-              `${taskId}: source ${sourceCommit}, integrated ${integratedCommit}`,
-          ),
-          ...join.checks.map(
-            ({ checkId, status, stderr }) =>
-              `${checkId}: ${status}; ${stderr.slice(0, 4 * 1024)}`,
-          ),
-        ],
-      });
-      join.repairTaskId = repairTask.id;
+      join.status = "completed";
+      parentSnapshot.status = "running";
       publish();
-      const repaired = await runInternalRuntime({
-        branch: parent,
-        join,
-        task: repairTask,
-        kind: "join-repair",
-        baseCommit: verification.baseCommit,
-      });
-      if (repaired.status !== "validated" || !repaired.validatedCommit) {
-        join.status = signal.aborted ? "cancelled" : "failed";
-        join.error = repaired.error ?? "Join repair did not validate.";
-        terminalError ??= join.error;
-        publish();
-        return false;
-      }
-      join.checks = repaired.checks.map((check) => ({ ...check }));
-      parent.visibleCommits.set(repairTask.id, repaired.validatedCommit);
-      parent.repairs.push({
-        taskId: repairTask.id,
-        commit: repaired.validatedCommit,
-        summary: repaired.summary ?? repairTask.objective,
-      });
-      updateBranch(parent.branchId);
+      emitJoinFinished(plan, parent.branchId, children, "completed");
+      return true;
+    } catch (error) {
+      const status = signal.aborted ? "cancelled" : "failed";
+      join.status = status;
+      join.error ??= boundedError(error);
+      terminalError ??= join.error;
+      publish();
+      emitJoinFinished(plan, parent.branchId, children, status);
+      throw error;
     }
-    for (const child of children) {
-      const cleanupWarnings = lifecycle.removeJoinedWorktree(child.branchId);
-      join.warnings.push(...cleanupWarnings);
-      warnings.push(...cleanupWarnings);
-    }
-    join.status = "completed";
-    parentSnapshot.status = "running";
-    publish();
-    return true;
   };
 
   const executeNode = async (
@@ -937,16 +1122,17 @@ export async function executeFeatureGraph(
       branchSnapshots.set(worktree.id, branchSnapshot(worktree, "waiting"));
       branchCommits.set(worktree.id, []);
       branchResidualPaths.set(worktree.id, new Set());
-      return {
-        plan: child,
-        execution: {
-          branchId: worktree.id,
-          commits: branchCommits.get(worktree.id)!,
-          visibleCommits: new Map(branch.visibleCommits),
-          repairs: [...branch.repairs],
-        },
-      };
+      const execution = {
+        branchId: worktree.id,
+        taskIds: taskIds(child.tree),
+        commits: branchCommits.get(worktree.id)!,
+        visibleCommits: new Map(branch.visibleCommits),
+        repairs: [...branch.repairs],
+      } satisfies BranchExecution;
+      return { plan: child, execution };
     });
+    for (const { execution } of children)
+      emitForkMembership(plan, execution.branchId, execution.taskIds);
     publish();
     const outcomes = await Promise.all(
       children.map(async ({ plan: child, execution }) => {
@@ -967,12 +1153,18 @@ export async function executeFeatureGraph(
         return { ok, execution };
       }),
     );
-    if (outcomes.some(({ ok }) => !ok)) return false;
-    return joinBranches(
-      node,
-      branch,
-      outcomes.map(({ execution }) => execution),
-    );
+    const childExecutions = outcomes.map(({ execution }) => execution);
+    if (outcomes.some(({ ok }) => !ok)) {
+      emitJoinStarted(plan, branch.branchId, childExecutions);
+      emitJoinFinished(
+        plan,
+        branch.branchId,
+        childExecutions,
+        signal.aborted ? "cancelled" : "failed",
+      );
+      return false;
+    }
+    return joinBranches(node, branch, childExecutions);
   };
 
   publish();
@@ -980,10 +1172,11 @@ export async function executeFeatureGraph(
   try {
     const root = {
       branchId: "root",
+      taskIds: taskIds(options.tree),
       commits: branchCommits.get("root")!,
       visibleCommits: new Map<string, string>(),
       repairs: [],
-    };
+    } satisfies BranchExecution;
     const completed = await executeNode(options.tree, root);
     status = completed ? "completed" : signal.aborted ? "cancelled" : "failed";
   } catch (error) {
@@ -1022,6 +1215,9 @@ export async function executeFeatureGraph(
       const cleanupWarnings = lifecycle.cleanupCompleted();
       warnings.push(...cleanupWarnings);
       return cleanupWarnings;
+    },
+    recordRetainedResources(reason: string) {
+      lifecycle.recordRetainedResources(reason);
     },
   } satisfies FeatureGraphExecutionResult;
 }

@@ -365,6 +365,7 @@ export interface PipelineWallclockLimitation {
 }
 
 export interface PipelineRunSnapshot {
+  readonly acceptance?: import("./run-acceptance.ts").AcceptanceEnvelope;
   readonly id: string;
   readonly definition: PipelineDefinitionId;
   readonly workingDir: string;
@@ -461,6 +462,12 @@ export function assertPipelineGitCommitSupported(
 }
 
 export interface PipelineHandoff {
+  readonly evidence?: import("./run-evidence-handoff.ts").RunEvidenceHandoff;
+  readonly acceptance?: import("./run-acceptance.ts").AcceptanceEnvelope;
+  readonly evidenceManifest?: ReadonlyArray<
+    import("./run-artifacts.ts").RunArtifactManifestEntry
+  >;
+  readonly evidenceIncomplete?: boolean;
   readonly runId: string;
   readonly definition: PipelineDefinitionId;
   readonly status: Exclude<PipelineRunStatus, "starting" | "running">;

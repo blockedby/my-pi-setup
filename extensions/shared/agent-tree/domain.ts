@@ -78,9 +78,17 @@ export type AgentTreeSessionEvent =
         | { readonly type: "cancelled"; readonly finalText?: string };
     };
 
+export interface AgentTreeExecutionMetadata {
+  readonly provider: string;
+  readonly model: string;
+  readonly thinkingLevel?: AgentNodeSnapshot["thinkingLevel"];
+  readonly servingRevision?: string;
+}
+
 export interface AgentTreeSession {
   readonly sessionFile?: string;
   readonly activeTools: ReadonlyArray<string>;
+  readonly executionMetadata?: AgentTreeExecutionMetadata;
   readonly isStreaming: boolean;
   subscribe(listener: (event: AgentTreeSessionEvent) => void): () => void;
   prompt(text: string): Promise<void>;
@@ -113,6 +121,61 @@ export interface AgentNodeSpec {
 export interface AgentTreeSessionFactory {
   create(spec: AgentNodeSpec): Promise<AgentTreeSession>;
 }
+
+export interface TreeEvidenceIdentity {
+  readonly nodeId: string;
+  readonly scopeId?: string;
+  readonly parentId?: string;
+  readonly role: string;
+  readonly attempt: number;
+  readonly requestedModel: string;
+  readonly thinkingLevel?: AgentNodeSnapshot["thinkingLevel"];
+}
+
+export type TreeEvidenceSessionEvent =
+  | { readonly type: "run_started" }
+  | {
+      readonly type: "tool";
+      readonly phase: "call" | "result";
+      readonly toolCallId: string;
+      readonly name: string;
+      readonly isError: boolean;
+      readonly failureDetail?: string;
+    }
+  | {
+      readonly type: "settled";
+      readonly outcome:
+        | { readonly type: "completed" }
+        | { readonly type: "failed"; readonly error: string }
+        | { readonly type: "cancelled" };
+    };
+
+export type TreeEvidenceDispatchKind = "prompt" | "send" | "deferred";
+export type AgentTreeEvidenceStatus = "complete" | "incomplete";
+
+export type TreeEvidencePayload =
+  | { readonly type: "spawn_requested" }
+  | {
+      readonly type: "session_created";
+      readonly executionMetadata?: AgentTreeExecutionMetadata;
+    }
+  | { readonly type: "spawn_failed"; readonly error: string }
+  | {
+      readonly type: "session_event";
+      readonly event: TreeEvidenceSessionEvent;
+    }
+  | { readonly type: "dispatch"; readonly kind: TreeEvidenceDispatchKind }
+  | { readonly type: "cancelled" }
+  | { readonly type: "disposed" };
+
+export type TreeEvidenceEvent = TreeEvidenceIdentity & TreeEvidencePayload;
+
+export type TreeEvidenceObserver = (event: TreeEvidenceEvent) => void;
+
+export type TreeEvidenceErrorHandler = (
+  error: unknown,
+  event: TreeEvidenceEvent,
+) => void;
 
 export interface AgentTreeReadModel {
   list(): ReadonlyArray<AgentNodeSnapshot>;

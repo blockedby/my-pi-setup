@@ -25,12 +25,14 @@ import {
   PipelineController,
   pipelineAuditSubmissionAllowed,
 } from "./controller.ts";
+import type { RunArtifactStore } from "./run-artifacts.ts";
 import {
   createPipelineAuditSubmitTool,
   pipelineSessionToolPolicy,
 } from "./session.ts";
 import {
   AUDIT_SEGMENT_LUNA_ROLES,
+  AUDIT_SYNTHESIS_ROLE,
   EXECUTOR_AUDIT_ROLE,
   LUNA_MODEL,
   SOL_MODEL,
@@ -90,15 +92,65 @@ class FakeSession implements AgentTreeSession {
   }
 }
 
+const AUDIT_STARTUP_ROLES = new Set([
+  AUDIT_SYNTHESIS_ROLE,
+  ...AUDIT_SEGMENT_LUNA_ROLES,
+]);
+
+function auditStartupReady(snapshot: ReturnType<PipelineController["get"]>) {
+  if (!snapshot) return false;
+  const roles = new Set(snapshot.agents.map((agent) => agent.role));
+  return (
+    snapshot.status === "running" &&
+    snapshot.stage === "audit" &&
+    snapshot.auditSegment?.expectedReportCount ===
+      AUDIT_SEGMENT_LUNA_ROLES.length &&
+    roles.size === AUDIT_STARTUP_ROLES.size &&
+    [...AUDIT_STARTUP_ROLES].every((role) => roles.has(role)) &&
+    snapshot.agents.every((agent) => agent.status !== "starting")
+  );
+}
+
+function isArtifactStore(
+  value: unknown,
+): value is Pick<RunArtifactStore, "writeSnapshot"> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof Reflect.get(value, "writeSnapshot") === "function"
+  );
+}
+
+function artifactStoreFor(controller: PipelineController, runId: string) {
+  const runs: unknown = Reflect.get(controller, "runs");
+  if (!(runs instanceof Map))
+    throw new Error("Controller run map is unavailable.");
+  const run = runs.get(runId);
+  if (typeof run !== "object" || run === null)
+    throw new Error(`Controller run ${runId} is unavailable.`);
+  const store: unknown = Reflect.get(run, "evidenceStore");
+  if (!isArtifactStore(store))
+    throw new Error(`Artifact store for ${runId} is unavailable.`);
+  return store;
+}
+
 function harness() {
   const sessions: FakeSession[] = [];
   const handoffs: PipelineHandoff[] = [];
   const auditTools = new Map<string, ToolDefinition>();
+  const handoffResolvers = new Map<
+    string,
+    (handoff: PipelineHandoff) => void
+  >();
   let submitAuditCallback:
     | ((runId: string, role: string, token: string, value: unknown) => void)
     | undefined;
   let agent = 0;
+  const artifactRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-audit-artifacts-"),
+  );
   const controller = new PipelineController({
+    artifactRoot,
     makeRunId: (pipelineName) => `${pipelineName}-00000001`,
     makeAgentId: () => `audit-agent-${++agent}`,
     createSessionFactory: (
@@ -134,12 +186,144 @@ function harness() {
     }),
     onHandoff: (handoff) => {
       handoffs.push(handoff);
+      handoffResolvers.get(handoff.runId)?.(handoff);
     },
   });
   return {
     controller,
     sessions,
     handoffs,
+    pausePreAuditSnapshot(runId: string) {
+      const store = artifactStoreFor(controller, runId);
+      const originalWriteSnapshot = store.writeSnapshot;
+      let releaseGate = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let markStarted = () => {};
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      store.writeSnapshot = async (request) => {
+        if (request.artifactId === "pre-audit-evidence") {
+          markStarted();
+          await gate;
+        }
+        return originalWriteSnapshot(request);
+      };
+      let released = false;
+      return {
+        started,
+        release() {
+          if (released) return;
+          released = true;
+          store.writeSnapshot = originalWriteSnapshot;
+          releaseGate();
+        },
+      };
+    },
+    async waitForAuditReady(runId: string, timeoutMs = 5_000) {
+      const ready = (snapshot: ReturnType<PipelineController["get"]>) =>
+        auditStartupReady(snapshot) &&
+        auditTools.size === AUDIT_STARTUP_ROLES.size &&
+        [...AUDIT_STARTUP_ROLES].every((role) => auditTools.has(role));
+      const current = controller.get(runId);
+      if (ready(current)) return current;
+      if (
+        current &&
+        current.status !== "starting" &&
+        current.status !== "running"
+      ) {
+        throw new Error(
+          `Audit startup ended before readiness: ${current.status}.`,
+        );
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        let checkScheduled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let unsubscribe = () => {};
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) clearTimeout(timer);
+          unsubscribe();
+          if (error) reject(error);
+          else resolve();
+        };
+        const check = () => {
+          const snapshot = controller.get(runId);
+          if (ready(snapshot)) {
+            finish();
+          } else if (
+            snapshot &&
+            snapshot.status !== "starting" &&
+            snapshot.status !== "running"
+          ) {
+            finish(
+              new Error(
+                `Audit startup ended before readiness: ${snapshot.status}.`,
+              ),
+            );
+          }
+        };
+        const scheduleCheck = () => {
+          if (checkScheduled) return;
+          checkScheduled = true;
+          // A child spawn notifies before its registration returns; recheck at
+          // the event-loop boundary so readiness covers the registration too.
+          setImmediate(() => {
+            checkScheduled = false;
+            if (!settled) check();
+          });
+        };
+        timer = setTimeout(
+          () =>
+            finish(
+              new Error(
+                `Timed out waiting for audit segment and children for ${runId}.`,
+              ),
+            ),
+          timeoutMs,
+        );
+        unsubscribe = controller.subscribe(scheduleCheck);
+        scheduleCheck();
+      });
+      return controller.get(runId);
+    },
+    async waitForHandoff(runId: string, timeoutMs = 5_000) {
+      const existing = handoffs.find((handoff) => handoff.runId === runId);
+      if (existing) return existing;
+
+      let resolveHandoff: (handoff: PipelineHandoff) => void = () => {};
+      const pending = new Promise<PipelineHandoff>((resolve) => {
+        resolveHandoff = resolve;
+      });
+      handoffResolvers.set(runId, resolveHandoff);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          pending,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Timed out waiting for terminal handoff for ${runId}.`,
+                  ),
+                ),
+              timeoutMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        if (handoffResolvers.get(runId) === resolveHandoff) {
+          handoffResolvers.delete(runId);
+        }
+      }
+    },
     async submitAudit(role: string, value: unknown) {
       const tool = auditTools.get(role);
       assert.ok(tool);
@@ -483,13 +667,13 @@ test("audit submission tool policy is limited to reusable audit-segment sessions
 
 test("audit submissions reject unregistered session tokens", async () => {
   const run = harness();
-  run.controller.start({
+  const runId = run.controller.start({
     pipelineName: "audit-submission-run",
     pipeline: "audit-pipeline",
     task: "Audit submission authorization",
     workingDir: "/tmp/work",
   });
-  await flush();
+  await run.waitForAuditReady(runId);
   assert.throws(
     () =>
       run.submitUnauthorized(
@@ -611,7 +795,7 @@ test("standalone audit graph is Luna-only and activates synthesis on the first v
     workingDir: "/tmp/work",
     audit: { mode: "initial", acceptanceCriteria: ["The contract holds"] },
   });
-  await flush();
+  await run.waitForAuditReady(runId);
 
   const snapshot = run.controller.get(runId);
   assert.equal(snapshot?.definition, "audit-pipeline");
@@ -683,12 +867,59 @@ test("standalone audit graph is Luna-only and activates synthesis on the first v
   assert.equal(completed?.auditSegment?.integratedReportCount, 5);
   assert.equal(completed?.auditSegment?.revision, 2);
   assert.equal(completed?.auditSegment?.finalReportValidated, true);
+  await run.waitForHandoff(runId);
   assert.equal(run.handoffs.length, 1);
   assert.equal(
     run.handoffs[0]?.facts.auditReport?.reportType,
     "audit-synthesis-final",
   );
   await run.controller.dispose();
+});
+
+test("cancellation during the pre-audit evidence snapshot does not spawn late children", async () => {
+  const run = harness();
+  const runId = run.controller.start({
+    pipelineName: "audit-snapshot-cancellation",
+    pipeline: "audit-pipeline",
+    task: "Cancel during audit evidence preparation",
+    workingDir: "/tmp/work",
+  });
+  const snapshotGate = run.pausePreAuditSnapshot(runId);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      snapshotGate.started,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                "Timed out waiting for the pre-audit evidence snapshot.",
+              ),
+            ),
+          5_000,
+        );
+      }),
+    ]);
+    await run.controller.cancelRun(runId);
+    snapshotGate.release();
+    await run.waitForHandoff(runId);
+
+    const snapshot = run.controller.get(runId);
+    assert.equal(snapshot?.status, "cancelled");
+    assert.equal(snapshot?.auditSegment, undefined);
+    assert.equal(
+      run.sessions.some((session) =>
+        AUDIT_SEGMENT_LUNA_ROLES.some((role) => role === session.spec.role),
+      ),
+      false,
+    );
+    assert.equal(snapshot?.agents.length, 1);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    snapshotGate.release();
+    await run.controller.dispose();
+  }
 });
 
 test("controller captures fresh Git status and diff evidence after executor settlement", async () => {
@@ -718,7 +949,7 @@ test("controller captures fresh Git status and diff evidence after executor sett
       task: "Observe executor artifacts",
       workingDir: workspace,
     });
-    await flush();
+    await run.waitForAuditReady(runId);
     const firstRole = STATIC_LUNA_AUDIT_ROLES[0];
     settle(sessionFor(run, firstRole), trackReport(firstRole));
     await flush();
@@ -744,7 +975,8 @@ test("controller captures fresh Git status and diff evidence after executor sett
     );
     await flush();
 
-    const report = run.handoffs[0]?.facts.auditReport;
+    const handoff = await run.waitForHandoff(runId);
+    const report = handoff.facts.auditReport;
     assert.equal(run.controller.get(runId)?.status, "completed");
     assert.equal(report?.hostWorkspaceObservation.workspaceChanged, true);
     assert.match(
@@ -769,7 +1001,7 @@ test("track schema corrections are independent per session and preserve the run"
     task: "Audit retry isolation",
     workingDir: "/tmp/work",
   });
-  await flush();
+  await run.waitForAuditReady(runId);
   const firstRole = AUDIT_SEGMENT_LUNA_ROLES[0];
   const secondRole = AUDIT_SEGMENT_LUNA_ROLES[1];
   const first = sessionFor(run, firstRole);
@@ -806,7 +1038,7 @@ test("malformed executor evidence receives same-session correction without losin
     task: "Audit executor correction",
     workingDir: "/tmp/work",
   });
-  await flush();
+  await run.waitForAuditReady(runId);
   const executor = sessionFor(run, EXECUTOR_AUDIT_ROLE);
   settle(
     executor,
@@ -837,7 +1069,7 @@ test("a fourth schema error in one track session fails and cancels the run", asy
     task: "Audit exhausted retry budget",
     workingDir: "/tmp/work",
   });
-  await flush();
+  await run.waitForAuditReady(runId);
   const failedRole = AUDIT_SEGMENT_LUNA_ROLES[0];
   const failed = sessionFor(run, failedRole);
 
@@ -849,6 +1081,7 @@ test("a fourth schema error in one track session fails and cancels the run", asy
   assert.equal(run.controller.get(runId)?.status, "failed");
   assert.equal(failed.sends.length, 3);
   assert.equal(sessionFor(run, AUDIT_SEGMENT_LUNA_ROLES[1]).interrupted, 1);
+  await run.waitForHandoff(runId);
   assert.equal(run.handoffs.length, 1);
   await run.controller.dispose();
 });
@@ -861,7 +1094,7 @@ test("a corrected synthesis tool submission continues and finalizes", async () =
     task: "Audit synthesis recovery",
     workingDir: "/tmp/work",
   });
-  await flush();
+  await run.waitForAuditReady(runId);
   const firstRole = AUDIT_SEGMENT_LUNA_ROLES[0];
   settle(sessionFor(run, firstRole), trackReport(firstRole));
   await flush();
@@ -889,6 +1122,7 @@ test("a corrected synthesis tool submission continues and finalizes", async () =
   settle(synthesizer, "tool submission recorded");
   await flush();
   assert.equal(run.controller.get(runId)?.status, "completed");
+  await run.waitForHandoff(runId);
   assert.equal(run.handoffs.length, 1);
   await run.controller.dispose();
 });
@@ -901,7 +1135,7 @@ test("synthesis schema correction budget is cumulative across reducer revisions"
     task: "Audit cumulative synthesis retry budget",
     workingDir: "/tmp/work",
   });
-  await flush();
+  await run.waitForAuditReady(runId);
   const firstRole = AUDIT_SEGMENT_LUNA_ROLES[0];
   settle(sessionFor(run, firstRole), trackReport(firstRole));
   await flush();
@@ -928,6 +1162,7 @@ test("synthesis schema correction budget is cumulative across reducer revisions"
   await flush();
   assert.equal(run.controller.get(runId)?.status, "failed");
   assert.equal(synthesizer.sends.length, 5);
+  await run.waitForHandoff(runId);
   assert.equal(run.handoffs.length, 1);
   await run.controller.dispose();
 });
@@ -1354,7 +1589,7 @@ test("standalone audit fails closed on malformed or missing reports", async () =
     task: "Audit malformed output",
     workingDir: "/tmp/work",
   });
-  await flush();
+  await malformed.waitForAuditReady(malformedId);
   for (let attempt = 0; attempt < 4; attempt++) {
     settle(
       sessionFor(malformed, AUDIT_SEGMENT_LUNA_ROLES[0]),
@@ -1363,10 +1598,8 @@ test("standalone audit fails closed on malformed or missing reports", async () =
     await flush();
   }
   assert.equal(malformed.controller.get(malformedId)?.status, "failed");
-  assert.match(
-    malformed.handoffs[0]?.error ?? "",
-    /invalid or mismatched report/,
-  );
+  const malformedHandoff = await malformed.waitForHandoff(malformedId);
+  assert.match(malformedHandoff.error ?? "", /invalid or mismatched report/);
   await malformed.controller.dispose();
 
   const missing = harness();
@@ -1376,12 +1609,13 @@ test("standalone audit fails closed on malformed or missing reports", async () =
     task: "Audit missing output",
     workingDir: "/tmp/work",
   });
-  await flush();
+  await missing.waitForAuditReady(missingId);
   for (let attempt = 0; attempt < 4; attempt++) {
     settle(sessionFor(missing, AUDIT_SEGMENT_LUNA_ROLES[0]), "");
     await flush();
   }
   assert.equal(missing.controller.get(missingId)?.status, "failed");
+  await missing.waitForHandoff(missingId);
   assert.equal(missing.handoffs.length, 1);
   await missing.controller.dispose();
 });
@@ -1403,7 +1637,7 @@ test("standalone closure audit preserves supplied blocker scope and cancels sess
       touchedInvariants: ["Exactly-once delivery"],
     },
   });
-  await flush();
+  await run.waitForAuditReady(runId);
   for (const role of AUDIT_SEGMENT_LUNA_ROLES) {
     const prompt = sessionFor(run, role).prompts[0] ?? "";
     assert.match(prompt, /Do not reopen broad discovery/);
@@ -1411,6 +1645,7 @@ test("standalone closure audit preserves supplied blocker scope and cancels sess
   }
   await run.controller.cancelRun(runId);
   assert.equal(run.controller.get(runId)?.status, "cancelled");
+  await run.waitForHandoff(runId);
   assert.equal(run.handoffs.length, 1);
   assert.equal(
     run.sessions
@@ -1442,7 +1677,7 @@ test("closure finalization rejects blocker substitution", async () => {
       touchedInvariants: ["Invariant one"],
     },
   });
-  await flush();
+  await run.waitForAuditReady(runId);
   const firstRole = AUDIT_SEGMENT_LUNA_ROLES[0];
   settle(sessionFor(run, firstRole), trackReport(firstRole));
   await flush();
@@ -1471,6 +1706,7 @@ test("closure finalization rejects blocker substitution", async () => {
     await flush();
   }
   assert.equal(run.controller.get(runId)?.status, "failed");
+  await run.waitForHandoff(runId);
   assert.equal(run.handoffs.length, 1);
   await run.controller.dispose();
 });

@@ -10,6 +10,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { CleanupEvidence } from "./cleanup-evidence.ts";
 import {
   cleanupFeatureSandboxRuntime,
   createFeatureToolBoundary,
@@ -17,6 +18,14 @@ import {
 } from "./feature-sandbox.ts";
 
 const context = { cwd: "/" } as unknown as ExtensionContext;
+
+function cleanupEvidence() {
+  const records: CleanupEvidence[] = [];
+  return {
+    records,
+    sink: (record: CleanupEvidence) => records.push(record),
+  };
+}
 
 function tool(
   boundary: ReturnType<typeof createFeatureToolBoundary>,
@@ -333,6 +342,145 @@ test("explicit cleanup removes owned runtime scratch after a real sandbox check"
   }
 });
 
+test("runtime cleanup records intent and verified removal outcomes", () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-runtime-evidence-success-"),
+  );
+  const workspace = path.join(root, "workspace");
+  const runtimeParent = path.join(root, ".pipi-runtime");
+  const runtimeRoot = path.join(runtimeParent, "workspace");
+  fs.mkdirSync(workspace);
+  try {
+    createFeatureToolBoundary({ cwd: workspace, mode: "candidate" });
+    fs.rmSync(workspace, { recursive: true });
+    const evidence = cleanupEvidence();
+
+    assert.deepEqual(
+      cleanupFeatureSandboxRuntime(workspace, evidence.sink),
+      [],
+    );
+    const rootRecords = evidence.records.filter(
+      (record) => record.resource === runtimeRoot,
+    );
+    const parentRecords = evidence.records.filter(
+      (record) => record.resource === runtimeParent,
+    );
+    assert.deepEqual(
+      rootRecords.map((record) => record.event),
+      ["intent", "outcome"],
+    );
+    assert.deepEqual(
+      parentRecords.map((record) => record.event),
+      ["intent", "outcome"],
+    );
+    assert.equal(rootRecords[0]?.operationId, rootRecords[1]?.operationId);
+    assert.equal(parentRecords[0]?.operationId, parentRecords[1]?.operationId);
+    assert.equal(rootRecords[1]?.disposition, "removed");
+    assert.equal(rootRecords[1]?.operationStatus, "succeeded");
+    assert.equal(parentRecords[1]?.disposition, "removed");
+    assert.equal(parentRecords[1]?.operationStatus, "succeeded");
+    assert.equal(fs.existsSync(runtimeRoot), false);
+    assert.equal(fs.existsSync(runtimeParent), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime cleanup records foreign identity retention without an intent", () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-runtime-evidence-foreign-"),
+  );
+  const workspace = path.join(root, "workspace");
+  const runtimeRoot = path.join(root, ".pipi-runtime", "workspace");
+  fs.mkdirSync(workspace);
+  try {
+    createFeatureToolBoundary({ cwd: workspace, mode: "candidate" });
+    fs.rmSync(workspace, { recursive: true });
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+    fs.mkdirSync(runtimeRoot);
+    const evidence = cleanupEvidence();
+
+    assert.ok(
+      cleanupFeatureSandboxRuntime(workspace, evidence.sink).length > 0,
+    );
+    const rootRecords = evidence.records.filter(
+      (record) => record.resource === runtimeRoot,
+    );
+    assert.deepEqual(
+      rootRecords.map((record) => record.event),
+      ["outcome"],
+    );
+    assert.equal(rootRecords[0]?.ownership, "foreign");
+    assert.equal(rootRecords[0]?.disposition, "retained");
+    assert.equal(rootRecords[0]?.operationStatus, "not_attempted");
+    assert.equal(fs.existsSync(runtimeRoot), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime cleanup records a live workspace as retained without mutating scratch", () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-runtime-evidence-live-"),
+  );
+  const workspace = path.join(root, "workspace");
+  const runtimeRoot = path.join(root, ".pipi-runtime", "workspace");
+  fs.mkdirSync(workspace);
+  try {
+    createFeatureToolBoundary({ cwd: workspace, mode: "candidate" });
+    const evidence = cleanupEvidence();
+
+    assert.deepEqual(
+      cleanupFeatureSandboxRuntime(workspace, evidence.sink),
+      [],
+    );
+    assert.deepEqual(
+      evidence.records.map((record) => [
+        record.event,
+        record.disposition,
+        record.operationStatus,
+      ]),
+      [["outcome", "retained", "not_attempted"]],
+    );
+    assert.equal(evidence.records[0]?.ownership, "controller");
+    assert.equal(fs.existsSync(runtimeRoot), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("repeat cleanup records no ownership after the real owned runtime is removed", () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-runtime-evidence-repeat-"),
+  );
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace);
+  try {
+    createFeatureToolBoundary({ cwd: workspace, mode: "candidate" });
+    fs.rmSync(workspace, { recursive: true });
+    const first = cleanupEvidence();
+    const second = cleanupEvidence();
+
+    assert.deepEqual(cleanupFeatureSandboxRuntime(workspace, first.sink), []);
+    assert.deepEqual(cleanupFeatureSandboxRuntime(workspace, second.sink), []);
+    assert.equal(
+      first.records.some((record) => record.disposition === "removed"),
+      true,
+    );
+    assert.deepEqual(
+      second.records.map((record) => [
+        record.event,
+        record.ownership,
+        record.disposition,
+        record.operationStatus,
+      ]),
+      [["outcome", "unknown", "skipped", "not_attempted"]],
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runtime cleanup leaves sibling scratch and a shared namespace parent intact", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-runtime-siblings-"));
   const workspaceA = path.join(root, "workspace-a");
@@ -354,9 +502,20 @@ test("runtime cleanup leaves sibling scratch and a shared namespace parent intac
     const sharedScratch = path.join(runtimeParent, "shared.txt");
     fs.writeFileSync(sharedScratch, "preserve\n");
     fs.rmSync(workspaceA, { recursive: true, force: true });
+    const evidenceA = cleanupEvidence();
 
-    assert.deepEqual(cleanupFeatureSandboxRuntime(workspaceA), []);
+    assert.deepEqual(
+      cleanupFeatureSandboxRuntime(workspaceA, evidenceA.sink),
+      [],
+    );
     assert.equal(fs.existsSync(runtimeA), false);
+    const parentOutcomeA = evidenceA.records.find(
+      (record) =>
+        record.resource === runtimeParent && record.event === "outcome",
+    );
+    assert.ok(parentOutcomeA);
+    assert.equal(parentOutcomeA.disposition, "retained");
+    assert.notEqual(parentOutcomeA.disposition, "removed");
     assert.equal(fs.existsSync(runtimeB), true);
     assert.equal(fs.existsSync(sharedScratch), true);
     assert.equal(fs.existsSync(runtimeParent), true);
@@ -387,8 +546,15 @@ test("runtime cleanup does not claim pre-existing scratch", async () => {
     });
     assert.equal(result.exitCode, 0, result.stderr);
     fs.rmSync(workspace, { recursive: true, force: true });
+    const evidence = cleanupEvidence();
 
-    assert.deepEqual(cleanupFeatureSandboxRuntime(workspace), []);
+    assert.deepEqual(
+      cleanupFeatureSandboxRuntime(workspace, evidence.sink),
+      [],
+    );
+    assert.equal(evidence.records[0]?.ownership, "unknown");
+    assert.equal(evidence.records[0]?.disposition, "retained");
+    assert.equal(evidence.records[0]?.operationStatus, "not_attempted");
     assert.equal(fs.existsSync(sentinel), true);
     assert.equal(
       fs.existsSync(path.join(runtimeRoot, "cache", "from-check")),

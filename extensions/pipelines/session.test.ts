@@ -12,7 +12,9 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+  AUDIT_SYNTHESIS_ROLE,
   FEATURE_FINALIZER_ROLE,
+  FEATURE_LOGIC_AUDIT_ROLE,
   FEATURE_PIPELINE_ID,
   LUNA_MODEL,
   PLAN_PIPELINE_ID,
@@ -20,7 +22,10 @@ import {
   ASTRA_MODEL,
 } from "./domain.ts";
 import { ToolCallTimeoutError } from "../shared/tool-call-timeout.ts";
-import { createPipelineSessionFactory } from "./session.ts";
+import {
+  createPipelineSessionFactory,
+  TaskToolContractError,
+} from "./session.ts";
 
 const FEATURE_TASK_TOOL_NAMES = [
   "pipeline_task_diff",
@@ -48,6 +53,7 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
   let fauxProvider: ReturnType<typeof registerFauxProvider> | undefined;
   let finalized = 0;
   const diffRequests: unknown[] = [];
+  const checkRequests: string[] = [];
 
   try {
     const skillDir = path.join(fixture.agentDir, "skills", "fixture");
@@ -133,7 +139,14 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
             },
           };
         },
+        describe() {
+          return {
+            workspaceRoot: fixture.cwd,
+            checkIds: ["review-check"],
+          };
+        },
         async check({ checkId }) {
+          checkRequests.push(checkId);
           return {
             checkId,
             command: "bun run check",
@@ -221,7 +234,90 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
       assert.ok(sdkSession.getToolDefinition(tool));
     }
 
+    const unavailableCheck = sdkSession.getToolDefinition(
+      "pipeline_task_check",
+    );
+    assert.ok(unavailableCheck);
+    await assert.rejects(
+      unavailableCheck.execute(
+        "feature-finalizer-check-before-mutation",
+        { checkId: "review-check" },
+        undefined,
+        undefined,
+        { cwd: fixture.cwd } as unknown as ExtensionContext,
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof TaskToolContractError);
+        assert.equal(error.code, "tool-unavailable");
+        assert.equal(error.reason.length > 0, true);
+        assert.equal(error.allowedAlternative, null);
+        return true;
+      },
+    );
+    assert.deepEqual(checkRequests, []);
+
+    const unavailableFinalize = sdkSession.getToolDefinition(
+      "pipeline_task_finalize",
+    );
+    assert.ok(unavailableFinalize);
+    await assert.rejects(
+      unavailableFinalize.execute(
+        "feature-finalizer-finalize-before-mutation",
+        { commitPaths: [], summary: "Read-only finalization probe." },
+        undefined,
+        undefined,
+        { cwd: fixture.cwd } as unknown as ExtensionContext,
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof TaskToolContractError);
+        assert.equal(error.code, "read-only");
+        assert.equal(error.reason.length > 0, true);
+        assert.equal(error.allowedAlternative, null);
+        return true;
+      },
+    );
+
+    const dispatchedPrompts: string[] = [];
+    const originalPrompt = sdkSession.prompt;
+    sdkSession.prompt = async (text) => {
+      dispatchedPrompts.push(text);
+    };
+    await session.send(JSON.stringify({ phase: "selection" }));
+    const selectionContract = (
+      JSON.parse(dispatchedPrompts[0]!) as {
+        readonly toolContract: {
+          readonly activeTools: ReadonlyArray<string>;
+          readonly phase: string;
+        };
+      }
+    ).toolContract;
+
     session.enableMutation();
+    await session.send(JSON.stringify({ phase: "implementation" }));
+    sdkSession.prompt = originalPrompt;
+    const implementationContract = (
+      JSON.parse(dispatchedPrompts[1]!) as {
+        readonly toolContract: {
+          readonly activeTools: ReadonlyArray<string>;
+          readonly phase: string;
+        };
+      }
+    ).toolContract;
+    assert.deepEqual(selectionContract.activeTools, [
+      "read",
+      "bash",
+      "pipeline_feature_canonical_plan_submit",
+      "pipeline_feature_execution_graph_submit",
+    ]);
+    assert.equal(selectionContract.phase, "read-only");
+    assert.deepEqual(implementationContract.activeTools, [
+      "read",
+      "bash",
+      "edit",
+      "write",
+      ...FEATURE_TASK_TOOL_NAMES,
+    ]);
+    assert.equal(implementationContract.phase, "implementation");
     assert.deepEqual(session.activeTools, [
       "read",
       "bash",
@@ -236,6 +332,29 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
     ]) {
       assert.equal(session.activeTools.includes(tool), false);
     }
+
+    const unknownCheck = sdkSession.getToolDefinition("pipeline_task_check");
+    assert.ok(unknownCheck);
+    await assert.rejects(
+      unknownCheck.execute(
+        "feature-finalizer-unknown-check",
+        { checkId: "not-declared" },
+        undefined,
+        undefined,
+        { cwd: fixture.cwd } as unknown as ExtensionContext,
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof TaskToolContractError);
+        assert.equal(error.code, "unknown-check-id");
+        assert.equal(error.reason.length > 0, true);
+        assert.deepEqual(error.allowedAlternative, {
+          tool: "pipeline_task_check",
+          exampleArgs: { checkId: "review-check" },
+        });
+        return true;
+      },
+    );
+    assert.deepEqual(checkRequests, []);
 
     const diff = sdkSession.getToolDefinition("pipeline_task_diff");
     assert.ok(diff);
@@ -360,6 +479,108 @@ test("feature workers expose task finalization but not the unrelated execution-f
   }
 });
 
+test("feature task dispatch attaches the live host contract to the task input", async () => {
+  const fixture = await createFixture();
+  const provider = registerFauxProvider({
+    api: "feature-task-contract-dispatch-test-api",
+    provider: "feature-task-contract-dispatch-test-provider",
+    models: [
+      {
+        id: "gpt-5.6-luna",
+        name: "Task contract dispatch test",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32_000,
+        maxTokens: 4_000,
+      },
+    ],
+  });
+  let sdkSession: AgentSession | undefined;
+  let session:
+    | Awaited<
+        ReturnType<ReturnType<typeof createPipelineSessionFactory>["create"]>
+      >
+    | undefined;
+  const host = {
+    describe() {
+      return {
+        workspaceRoot: fixture.cwd,
+        checkIds: ["check-types", "check-tests"],
+      };
+    },
+    async diff() {
+      throw new Error("Not invoked");
+    },
+    async check() {
+      throw new Error("Not invoked");
+    },
+    async finalize() {
+      throw new Error("Not invoked");
+    },
+  };
+
+  try {
+    const factory = createPipelineSessionFactory({
+      modelRegistry: { find: () => provider.getModel() },
+      parentCwd: fixture.root,
+      parentTrusted: false,
+      agentDir: fixture.agentDir,
+      sessionManager: (cwd) => SessionManager.inMemory(cwd),
+      sessionCreated(created) {
+        sdkSession = created;
+      },
+      rootTools: () => [],
+      definitionForRun: () => FEATURE_PIPELINE_ID,
+      featureTaskHost: () => host,
+    });
+    session = await factory.create({
+      scopeId: "feature-task-contract-dispatch-test",
+      parentId: "root",
+      role: "feature-task-contract",
+      attempt: 1,
+      title: "Task contract dispatch test",
+      model: LUNA_MODEL,
+      thinkingLevel: "high",
+      cwd: fixture.cwd,
+      prompt: "",
+      deferPrompt: true,
+    });
+
+    assert.ok(sdkSession);
+    const activeAtDispatch = [...session.activeTools];
+    let dispatchedText = "";
+    const originalPrompt = sdkSession.prompt;
+    sdkSession.prompt = async (text) => {
+      dispatchedText = text;
+    };
+    await session.prompt(
+      JSON.stringify({ taskId: "contract-task", objective: "bounded task" }),
+    );
+    sdkSession.prompt = originalPrompt;
+
+    const parsed = JSON.parse(dispatchedText) as {
+      readonly toolContract: {
+        readonly activeTools: ReadonlyArray<string>;
+        readonly workspaceRoot: string;
+        readonly phase: string;
+        readonly checkIds: ReadonlyArray<string>;
+      };
+    };
+    assert.deepEqual(parsed.toolContract.activeTools, activeAtDispatch);
+    assert.equal(parsed.toolContract.workspaceRoot, fixture.cwd);
+    assert.equal(parsed.toolContract.phase, "implementation");
+    assert.deepEqual(parsed.toolContract.checkIds, [
+      "check-types",
+      "check-tests",
+    ]);
+  } finally {
+    await session?.dispose();
+    provider.unregister();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("pipeline sessions leave only child waits unbounded", async () => {
   const fixture = await createFixture();
   const provider = registerFauxProvider({
@@ -467,6 +688,186 @@ test("pipeline sessions leave only child waits unbounded", async () => {
     await assert.rejects(pending, (error: unknown) => error === reason);
   } finally {
     await session?.dispose();
+    provider.unregister();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("artifact reads stay with the root and explicit audit synthesis", async () => {
+  const fixture = await createFixture();
+  const provider = registerFauxProvider({
+    api: "pipeline-artifact-boundary-test-api",
+    provider: "pipeline-artifact-boundary-test-provider",
+    models: [
+      {
+        id: "gpt-5.6-luna",
+        name: "Pipeline artifact boundary test",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32_000,
+        maxTokens: 4_000,
+      },
+    ],
+  });
+  const fakeReads: unknown[] = [];
+  const artifactReader = defineTool({
+    name: "pipeline_artifact_read",
+    label: "Read Pipeline Evidence",
+    description: "Read bounded fixture evidence.",
+    parameters: Type.Object(
+      {
+        artifactId: Type.String({ minLength: 1, maxLength: 128 }),
+        revision: Type.Integer({ minimum: 1 }),
+        cursor: Type.Optional(Type.Integer({ minimum: 0 })),
+        maxBytes: Type.Integer({ minimum: 4, maximum: 64 * 1024 }),
+      },
+      { additionalProperties: false },
+    ),
+    async execute(_toolCallId, params) {
+      fakeReads.push(params);
+      const text = "bounded-fake-artifact-evidence".slice(0, params.maxBytes);
+      return {
+        content: [{ type: "text", text }],
+        details: { ...params, returnedBytes: text.length },
+      };
+    },
+  });
+  const artifactToolRoles: string[] = [];
+  const sdkSessions: AgentSession[] = [];
+  let root:
+    | Awaited<
+        ReturnType<ReturnType<typeof createPipelineSessionFactory>["create"]>
+      >
+    | undefined;
+  let ordinaryChild: typeof root = undefined;
+  let synthesis: typeof root = undefined;
+
+  try {
+    const factory = createPipelineSessionFactory({
+      modelRegistry: { find: () => provider.getModel() },
+      parentCwd: fixture.root,
+      parentTrusted: false,
+      agentDir: fixture.agentDir,
+      sessionManager: (cwd) => SessionManager.inMemory(cwd),
+      sessionCreated(created) {
+        sdkSessions.push(created);
+      },
+      rootTools: () => [artifactReader],
+      artifactTools: (_runId, role) => {
+        artifactToolRoles.push(role);
+        return role === AUDIT_SYNTHESIS_ROLE ? [artifactReader] : [];
+      },
+      definitionForRun: () => FEATURE_PIPELINE_ID,
+    });
+
+    root = await factory.create({
+      id: "pipeline-root",
+      scopeId: "artifact-boundary-test",
+      role: "pipeline-root",
+      attempt: 1,
+      title: "Artifact boundary root",
+      model: LUNA_MODEL,
+      thinkingLevel: "medium",
+      cwd: fixture.cwd,
+      prompt: "",
+      persistent: true,
+      deferPrompt: true,
+    });
+    const rootSdkSession = sdkSessions.at(-1);
+    assert.ok(rootSdkSession);
+    assert.equal(root.activeTools.includes("pipeline_artifact_read"), true);
+    assert.ok(rootSdkSession.getToolDefinition("pipeline_artifact_read"));
+
+    ordinaryChild = await factory.create({
+      scopeId: "artifact-boundary-test",
+      parentId: "pipeline-root",
+      role: FEATURE_LOGIC_AUDIT_ROLE,
+      attempt: 1,
+      title: "Ordinary audit child",
+      model: LUNA_MODEL,
+      thinkingLevel: "medium",
+      cwd: fixture.cwd,
+      prompt: "",
+      deferPrompt: true,
+    });
+    const ordinarySdkSession = sdkSessions.at(-1);
+    assert.ok(ordinarySdkSession);
+    assert.equal(
+      ordinaryChild.activeTools.includes("pipeline_artifact_read"),
+      false,
+    );
+    assert.equal(
+      ordinarySdkSession.getToolDefinition("pipeline_artifact_read"),
+      undefined,
+    );
+
+    synthesis = await factory.create({
+      scopeId: "artifact-boundary-test",
+      parentId: "pipeline-root",
+      role: AUDIT_SYNTHESIS_ROLE,
+      attempt: 1,
+      title: "Audit synthesis",
+      model: LUNA_MODEL,
+      thinkingLevel: "medium",
+      cwd: fixture.cwd,
+      prompt: "",
+      persistent: true,
+      deferPrompt: true,
+    });
+    const synthesisSdkSession = sdkSessions.at(-1);
+    assert.ok(synthesisSdkSession);
+    assert.equal(
+      synthesis.activeTools.includes("pipeline_artifact_read"),
+      true,
+    );
+    const synthesisReader = synthesisSdkSession.getToolDefinition(
+      "pipeline_artifact_read",
+    );
+    assert.ok(synthesisReader);
+    for (const mutatingTool of [
+      "bash",
+      "edit",
+      "write",
+      "apply_patch_codex",
+      "codex_task",
+      "bg_start",
+      "bg_kill",
+      "mcp",
+    ]) {
+      assert.equal(synthesis.activeTools.includes(mutatingTool), false);
+      assert.equal(
+        synthesisSdkSession.getToolDefinition(mutatingTool),
+        undefined,
+      );
+    }
+
+    const request = {
+      artifactId: "fixture-artifact",
+      revision: 2,
+      maxBytes: 12,
+    };
+    const result = await synthesisReader.execute(
+      "bounded-artifact-read",
+      request,
+      undefined,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
+    );
+    assert.deepEqual(fakeReads, [request]);
+    assert.deepEqual(result.details, { ...request, returnedBytes: 12 });
+    assert.equal(
+      result.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join(""),
+      "bounded-fake",
+    );
+    assert.equal(artifactToolRoles.includes(AUDIT_SYNTHESIS_ROLE), true);
+  } finally {
+    await synthesis?.dispose();
+    await ordinaryChild?.dispose();
+    await root?.dispose();
     provider.unregister();
     await rm(fixture.root, { recursive: true, force: true });
   }

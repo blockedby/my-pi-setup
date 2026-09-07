@@ -12,6 +12,7 @@ import {
   rollbackOwnedFeatureBranches,
   validateDedicatedFeatureWorktree,
 } from "./feature-worktrees.ts";
+import type { CleanupEvidence } from "./cleanup-evidence.ts";
 import type {
   FeatureCandidateHandoff,
   FeatureCandidateRole,
@@ -168,9 +169,11 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
   const repo = fixture();
   try {
     const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const cleanupEvidence: CleanupEvidence[] = [];
     const lifecycle = defaultFeatureGitOperations.createLifecycle(
       caller,
       "replace-heavy-plan-pipeline-f82091ba",
+      { cleanupEvidence: (record) => cleanupEvidence.push(record) },
     );
     assert.equal(
       path.dirname(lifecycle.temporaryRoot),
@@ -254,6 +257,53 @@ test("controller lifecycle creates same-base isolated candidates, promotes exact
     assert.equal(
       git(repo.caller, ["rev-parse", synthesis.branchRef]),
       finalCommit,
+    );
+    const retainedRef = cleanupEvidence.find(
+      (record) =>
+        record.event === "outcome" &&
+        record.resourceType === "ref" &&
+        record.resource === `refs/heads/${candidateRefs[0]!.branchRef}`,
+    );
+    assert.deepEqual(
+      retainedRef && {
+        disposition: retainedRef.disposition,
+        operationStatus: retainedRef.operationStatus,
+        reasonCode: retainedRef.reasonCode,
+      },
+      {
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "legacy_cleanup_retains_ref",
+      },
+    );
+    const callerRoot = cleanupEvidence.find(
+      (record) =>
+        record.event === "outcome" &&
+        record.resourceType === "worktree" &&
+        record.resource === caller.workingDir,
+    );
+    assert.deepEqual(
+      callerRoot && {
+        disposition: callerRoot.disposition,
+        ownership: callerRoot.ownership,
+        reasonCode: callerRoot.reasonCode,
+      },
+      {
+        disposition: "retained",
+        ownership: "caller",
+        reasonCode: "caller_owned",
+      },
+    );
+    assert.equal(
+      cleanupEvidence.some(
+        (record) =>
+          record.event === "outcome" &&
+          record.resourceType === "directory" &&
+          record.resource === temporaryRoot &&
+          record.disposition === "removed" &&
+          record.operationStatus === "succeeded",
+      ),
+      true,
     );
   } finally {
     repo.cleanup();
@@ -363,12 +413,34 @@ test("conditional rollback preserves retargeted refs and composes failure diagno
       caller.baseCommit,
     ]);
 
+    const cleanupEvidence: CleanupEvidence[] = [];
     const rollbackFailures = rollbackOwnedFeatureBranches(
       repo.caller,
       new Map([[branchRef, caller.baseCommit]]),
+      { cleanupEvidence: (record) => cleanupEvidence.push(record) },
     );
     assert.equal(rollbackFailures.length, 1);
     assert.equal(git(repo.caller, ["rev-parse", branchRef]), retargetedCommit);
+    const rollbackOutcome = cleanupEvidence.find(
+      (record) =>
+        record.event === "outcome" &&
+        record.resourceType === "ref" &&
+        record.resource === `refs/heads/${branchRef}`,
+    );
+    assert.deepEqual(
+      rollbackOutcome && {
+        disposition: rollbackOutcome.disposition,
+        operationStatus: rollbackOutcome.operationStatus,
+        expectedIdentity: rollbackOutcome.expectedIdentity,
+        reasonCode: rollbackOutcome.reasonCode,
+      },
+      {
+        disposition: "retained",
+        operationStatus: "failed",
+        expectedIdentity: caller.baseCommit,
+        reasonCode: "compare_delete_failed",
+      },
+    );
 
     const combined = candidateReservationFailure(
       new Error("candidate robust reservation failed"),
@@ -481,9 +553,11 @@ test("explicit feature paths commit additions, modifications, deletions, and exc
   const repo = fixture({ deletablePath: true });
   try {
     const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const cleanupEvidence: CleanupEvidence[] = [];
     const lifecycle = defaultFeatureGitOperations.createLifecycle(
       caller,
       "explicit-path-staging-a1b2c3d4",
+      { cleanupEvidence: (record) => cleanupEvidence.push(record) },
     );
     const [minimal] = lifecycle.createCandidateWorktrees();
     assert.ok(minimal);
@@ -537,6 +611,17 @@ test("explicit feature paths commit additions, modifications, deletions, and exc
     assert.equal(fs.readFileSync(callerSentinel, "utf8"), "caller\n");
     assert.equal(fs.readFileSync(outsideSentinel, "utf8"), "outside\n");
     assert.deepEqual(frozen.changedPaths, result.changedPaths);
+    assert.equal(
+      cleanupEvidence.some(
+        (record) =>
+          record.event === "outcome" &&
+          record.resourceType === "residual" &&
+          record.disposition === "removed" &&
+          record.operationStatus === "succeeded" &&
+          record.reasonCode === "residual_removed",
+      ),
+      true,
+    );
     lifecycle.cleanup();
   } finally {
     repo.cleanup();
@@ -594,9 +679,11 @@ test("owned untracked cleanup bounds nested artifact contents", () => {
   const repo = fixture();
   try {
     const caller = defaultFeatureGitOperations.preflight(repo.caller);
+    const cleanupEvidence: CleanupEvidence[] = [];
     const lifecycle = defaultFeatureGitOperations.createLifecycle(
       caller,
       "bounded-untracked-cleanup-a1b2c3d4",
+      { cleanupEvidence: (record) => cleanupEvidence.push(record) },
     );
     const [minimal] = lifecycle.createCandidateWorktrees();
     assert.ok(minimal);
@@ -615,6 +702,17 @@ test("owned untracked cleanup bounds nested artifact contents", () => {
       /513 untracked leftovers/,
     );
     assert.equal(fs.existsSync(cachePath), true);
+    assert.equal(
+      cleanupEvidence.some(
+        (record) =>
+          record.event === "outcome" &&
+          record.resourceType === "residual" &&
+          record.disposition === "retained" &&
+          record.operationStatus === "not_attempted" &&
+          record.reasonCode === "untracked_cleanup_limit_exceeded",
+      ),
+      true,
+    );
     lifecycle.cleanup();
   } finally {
     repo.cleanup();
@@ -1178,13 +1276,103 @@ test("cleanup retains a registered run-owned directory when worktree metadata re
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-cleanup-failure-"));
   const owned = path.join(root, "candidate-minimal");
   fs.mkdirSync(owned);
-  const failures = cleanupOwnedFeatureWorktreePaths(root, [owned], () => {
-    throw new Error("injected remove failure");
-  });
+  const cleanupEvidence: CleanupEvidence[] = [];
+  const failures = cleanupOwnedFeatureWorktreePaths(
+    root,
+    [owned],
+    () => {
+      throw new Error("injected remove failure");
+    },
+    { cleanupEvidence: (record) => cleanupEvidence.push(record) },
+  );
   assert.equal(failures.length, 1);
   assert.match(failures[0]!, /injected remove failure/);
   assert.equal(fs.existsSync(root), true);
+  assert.deepEqual(
+    cleanupEvidence
+      .filter((record) => record.event === "outcome")
+      .map((record) => ({
+        resourceType: record.resourceType,
+        disposition: record.disposition,
+        operationStatus: record.operationStatus,
+      })),
+    [
+      {
+        resourceType: "worktree",
+        disposition: "retained",
+        operationStatus: "failed",
+      },
+      {
+        resourceType: "directory",
+        disposition: "retained",
+        operationStatus: "not_attempted",
+      },
+    ],
+  );
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("cleanup observation records successful removal and explicit skipped paths", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-cleanup-success-"));
+  const owned = path.join(root, "candidate-minimal");
+  const outside = path.join(path.dirname(root), "pipi-cleanup-outside");
+  fs.mkdirSync(owned);
+  fs.mkdirSync(outside);
+  try {
+    const cleanupEvidence: CleanupEvidence[] = [];
+    const removed: string[] = [];
+    const failures = cleanupOwnedFeatureWorktreePaths(
+      root,
+      [owned, outside],
+      (worktreePath) => {
+        removed.push(worktreePath);
+        fs.rmSync(worktreePath, { recursive: true, force: true });
+      },
+      { cleanupEvidence: (record) => cleanupEvidence.push(record) },
+    );
+    assert.deepEqual(failures, []);
+    assert.deepEqual(removed, [owned]);
+    assert.equal(fs.existsSync(root), false);
+    const outcomes = cleanupEvidence.filter(
+      (record) => record.event === "outcome",
+    );
+    assert.deepEqual(
+      outcomes.map((record) => ({
+        resource: record.resource,
+        disposition: record.disposition,
+        operationStatus: record.operationStatus,
+      })),
+      [
+        {
+          resource: outside,
+          disposition: "skipped",
+          operationStatus: "not_attempted",
+        },
+        {
+          resource: owned,
+          disposition: "removed",
+          operationStatus: "succeeded",
+        },
+        {
+          resource: root,
+          disposition: "removed",
+          operationStatus: "succeeded",
+        },
+      ],
+    );
+    for (const operationId of new Set(
+      cleanupEvidence.map((record) => record.operationId),
+    )) {
+      assert.equal(
+        cleanupEvidence.filter((record) => record.operationId === operationId)
+          .length,
+        2,
+      );
+    }
+  } finally {
+    fs.rmSync(outside, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("failure cleanup removes only controller-owned temporary worktrees and never promotes", () => {

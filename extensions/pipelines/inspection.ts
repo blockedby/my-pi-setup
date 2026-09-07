@@ -306,6 +306,12 @@ export function projectPipelineCheck(
           ...(run.limitation ? { limitation: run.limitation } : {}),
         }
       : {}),
+    acceptance: {
+      implementation:
+        run.acceptance?.implementationAcceptance.status ?? "unavailable",
+      execution:
+        run.acceptance?.pipelineExecutionAcceptance.status ?? "unavailable",
+    },
     rootStatus: root?.status ?? "not-started",
     agentStatusCounts: agentStatusCounts(agents),
     agents: projectedAgents,
@@ -392,6 +398,7 @@ export function formatPipelineCheck(details: ProjectedPipelineCheck) {
       : []),
     `Working directory: ${details.workingDir}`,
     `Root status: ${details.rootStatus}`,
+    `Acceptance: implementation ${details.acceptance.implementation} · execution ${details.acceptance.execution}`,
     `Agent status counts: ${counts}`,
   ];
   const previewSlots: Array<{ index: number; text: string }> = [];

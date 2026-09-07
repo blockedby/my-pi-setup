@@ -5,11 +5,23 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isSafeRepositoryRelativePath } from "./feature-planning.ts";
 import { cleanupFeatureSandboxRuntime } from "./feature-sandbox.ts";
+import {
+  createCleanupRecorder,
+  type CleanupEvidence,
+  type CleanupEvidenceSink,
+} from "./cleanup-evidence.ts";
 
 const GIT_OUTPUT_LIMIT = 2 * 1024 * 1024;
 const DIAGNOSTIC_LIMIT = 8 * 1024;
 const PATH_LIMIT = 512;
 const PATH_BYTES_LIMIT = 4 * 1024;
+
+function cleanupResource(
+  resourceType: CleanupEvidence["resourceType"],
+  resource: string,
+) {
+  return `${resourceType}:${resource}`;
+}
 
 export interface FeatureTaskBranch {
   readonly id: string;
@@ -137,6 +149,7 @@ export interface FeatureTaskWorktreeLifecycle {
   ): FeatureTaskCommitResult;
   removeJoinedWorktree(branchId: string): ReadonlyArray<string>;
   cleanupCompleted(): ReadonlyArray<string>;
+  recordRetainedResources(reason: string): void;
 }
 
 interface MutableBranch {
@@ -154,6 +167,7 @@ interface MutableBranch {
   preparationBaseline: string[];
   trackedResiduals: Map<string, string>;
   removed: boolean;
+  refRemoved: boolean;
   cherryPickSource?: string;
 }
 
@@ -694,11 +708,35 @@ function removeUntrackedPath(
   remove(absolute);
 }
 
+function residualExists(cwd: string, filePath: string) {
+  try {
+    fs.lstatSync(path.resolve(cwd, filePath));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function refExists(cwd: string, reference: string) {
+  try {
+    execFileSync("git", ["show-ref", "--verify", "--quiet", reference], {
+      cwd,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function cleanupAfterCommit(
   cwd: string,
   preparationBaseline: ReadonlyArray<string> = [],
+  cleanupEvidence?: CleanupEvidenceSink,
+  expectedIdentity?: string,
 ) {
   const warnings: string[] = [];
+  const phase = "feature-worktree-finalization";
   const preserved = (filePath: string) =>
     preparationBaseline.some(
       (baseline) =>
@@ -706,6 +744,19 @@ function cleanupAfterCommit(
         (baseline.endsWith("/") && filePath.startsWith(baseline)),
     );
   const tracked = [...new Set([...readStaged(cwd), ...readTracked(cwd)])];
+  const trackedRecorders = tracked.map((filePath) => {
+    const resource = path.resolve(cwd, filePath);
+    const recorder = cleanupRecorder(cleanupEvidence, {
+      resourceId: cleanupResource("residual", resource),
+      resourceType: "residual",
+      resource,
+      ownership: "controller",
+      phase,
+      expectedIdentity,
+    });
+    recorder.intent();
+    return recorder;
+  });
   if (tracked.length > 0) {
     try {
       requireGit(
@@ -721,25 +772,81 @@ function cleanupAfterCommit(
         ],
         "Unable to restore remaining tracked changes",
       );
+      for (const recorder of trackedRecorders) {
+        recorder.outcome({
+          disposition: "removed",
+          operationStatus: "succeeded",
+          reasonCode: "residual_removed",
+        });
+      }
     } catch (error) {
-      warnings.push(diagnostic(error));
+      const detail = diagnostic(error);
+      warnings.push(detail);
+      for (const recorder of trackedRecorders) {
+        recorder.outcome({
+          disposition: "retained",
+          operationStatus: "failed",
+          reasonCode: "residual_remove_failed",
+          detail,
+        });
+      }
     }
   }
   const budget = { remaining: 2048 };
+  let limitWarningIssued = false;
   for (const filePath of readUntracked(cwd).filter(
     (filePath) => !preserved(filePath),
   )) {
+    const resource = path.resolve(cwd, filePath);
+    const recorder = cleanupRecorder(cleanupEvidence, {
+      resourceId: cleanupResource("residual", resource),
+      resourceType: "residual",
+      resource,
+      ownership: "controller",
+      phase,
+      expectedIdentity,
+    });
+    recorder.intent();
     if (budget.remaining <= 0) {
-      warnings.push(
-        "Task cleanup entry limit reached; remaining files were retained.",
-      );
-      break;
+      if (!limitWarningIssued) {
+        warnings.push(
+          "Task cleanup entry limit reached; remaining files were retained.",
+        );
+        limitWarningIssued = true;
+      }
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "cleanup_entry_limit",
+      });
+      continue;
+    }
+    const existed = residualExists(cwd, filePath);
+    if (!existed) {
+      recorder.outcome({
+        disposition: "skipped",
+        operationStatus: "not_attempted",
+        reasonCode: "residual_already_absent",
+      });
+      continue;
     }
     try {
       removeUntrackedPath(cwd, filePath, budget);
+      recorder.outcome({
+        disposition: "removed",
+        operationStatus: "succeeded",
+        reasonCode: "residual_removed",
+      });
     } catch (error) {
+      const detail = diagnostic(error);
       if (warnings.length < 32)
-        warnings.push(`Unable to clean ${filePath}: ${diagnostic(error)}`);
+        warnings.push(`Unable to clean ${filePath}: ${detail}`);
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "failed",
+        reasonCode: "residual_remove_failed",
+        detail,
+      });
     }
   }
   const residualPaths = [
@@ -756,18 +863,60 @@ function cleanupAfterCommit(
   return { warnings, residualPaths };
 }
 
+type CleanupRecorderContext = Parameters<typeof createCleanupRecorder>[1];
+
+function cleanupRecorder(
+  sink: CleanupEvidenceSink | undefined,
+  context: CleanupRecorderContext,
+) {
+  const recorder = createCleanupRecorder(sink, context);
+  return {
+    intent() {
+      try {
+        recorder.intent();
+      } catch {
+        // Cleanup evidence is observational and cannot change authority.
+      }
+    },
+    outcome(result: Parameters<typeof recorder.outcome>[0]) {
+      try {
+        recorder.outcome(result);
+      } catch {
+        // Cleanup evidence is observational and cannot change authority.
+      }
+    },
+  };
+}
+
+type CleanupRecorderOutcome = Parameters<
+  ReturnType<typeof cleanupRecorder>["outcome"]
+>[0];
+
+function recordCleanupDecision(
+  sink: CleanupEvidenceSink | undefined,
+  context: CleanupRecorderContext,
+  outcome: CleanupRecorderOutcome,
+) {
+  const recorder = cleanupRecorder(sink, context);
+  recorder.intent();
+  recorder.outcome(outcome);
+}
+
 class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
   readonly runId: string;
   readonly runDirectory: string;
   readonly root: FeatureTaskBranch;
   private readonly mutableBranches = new Map<string, MutableBranch>();
   private readonly namespace: string;
+  private readonly cleanupEvidence?: CleanupEvidenceSink;
   private completedCleanup = false;
+  private runDirectoryRemoved = false;
 
   constructor(options: {
     runId: string;
     workingDir: string;
     worktreeRoot: string;
+    cleanupEvidence?: CleanupEvidenceSink;
   }) {
     if (!/^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/.test(options.runId)) {
       throw new Error(
@@ -789,6 +938,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
     }
     this.runId = options.runId;
     this.namespace = `pipi-feature/${options.runId}`;
+    this.cleanupEvidence = options.cleanupEvidence;
     const branch = readBranch(workingDir);
     const head = readHead(workingDir);
     const root: MutableBranch = {
@@ -807,6 +957,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       ],
       trackedResiduals: new Map(),
       removed: false,
+      refRemoved: false,
     };
     if (
       readStaged(workingDir).length > 0 ||
@@ -932,6 +1083,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       preparationBaseline: [],
       trackedResiduals: new Map(),
       removed: false,
+      refRemoved: false,
     };
     this.mutableBranches.set(id, child);
     return toSnapshot(child);
@@ -1071,6 +1223,8 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
     const cleanup = cleanupAfterCommit(
       branch.worktree,
       branch.preparationBaseline,
+      this.cleanupEvidence,
+      commit,
     );
     recordTrackedResiduals(branch);
     return { commit, changedPaths, ...cleanup };
@@ -1221,6 +1375,8 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
     const cleanup = cleanupAfterCommit(
       parent.worktree,
       parent.preparationBaseline,
+      this.cleanupEvidence,
+      commit,
     );
     recordTrackedResiduals(parent);
     return {
@@ -1230,9 +1386,65 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
     };
   }
 
+  private recordCallerOwnedRoot(reason: string, phase: string) {
+    const root = this.mutableBranches.get("root");
+    if (!root) return;
+    recordCleanupDecision(
+      this.cleanupEvidence,
+      {
+        resourceId: cleanupResource("worktree", root.worktree),
+        resourceType: "worktree",
+        resource: root.worktree,
+        ownership: "caller",
+        phase,
+        expectedIdentity: root.head,
+      },
+      {
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "caller_owned",
+        ...(reason === "successful_cleanup" ? {} : { detail: reason }),
+      },
+    );
+    recordCleanupDecision(
+      this.cleanupEvidence,
+      {
+        resourceId: cleanupResource("ref", `refs/heads/${root.branch}`),
+        resourceType: "ref",
+        resource: `refs/heads/${root.branch}`,
+        ownership: "caller",
+        phase,
+        expectedIdentity: root.head,
+      },
+      {
+        disposition: "retained",
+        operationStatus: "not_attempted",
+        reasonCode: "caller_owned",
+        ...(reason === "successful_cleanup" ? {} : { detail: reason }),
+      },
+    );
+  }
+
   removeJoinedWorktree(branchId: string) {
     const branch = this.mutableBranches.get(branchId);
-    if (!branch || !branch.owned || branch.removed) return [];
+    if (!branch || !branch.owned) return [];
+    const recorder = cleanupRecorder(this.cleanupEvidence, {
+      resourceId: cleanupResource("worktree", branch.worktree),
+      resourceType: "worktree",
+      resource: branch.worktree,
+      ownership: "controller",
+      phase: "feature-worktree-lifecycle-cleanup",
+      expectedIdentity: branch.head,
+    });
+    recorder.intent();
+    if (branch.removed) {
+      recorder.outcome({
+        disposition: "skipped",
+        operationStatus: "not_attempted",
+        reasonCode: "already_removed",
+      });
+      return [];
+    }
     const warnings: string[] = [];
     try {
       requireGit(
@@ -1241,14 +1453,30 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
         `Unable to remove joined worktree ${branch.id}`,
       );
       branch.removed = true;
+      recorder.outcome({
+        disposition: "removed",
+        operationStatus: "succeeded",
+        reasonCode: "worktree_removed",
+      });
     } catch (error) {
-      warnings.push(diagnostic(error));
+      const detail = diagnostic(error);
+      warnings.push(detail);
+      recorder.outcome({
+        disposition: "retained",
+        operationStatus: "failed",
+        reasonCode: "worktree_remove_failed",
+        detail,
+      });
     }
     return warnings;
   }
 
   cleanupCompleted() {
     const warnings: string[] = [];
+    this.recordCallerOwnedRoot(
+      "successful_cleanup",
+      "feature-worktree-lifecycle-cleanup",
+    );
     for (const branch of [...this.mutableBranches.values()]
       .filter(({ owned }) => owned)
       .sort((left, right) => right.number - left.number)) {
@@ -1257,30 +1485,175 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
     for (const branch of [...this.mutableBranches.values()]
       .filter(({ owned }) => owned)
       .sort((left, right) => right.number - left.number)) {
+      const reference = `refs/heads/${branch.branch}`;
+      const recorder = cleanupRecorder(this.cleanupEvidence, {
+        resourceId: cleanupResource("ref", reference),
+        resourceType: "ref",
+        resource: reference,
+        ownership: "controller",
+        phase: "feature-worktree-lifecycle-cleanup",
+        expectedIdentity: branch.head,
+      });
+      recorder.intent();
+      const existed = refExists(this.root.worktree, reference);
+      if (!existed) {
+        branch.refRemoved = true;
+        recorder.outcome({
+          disposition: "skipped",
+          operationStatus: "not_attempted",
+          reasonCode: "ref_already_absent",
+        });
+        continue;
+      }
       try {
         requireGit(
           this.root.worktree,
-          ["update-ref", "-d", `refs/heads/${branch.branch}`, branch.head],
+          ["update-ref", "-d", reference, branch.head],
           `Unable to remove completed branch ${branch.branch}`,
         );
+        branch.refRemoved = true;
+        recorder.outcome({
+          disposition: "removed",
+          operationStatus: "succeeded",
+          reasonCode: "compare_delete_succeeded",
+        });
       } catch (error) {
-        warnings.push(diagnostic(error));
+        const detail = diagnostic(error);
+        warnings.push(detail);
+        recorder.outcome({
+          disposition: "retained",
+          operationStatus: "failed",
+          reasonCode: "compare_delete_failed",
+          detail,
+        });
       }
     }
     // Failed/cancelled graphs retain diagnostic worktrees and scratch. Only
     // successful completion reclaims process-owned sandbox runtime roots.
     for (const branch of this.mutableBranches.values()) {
       if (branch.owned && branch.removed) {
-        warnings.push(...cleanupFeatureSandboxRuntime(branch.worktree));
+        warnings.push(
+          ...cleanupFeatureSandboxRuntime(
+            branch.worktree,
+            this.cleanupEvidence,
+          ),
+        );
       }
     }
+    const runDirectoryRecorder = cleanupRecorder(this.cleanupEvidence, {
+      resourceId: cleanupResource("directory", this.runDirectory),
+      resourceType: "directory",
+      resource: this.runDirectory,
+      ownership: "controller",
+      phase: "feature-worktree-lifecycle-cleanup",
+    });
+    runDirectoryRecorder.intent();
+    const runDirectoryExisted = fs.existsSync(this.runDirectory);
     try {
       fs.rmdirSync(this.runDirectory);
+      this.runDirectoryRemoved = true;
+      runDirectoryRecorder.outcome({
+        disposition: runDirectoryExisted ? "removed" : "skipped",
+        operationStatus: runDirectoryExisted ? "succeeded" : "not_attempted",
+        reasonCode: runDirectoryExisted
+          ? "temporary_root_removed"
+          : "temporary_root_already_absent",
+      });
     } catch (error) {
-      if (fs.existsSync(this.runDirectory)) warnings.push(diagnostic(error));
+      const detail = diagnostic(error);
+      if (fs.existsSync(this.runDirectory) || runDirectoryExisted) {
+        warnings.push(detail);
+        runDirectoryRecorder.outcome({
+          disposition: "retained",
+          operationStatus: "failed",
+          reasonCode: "temporary_root_remove_failed",
+          detail,
+        });
+      } else {
+        runDirectoryRecorder.outcome({
+          disposition: "skipped",
+          operationStatus: "not_attempted",
+          reasonCode: "temporary_root_already_absent",
+          detail,
+        });
+      }
     }
     this.completedCleanup = true;
     return warnings;
+  }
+
+  recordRetainedResources(reason: string) {
+    const phase = "feature-worktree-lifecycle-cleanup";
+    this.recordCallerOwnedRoot(reason, phase);
+    for (const branch of [...this.mutableBranches.values()]
+      .filter(({ owned }) => owned)
+      .sort((left, right) => right.number - left.number)) {
+      recordCleanupDecision(
+        this.cleanupEvidence,
+        {
+          resourceId: cleanupResource("worktree", branch.worktree),
+          resourceType: "worktree",
+          resource: branch.worktree,
+          ownership: "controller",
+          phase,
+          expectedIdentity: branch.head,
+        },
+        branch.removed
+          ? {
+              disposition: "skipped",
+              operationStatus: "not_attempted",
+              reasonCode: "already_removed",
+            }
+          : {
+              disposition: "retained",
+              operationStatus: "not_attempted",
+              reasonCode: reason,
+            },
+      );
+      recordCleanupDecision(
+        this.cleanupEvidence,
+        {
+          resourceId: cleanupResource("ref", `refs/heads/${branch.branch}`),
+          resourceType: "ref",
+          resource: `refs/heads/${branch.branch}`,
+          ownership: "controller",
+          phase,
+          expectedIdentity: branch.head,
+        },
+        branch.refRemoved
+          ? {
+              disposition: "skipped",
+              operationStatus: "not_attempted",
+              reasonCode: "already_removed",
+            }
+          : {
+              disposition: "retained",
+              operationStatus: "not_attempted",
+              reasonCode: reason,
+            },
+      );
+    }
+    recordCleanupDecision(
+      this.cleanupEvidence,
+      {
+        resourceId: cleanupResource("directory", this.runDirectory),
+        resourceType: "directory",
+        resource: this.runDirectory,
+        ownership: "controller",
+        phase,
+      },
+      this.runDirectoryRemoved
+        ? {
+            disposition: "skipped",
+            operationStatus: "not_attempted",
+            reasonCode: "already_removed",
+          }
+        : {
+            disposition: "retained",
+            operationStatus: "not_attempted",
+            reasonCode: reason,
+          },
+    );
   }
 }
 
@@ -1288,6 +1661,7 @@ export function createFeatureTaskWorktreeLifecycle(options: {
   readonly runId: string;
   readonly workingDir: string;
   readonly worktreeRoot: string;
+  readonly cleanupEvidence?: CleanupEvidenceSink;
 }) {
   return new GitFeatureTaskWorktreeLifecycle(options);
 }
@@ -1296,6 +1670,7 @@ export function createFeatureRootTaskGitTarget(
   workingDir: string,
   knownResidualPaths: ReadonlyArray<string> = [],
   knownTrackedResiduals: ReadonlyArray<FeatureTrackedResidualState> = [],
+  cleanupEvidence?: CleanupEvidenceSink,
 ) {
   const worktree = canonical(workingDir);
   const branch = readBranch(worktree);
@@ -1422,7 +1797,12 @@ export function createFeatureRootTaskGitTarget(
       );
       const commit = readHead(worktree);
       expectedHead = commit;
-      const cleanup = cleanupAfterCommit(worktree, preparationBaseline);
+      const cleanup = cleanupAfterCommit(
+        worktree,
+        preparationBaseline,
+        cleanupEvidence,
+        commit,
+      );
       recordTrackedResiduals(residualOwner);
       return {
         commit,
@@ -1478,7 +1858,12 @@ export function createFeatureRootTaskGitTarget(
       );
       const commit = readHead(worktree);
       expectedHead = commit;
-      const cleanup = cleanupAfterCommit(worktree, preparationBaseline);
+      const cleanup = cleanupAfterCommit(
+        worktree,
+        preparationBaseline,
+        cleanupEvidence,
+        commit,
+      );
       recordTrackedResiduals(residualOwner);
       return {
         commit,

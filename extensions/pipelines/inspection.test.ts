@@ -3,6 +3,7 @@ import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
+import type { AcceptanceEnvelope } from "./run-acceptance.ts";
 import {
   PIPELINE_DEFINITION_IDS,
   stagesForDefinition,
@@ -69,6 +70,36 @@ function snapshot(
     ],
     ...overrides,
   };
+}
+
+function acceptanceWithRawDetails() {
+  return {
+    schemaVersion: 2,
+    implementationAcceptance: {
+      state: "final",
+      status: "passed",
+      criteria: [
+        {
+          id: "implementation",
+          status: "passed",
+          evidenceRefs: ["RAW_ACCEPTANCE_ARTIFACT_SECRET"],
+          detail: "RAW_ACCEPTANCE_EVIDENCE_SECRET",
+        },
+      ],
+    },
+    pipelineExecutionAcceptance: {
+      state: "final",
+      status: "unproven",
+      criteria: [
+        {
+          id: "execution",
+          status: "unproven",
+          evidenceRefs: ["RAW_EXECUTION_ARTIFACT_SECRET"],
+          detail: "RAW_EXECUTION_EVIDENCE_SECRET",
+        },
+      ],
+    },
+  } satisfies AcceptanceEnvelope;
 }
 
 test("pipeline inspection schemas accept exactly check id and empty list inputs", () => {
@@ -306,6 +337,52 @@ test("all run and agent statuses project with deterministic root-first creation 
       .rootStatus,
     "not-started",
   );
+});
+
+test("completed inspection projects independent acceptance statuses without raw evidence", () => {
+  const details = projectPipelineCheck(
+    snapshot({
+      status: "completed",
+      stage: "complete",
+      finishedAt: 19_000,
+      acceptance: acceptanceWithRawDetails(),
+      agents: [],
+    }),
+    now,
+  );
+
+  assert.deepEqual(details.acceptance, {
+    implementation: "passed",
+    execution: "unproven",
+  });
+  const formatted = formatPipelineCheck(details);
+  assert.match(
+    formatted,
+    /Acceptance: implementation passed · execution unproven/,
+  );
+  const serialized = `${JSON.stringify(details)}\n${formatted}`;
+  for (const excluded of [
+    "RAW_ACCEPTANCE_ARTIFACT_SECRET",
+    "RAW_ACCEPTANCE_EVIDENCE_SECRET",
+    "RAW_EXECUTION_ARTIFACT_SECRET",
+    "RAW_EXECUTION_EVIDENCE_SECRET",
+  ]) {
+    assert.equal(serialized.includes(excluded), false, excluded);
+  }
+
+  const legacy = projectPipelineCheck(
+    snapshot({
+      status: "completed",
+      stage: "complete",
+      finishedAt: 19_000,
+      agents: [],
+    }),
+    now,
+  );
+  assert.deepEqual(legacy.acceptance, {
+    implementation: "unavailable",
+    execution: "unavailable",
+  });
 });
 
 test("active previews prefer live text, fall back to finalized assistant text, and show open tool independently", () => {

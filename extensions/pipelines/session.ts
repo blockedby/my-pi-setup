@@ -59,6 +59,13 @@ import {
   FEATURE_EXECUTION_GRAPH_SUBMISSION,
 } from "./feature-planning.ts";
 import type { FeatureTaskToolHost } from "./feature-runtime.ts";
+import {
+  buildTaskToolContract,
+  routeTaskOperation,
+  type TaskToolContract,
+  type TaskToolOperation,
+  type TaskToolRoute,
+} from "./task-tool-contract.ts";
 import { featureDiscoveryReportSchema } from "./discovery-report.ts";
 import { planDiscoveryReportSchema } from "./plan-discovery-report.ts";
 import {
@@ -81,6 +88,10 @@ export function pipelineToolCallTimeoutPolicy(toolName: string) {
 }
 
 interface PipelineSessionFactoryOptions {
+  readonly artifactTools?: (
+    runId: string,
+    role: string,
+  ) => ReadonlyArray<ToolDefinition>;
   readonly modelRegistry: Pick<ModelRegistry, "find">;
   readonly parentCwd: string;
   readonly parentTrusted: boolean;
@@ -178,6 +189,59 @@ function safeJson(value: unknown) {
   } catch {
     return "[unserializable tool arguments]";
   }
+}
+
+type BlockedTaskToolRoute = Extract<TaskToolRoute, { allowed: false }>;
+type TaskToolDenial = BlockedTaskToolRoute & {
+  readonly allowedAlternative: {
+    readonly tool: string;
+    readonly exampleArgs: Readonly<Record<string, unknown>>;
+  } | null;
+};
+
+function taskToolDenial(
+  contract: TaskToolContract,
+  route: BlockedTaskToolRoute,
+) {
+  const alternative = routeTaskOperation(contract, route.operation);
+  return {
+    ...route,
+    allowedAlternative: alternative.allowed
+      ? { tool: alternative.tool, exampleArgs: alternative.exampleArgs }
+      : null,
+  } satisfies TaskToolDenial;
+}
+
+export class TaskToolContractError extends Error {
+  readonly details: TaskToolDenial;
+  readonly code: TaskToolDenial["code"];
+  readonly operation: TaskToolDenial["operation"];
+  readonly reason: string;
+  readonly allowedAlternative: TaskToolDenial["allowedAlternative"];
+  readonly noBypass = true;
+
+  constructor(details: TaskToolDenial) {
+    super(safeJson(details));
+    this.name = "TaskToolContractError";
+    this.details = details;
+    this.code = details.code;
+    this.operation = details.operation;
+    this.reason = details.reason;
+    this.allowedAlternative = details.allowedAlternative;
+  }
+}
+
+function deniedTaskToolError(
+  contractForDispatch: (() => TaskToolContract) | undefined,
+  operation: TaskToolOperation,
+  checkId?: string,
+) {
+  if (!contractForDispatch) return undefined;
+  const contract = contractForDispatch();
+  const route = routeTaskOperation(contract, operation, checkId);
+  return route.allowed
+    ? undefined
+    : new TaskToolContractError(taskToolDenial(contract, route));
 }
 
 function resultPreview(result: unknown) {
@@ -328,7 +392,10 @@ function createFeatureArtifactSubmitTool(
   });
 }
 
-export function createFeatureTaskHostTools(host: FeatureTaskToolHost) {
+export function createFeatureTaskHostTools(
+  host: FeatureTaskToolHost,
+  contractForDispatch?: () => TaskToolContract,
+) {
   return [
     defineTool({
       name: "pipeline_task_diff",
@@ -347,6 +414,8 @@ export function createFeatureTaskHostTools(host: FeatureTaskToolHost) {
         { additionalProperties: false },
       ),
       async execute(_toolCallId, params) {
+        const denied = deniedTaskToolError(contractForDispatch, "diff");
+        if (denied) throw denied;
         const details = await host.diff(params);
         return {
           content: [{ type: "text", text: safeJson(details) }],
@@ -364,6 +433,12 @@ export function createFeatureTaskHostTools(host: FeatureTaskToolHost) {
         { additionalProperties: false },
       ),
       async execute(_toolCallId, params) {
+        const denied = deniedTaskToolError(
+          contractForDispatch,
+          "check",
+          params.checkId,
+        );
+        if (denied) throw denied;
         const details = await host.check({ checkId: params.checkId });
         return {
           content: [{ type: "text", text: safeJson(details) }],
@@ -387,6 +462,8 @@ export function createFeatureTaskHostTools(host: FeatureTaskToolHost) {
         { additionalProperties: false },
       ),
       async execute(_toolCallId, params) {
+        const denied = deniedTaskToolError(contractForDispatch, "finalize");
+        if (denied) throw denied;
         const details = await host.finalize(params);
         return {
           content: [{ type: "text", text: safeJson(details) }],
@@ -517,6 +594,18 @@ function finalText(session: AgentSession) {
   return message ? assistantContent(message).text.trim() : "";
 }
 
+function attachTaskToolContract(text: string, contract: TaskToolContract) {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return JSON.stringify({ ...parsed, toolContract: contract });
+    }
+    return `${text}\n\n${JSON.stringify({ toolContract: contract })}`;
+  } catch {
+    return `${text}\n\n${JSON.stringify({ toolContract: contract })}`;
+  }
+}
+
 function normalizeEvent(
   session: AgentSession,
   event: AgentSessionEvent,
@@ -623,6 +712,21 @@ export function createPipelineSessionFactory(
         spec.scopeId ?? "",
         spec.role,
       );
+      let mutationEnabled = Boolean(featureTaskHost && !isFeatureFinalizer);
+      let activeSession: AgentSession | undefined;
+      const taskToolContract = () => {
+        if (!activeSession)
+          throw new Error(
+            "Task tool contract requested before session creation.",
+          );
+        const description = featureTaskHost?.describe?.();
+        return buildTaskToolContract({
+          activeTools: activeSession.getActiveToolNames(),
+          workspaceRoot: description?.workspaceRoot ?? spec.cwd,
+          phase: mutationEnabled ? "implementation" : "read-only",
+          checkIds: description?.checkIds ?? [],
+        });
+      };
       const featureBoundary =
         definition === FEATURE_PIPELINE_ID &&
         (featurePlanRole || isFeatureFinalizer || featureTaskHost)
@@ -765,9 +869,12 @@ export function createPipelineSessionFactory(
           ? options.rootTools(spec.scopeId ?? "")
           : undefined;
       const featureTaskTools = featureTaskHost
-        ? createFeatureTaskHostTools(featureTaskHost)
+        ? createFeatureTaskHostTools(featureTaskHost, taskToolContract)
         : [];
+      const artifactReadTools =
+        options.artifactTools?.(spec.scopeId ?? "", spec.role) ?? [];
       const sessionTools = [
+        ...artifactReadTools,
         ...(customTools ?? []),
         ...(featureBoundary?.tools ?? []),
         ...(discoveryTool ? [discoveryTool] : []),
@@ -858,7 +965,19 @@ export function createPipelineSessionFactory(
             ? { tools: planReadTools }
             : {}),
         ...pipelineSessionToolPolicy(definition, isRoot, spec.role),
+        ...(artifactReadTools.length
+          ? {
+              excludeTools: pipelineSessionToolPolicy(
+                definition,
+                isRoot,
+                spec.role,
+              ).excludeTools.filter(
+                (name) => !artifactReadTools.some((tool) => tool.name === name),
+              ),
+            }
+          : {}),
       });
+      activeSession = session;
       try {
         options.sessionCreated?.(session);
         await bindChildSessionExtensions(session);
@@ -886,8 +1005,19 @@ export function createPipelineSessionFactory(
         if (event.type === "agent_start") guard.apply(session);
       });
       let disposed = false;
+      const dispatchText = (text: string) =>
+        featureTaskHost
+          ? attachTaskToolContract(text, taskToolContract())
+          : text;
 
       return {
+        get executionMetadata() {
+          return {
+            provider: session.model?.provider ?? model.provider,
+            model: session.model?.id ?? model.id,
+            thinkingLevel: session.thinkingLevel,
+          };
+        },
         get sessionFile() {
           return session.sessionFile;
         },
@@ -904,12 +1034,13 @@ export function createPipelineSessionFactory(
           });
         },
         prompt(text) {
-          return session.prompt(text);
+          return session.prompt(dispatchText(text));
         },
         send(text) {
+          const dispatched = dispatchText(text);
           return session.isStreaming
-            ? session.steer(text)
-            : session.prompt(text);
+            ? session.steer(dispatched)
+            : session.prompt(dispatched);
         },
         enableMutation() {
           if (!featureBoundary || !isFeatureFinalizer) return;
@@ -922,6 +1053,7 @@ export function createPipelineSessionFactory(
             ...featureTaskTools.map(({ name }) => name),
             ...(executionFinishTool ? ["pipeline_execution_finish"] : []),
           ]);
+          mutationEnabled = true;
         },
         async interrupt() {
           if (disposed) return;

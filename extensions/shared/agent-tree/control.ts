@@ -5,12 +5,29 @@ import type {
   AgentTreeSession,
   AgentTreeSessionEvent,
   AgentTreeSessionFactory,
+  AgentTreeEvidenceStatus,
+  TreeEvidenceErrorHandler,
+  TreeEvidenceEvent,
+  TreeEvidenceIdentity,
+  TreeEvidenceObserver,
+  TreeEvidencePayload,
+  TreeEvidenceSessionEvent,
 } from "./domain.ts";
 import { appendTranscriptEvent } from "./transcript.ts";
 
 const ERROR_LIMIT = 16 * 1024;
 const FINAL_TEXT_LIMIT = 1024 * 1024;
 const MAX_LIVE_TEXT = 128 * 1024;
+
+function errorDetail(error: unknown) {
+  let detail: string;
+  try {
+    detail = error instanceof Error ? error.message : String(error);
+  } catch {
+    detail = "Unknown error";
+  }
+  return detail.slice(0, ERROR_LIMIT);
+}
 
 interface MutableNode {
   id: string;
@@ -39,10 +56,13 @@ interface MutableNode {
 
 interface Entry {
   node: MutableNode;
+  identity: TreeEvidenceIdentity;
   session?: AgentTreeSession;
   unsubscribe?: () => void;
   cancellation?: Promise<AgentNodeSnapshot>;
   sessionDisposed?: boolean;
+  dispatchAwaitingStart?: boolean;
+  runStarted?: boolean;
 }
 
 export interface AgentTreeControllerOptions {
@@ -50,6 +70,10 @@ export interface AgentTreeControllerOptions {
   /** Capacity is a direct-subagent concern; pipeline controllers must omit it. */
   readonly capacity?: Readonly<Record<string, number>>;
   readonly makeId?: () => string;
+  /** Controller-owned, metadata-only observation for pipeline evidence. */
+  readonly observer?: TreeEvidenceObserver;
+  /** Called when an observer cannot accept an evidence event. */
+  readonly onEvidenceError?: TreeEvidenceErrorHandler;
 }
 
 export class AgentTreeController {
@@ -61,8 +85,11 @@ export class AgentTreeController {
   private readonly factory: AgentTreeSessionFactory;
   private readonly capacity: Readonly<Record<string, number>>;
   private readonly makeId: () => string;
+  private readonly observer?: TreeEvidenceObserver;
+  private readonly onEvidenceError?: TreeEvidenceErrorHandler;
   private sequence = 0;
   private disposed = false;
+  private evidenceStatusValue: AgentTreeEvidenceStatus = "complete";
 
   readonly view: AgentTreeReadModel;
 
@@ -70,6 +97,8 @@ export class AgentTreeController {
     this.factory = options.factory;
     this.capacity = options.capacity ?? {};
     this.makeId = options.makeId ?? (() => `agent-${++this.sequence}`);
+    this.observer = options.observer;
+    this.onEvidenceError = options.onEvidenceError;
     this.view = {
       list: () => [...this.entries.values()].map((entry) => entry.node),
       get: (id) => this.entries.get(id)?.node,
@@ -101,10 +130,64 @@ export class AgentTreeController {
     };
   }
 
+  get evidenceStatus() {
+    return this.evidenceStatusValue;
+  }
+
+  private handleEvidenceError(error: unknown, event: TreeEvidenceEvent) {
+    this.evidenceStatusValue = "incomplete";
+    try {
+      const result = this.onEvidenceError?.(error, event);
+      void Promise.resolve(result).catch(() => {
+        this.evidenceStatusValue = "incomplete";
+      });
+    } catch {
+      // Error reporting cannot affect the tree lifecycle.
+    }
+  }
+
+  private observe(event: TreeEvidenceEvent) {
+    if (!this.observer) return;
+    try {
+      const result = this.observer(event);
+      void Promise.resolve(result).catch((error) =>
+        this.handleEvidenceError(error, event),
+      );
+    } catch (error) {
+      this.handleEvidenceError(error, event);
+    }
+  }
+
+  private identity(entry: Entry) {
+    return {
+      nodeId: entry.identity.nodeId,
+      ...(entry.identity.scopeId !== undefined
+        ? { scopeId: entry.identity.scopeId }
+        : {}),
+      ...(entry.identity.parentId !== undefined
+        ? { parentId: entry.identity.parentId }
+        : {}),
+      role: entry.identity.role,
+      attempt: entry.identity.attempt,
+      requestedModel: entry.identity.requestedModel,
+      ...(entry.identity.thinkingLevel !== undefined
+        ? { thinkingLevel: entry.identity.thinkingLevel }
+        : {}),
+    } satisfies TreeEvidenceIdentity;
+  }
+
+  private evidence(entry: Entry, event: TreeEvidencePayload) {
+    this.observe({ ...this.identity(entry), ...event });
+  }
+
   private async disposeSession(entry: Entry) {
     if (!entry.session || entry.sessionDisposed) return;
     entry.sessionDisposed = true;
-    await entry.session.dispose();
+    try {
+      await entry.session.dispose();
+    } finally {
+      this.evidence(entry, { type: "disposed" });
+    }
   }
 
   private notify(id?: string) {
@@ -176,12 +259,77 @@ export class AgentTreeController {
     this.notify(node.id);
   }
 
+  private sessionEvidenceEvent(event: AgentTreeSessionEvent) {
+    if (event.type === "run_started") {
+      return { type: "run_started" } satisfies TreeEvidenceSessionEvent;
+    }
+    if (event.type === "tool") {
+      return {
+        type: "tool",
+        phase: event.phase,
+        toolCallId: event.toolCallId,
+        name: event.name,
+        isError: event.isError,
+        ...(event.phase === "result" && event.isError
+          ? { failureDetail: errorDetail(event.text) }
+          : {}),
+      } satisfies TreeEvidenceSessionEvent;
+    }
+    if (event.type !== "settled") return undefined;
+    if (event.outcome.type === "completed") {
+      return {
+        type: "settled",
+        outcome: { type: "completed" },
+      } satisfies TreeEvidenceSessionEvent;
+    }
+    if (event.outcome.type === "cancelled") {
+      return {
+        type: "settled",
+        outcome: { type: "cancelled" },
+      } satisfies TreeEvidenceSessionEvent;
+    }
+    return {
+      type: "settled",
+      outcome: {
+        type: "failed",
+        error: errorDetail(event.outcome.error),
+      },
+    } satisfies TreeEvidenceSessionEvent;
+  }
+
+  private markRunStarted(entry: Entry) {
+    entry.dispatchAwaitingStart = false;
+    entry.runStarted = true;
+  }
+
+  private beginDispatch(entry: Entry, kind: "prompt" | "send" | "deferred") {
+    if (!entry.runStarted) entry.dispatchAwaitingStart = true;
+    this.evidence(entry, { type: "dispatch", kind });
+  }
+
   private onEvent(entry: Entry, event: AgentTreeSessionEvent) {
     if (event.type === "run_started") {
       entry.node.status = "running";
       entry.node.settledAt = undefined;
       entry.node.error = undefined;
+      this.markRunStarted(entry);
     } else if (event.type === "settled") {
+      if (entry.dispatchAwaitingStart && !entry.runStarted) {
+        this.markRunStarted(entry);
+        this.evidence(entry, {
+          type: "session_event",
+          event: { type: "run_started" },
+        });
+      }
+      entry.dispatchAwaitingStart = false;
+      entry.runStarted = false;
+      const evidenceEvent = this.sessionEvidenceEvent(event);
+      if (evidenceEvent) {
+        this.evidence(entry, {
+          type: "session_event",
+          event: evidenceEvent,
+        });
+      }
       this.settle(entry, event);
       return;
     } else if (event.type === "assistant_delta") {
@@ -200,6 +348,13 @@ export class AgentTreeController {
       if (event.type === "assistant") entry.node.liveAssistant = undefined;
       appendTranscriptEvent(entry.node.transcript, event);
     }
+    const evidenceEvent = this.sessionEvidenceEvent(event);
+    if (evidenceEvent) {
+      this.evidence(entry, {
+        type: "session_event",
+        event: evidenceEvent,
+      });
+    }
     this.notify(entry.node.id);
   }
 
@@ -212,13 +367,15 @@ export class AgentTreeController {
     const id = this.makeId();
     const node: MutableNode = {
       id,
-      ...(spec.scopeId ? { scopeId: spec.scopeId } : {}),
-      ...(spec.parentId ? { parentId: spec.parentId } : {}),
+      ...(spec.scopeId !== undefined ? { scopeId: spec.scopeId } : {}),
+      ...(spec.parentId !== undefined ? { parentId: spec.parentId } : {}),
       role: spec.role,
       attempt: spec.attempt,
       title: spec.title,
       model: spec.model,
-      ...(spec.thinkingLevel ? { thinkingLevel: spec.thinkingLevel } : {}),
+      ...(spec.thinkingLevel !== undefined
+        ? { thinkingLevel: spec.thinkingLevel }
+        : {}),
       cwd: spec.cwd,
       persistent: spec.persistent ?? false,
       deferredPrompt: spec.deferPrompt ?? false,
@@ -228,8 +385,20 @@ export class AgentTreeController {
       transcript: [],
       activeTools: [],
     };
-    const entry: Entry = { node };
+    const identity = {
+      nodeId: id,
+      ...(spec.scopeId !== undefined ? { scopeId: spec.scopeId } : {}),
+      ...(spec.parentId !== undefined ? { parentId: spec.parentId } : {}),
+      role: spec.role,
+      attempt: spec.attempt,
+      requestedModel: spec.model,
+      ...(spec.thinkingLevel !== undefined
+        ? { thinkingLevel: spec.thinkingLevel }
+        : {}),
+    } satisfies TreeEvidenceIdentity;
+    const entry: Entry = { node, identity };
     this.entries.set(id, entry);
+    this.evidence(entry, { type: "spawn_requested" });
     this.notify(id);
 
     try {
@@ -241,7 +410,26 @@ export class AgentTreeController {
       entry.session = session;
       node.sessionFile = session.sessionFile;
       node.activeTools = [...session.activeTools];
+      const executionMetadata = session.executionMetadata;
+      this.evidence(entry, {
+        type: "session_created",
+        ...(executionMetadata
+          ? {
+              executionMetadata: {
+                provider: executionMetadata.provider,
+                model: executionMetadata.model,
+                ...(executionMetadata.thinkingLevel !== undefined
+                  ? { thinkingLevel: executionMetadata.thinkingLevel }
+                  : {}),
+                ...(executionMetadata.servingRevision !== undefined
+                  ? { servingRevision: executionMetadata.servingRevision }
+                  : {}),
+              },
+            }
+          : {}),
+      });
       if (spec.shouldStart && !spec.shouldStart()) {
+        this.evidence(entry, { type: "cancelled" });
         node.status = "cancelled";
         node.settledAt = Date.now();
         node.error = "Run was cancelled before the agent started";
@@ -255,24 +443,27 @@ export class AgentTreeController {
       node.status = spec.deferPrompt ? "idle" : "running";
       this.notify(id);
       if (!spec.deferPrompt) {
+        this.beginDispatch(entry, "prompt");
         void session.prompt(spec.prompt).catch((error) => {
           if (node.status !== "starting" && node.status !== "running") return;
-          this.settle(entry, {
+          this.onEvent(entry, {
             type: "settled",
             outcome: {
               type: "failed",
-              error: error instanceof Error ? error.message : String(error),
+              error: errorDetail(error),
             },
           });
         });
       }
       return node as AgentNodeSnapshot;
     } catch (error) {
+      this.evidence(entry, {
+        type: "spawn_failed",
+        error: errorDetail(error),
+      });
       node.status = "error";
       node.settledAt = Date.now();
-      node.error = (
-        error instanceof Error ? error.message : String(error)
-      ).slice(0, ERROR_LIMIT);
+      node.error = errorDetail(error);
       this.notify(id);
       throw error;
     } finally {
@@ -313,7 +504,7 @@ export class AgentTreeController {
     }
     entry.node.deferredPrompt = false;
     try {
-      await this.send(id, text);
+      await this.sendInternal(id, text, "deferred");
     } catch (error) {
       entry.node.deferredPrompt = true;
       throw error;
@@ -339,10 +530,18 @@ export class AgentTreeController {
   }
 
   async send(id: string, text: string) {
+    return this.sendInternal(id, text, "send");
+  }
+
+  private async sendInternal(
+    id: string,
+    text: string,
+    kind: "send" | "deferred",
+  ) {
     if (!text.trim()) throw new Error("Steering text must not be empty.");
     const entry = this.entries.get(id);
     if (!entry?.session) throw new Error(`Unknown agent id "${id}".`);
-    if (entry.node.deferredPrompt) {
+    if (entry.node.deferredPrompt && kind !== "deferred") {
       throw new Error(`Agent "${id}" is waiting for controller bootstrap.`);
     }
     if (entry.node.status === "cancelled") {
@@ -351,14 +550,23 @@ export class AgentTreeController {
     const restarting = entry.node.status !== "running";
     if (restarting) this.reserve(entry.node.model);
     const previousStatus = entry.node.status;
+    const previousDispatchAwaitingStart = entry.dispatchAwaitingStart;
+    const previousRunStarted = entry.runStarted;
     entry.node.status = "running";
     entry.node.settledAt = undefined;
     entry.node.error = undefined;
+    if (restarting) {
+      entry.dispatchAwaitingStart = false;
+      entry.runStarted = false;
+    }
     if (restarting) this.release(entry.node.model);
     this.notify(id);
+    this.beginDispatch(entry, kind);
     try {
       await entry.session.send(text);
     } catch (error) {
+      entry.dispatchAwaitingStart = previousDispatchAwaitingStart;
+      entry.runStarted = previousRunStarted;
       entry.node.status = previousStatus;
       this.notify(id);
       throw error;
@@ -397,6 +605,7 @@ export class AgentTreeController {
 
   private async cancelEntry(entry: Entry) {
     let failure: unknown;
+    this.evidence(entry, { type: "cancelled" });
     if (entry.node.status !== "idle") {
       try {
         await entry.session!.interrupt();

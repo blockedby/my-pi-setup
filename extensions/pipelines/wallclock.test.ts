@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -108,6 +111,31 @@ function flush() {
   return new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+function createHandoffWaiter() {
+  let resolveHandoff: (handoff: PipelineHandoff) => void = () => {};
+  const promise = new Promise<PipelineHandoff>((resolve) => {
+    resolveHandoff = (handoff) => resolve(handoff);
+  });
+  return { promise, resolve: resolveHandoff };
+}
+
+async function awaitHandoff(pending: Promise<PipelineHandoff>) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("pipeline handoff did not settle promptly")),
+          5_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 test("wallclock parser accepts canonical inclusive bounds and disables omission", () => {
   assert.equal(parsePipelineWallclockLimit(), undefined);
   assert.equal(
@@ -193,13 +221,18 @@ test("public pipeline input keeps the limit optional, canonical, and bounded", (
 test("controller leaves timing disabled when the caller omits a limit", async () => {
   const clock = new FakeClock();
   const scheduler = new FakeScheduler(clock);
+  const artifactRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-wallclock-untimed-"),
+  );
+  const handoffWaiter = createHandoffWaiter();
   const controller = new PipelineController({
+    artifactRoot,
     createSessionFactory: () => ({
       async create(spec) {
         return new FakeSession(spec);
       },
     }),
-    onHandoff: () => {},
+    onHandoff: handoffWaiter.resolve,
     makeRunId: () => "untimed-wallclock-plan-00000001",
     clock,
     scheduler,
@@ -216,7 +249,13 @@ test("controller leaves timing disabled when the caller omits a limit", async ()
   assert.equal(run?.wallclockLimitMs, undefined);
   assert.equal(run?.stageTiming, undefined);
   assert.equal(run?.wallclock, undefined);
-  await controller.dispose();
+  try {
+    await controller.cancelRun(runId);
+    await awaitHandoff(handoffWaiter.promise);
+  } finally {
+    await controller.dispose();
+    fs.rmSync(artifactRoot, { recursive: true, force: true });
+  }
 });
 
 test("controller rejects out-of-range limits before inserting or creating a run", () => {
@@ -331,7 +370,12 @@ test("controller warns current-stage sessions at 80% and settles once at 100%", 
   const scheduler = new FakeScheduler(clock);
   const sessions: FakeSession[] = [];
   const handoffs: PipelineHandoff[] = [];
+  const artifactRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-wallclock-timed-"),
+  );
+  const handoffWaiter = createHandoffWaiter();
   const controller = new PipelineController({
+    artifactRoot,
     monotonicClock: clock,
     wallclockScheduler: scheduler,
     createSessionFactory: (_rootTools, _definitionForRun) => ({
@@ -343,6 +387,7 @@ test("controller warns current-stage sessions at 80% and settles once at 100%", 
     }),
     onHandoff: (handoff) => {
       handoffs.push(handoff);
+      handoffWaiter.resolve(handoff);
     },
     makeRunId: () => "wallclock-plan-test-00000001",
     makeAgentId: (() => {
@@ -373,13 +418,15 @@ test("controller warns current-stage sessions at 80% and settles once at 100%", 
   clock.value = 30_000;
   scheduler.runDue();
   await flush();
+  const handoff = await awaitHandoff(handoffWaiter.promise);
   assert.equal(controller.get(runId)?.status, "limited");
   assert.equal(controller.get(runId)?.limitation?.stage, "discover");
   assert.equal(controller.get(runId)?.limitation?.elapsedMs, 30_000);
   assert.equal(handoffs.length, 1);
-  assert.equal(handoffs[0]?.status, "limited");
-  assert.equal(handoffs[0]?.limitation?.reason, "stage-deadline");
+  assert.equal(handoff.status, "limited");
+  assert.equal(handoff.limitation?.reason, "stage-deadline");
   scheduler.runDue();
   assert.equal(handoffs.length, 1);
   await controller.dispose();
+  fs.rmSync(artifactRoot, { recursive: true, force: true });
 });

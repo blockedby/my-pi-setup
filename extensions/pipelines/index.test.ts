@@ -28,6 +28,7 @@ test("pipeline extension registers run/cancel/check/list without status/wait ali
 
   assert.deepEqual(tools, [
     "pipeline_run",
+    "pipeline_artifact_read",
     "pipeline_cancel",
     "pipeline_check",
     "pipeline_list",
