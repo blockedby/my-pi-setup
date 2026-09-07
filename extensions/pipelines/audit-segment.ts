@@ -10,6 +10,7 @@ import {
 } from "./domain.ts";
 import type { FeatureAuditHandoff } from "./feature-audit-handoff.ts";
 import { IncrementalFanInReducer } from "./incremental-fan-in.ts";
+import { renderSubmissionExample } from "./submission-examples.ts";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 
@@ -979,6 +980,7 @@ export function buildAuditTrackPrompt(
   role: PipelineLunaAuditRole,
   context: AuditSegmentContext,
 ) {
+  const example = `Illustrative minimal JSON example (not a completed audit): ${renderSubmissionExample(role)}. Populate findings, unproven checks, and executor evidence from actual observations; empty arrays do not waive required checks.`;
   const findingContract = `"findings": [{
     "title": "concise defect",
     "scenario": "concrete reachable scenario",
@@ -1023,7 +1025,8 @@ Call pipeline_audit_submit exactly once with the complete report object below, t
   }],
   ${findingContract}
 }
-Preserve successful execution evidence even with no findings. A failed, timed-out, or skipped command is execution evidence and does not automatically prove a behavior finding. Only report real behavior gaps; omit readiness and Git-delivery decisions.`;
+Preserve successful execution evidence even with no findings. A failed, timed-out, or skipped command is execution evidence and does not automatically prove a behavior finding. Only report real behavior gaps; omit readiness and Git-delivery decisions.
+${example}`;
   }
 
   return `You are an isolated read-only Luna/medium audit track. ${roleInstruction(role)}
@@ -1035,7 +1038,8 @@ Inspect independently. Do not run shell commands, edit or create files, mutate r
   "track": "${role}",
   ${findingContract}
 }
-Only report real behavior gaps. Omit style, generic hardening, unsupported speculation, impact-1 candidates, confidence below 50, and readiness verdicts.`;
+Only report real behavior gaps. Omit style, generic hardening, unsupported speculation, impact-1 candidates, confidence below 50, and readiness verdicts.
+${example}`;
 }
 
 function synthesisContract(context: AuditSegmentContext, final: boolean) {

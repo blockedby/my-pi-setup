@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionContext,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   createToolCallTimeoutGuard,
@@ -85,6 +88,92 @@ test("the guard wraps each definition once and can discover later tools", () => 
 
   assert.equal(first.execute, firstWrappedExecute);
   assert.notEqual(second.execute, secondExecute);
+});
+
+test("a per-tool policy disables only the selected tool timeout", async () => {
+  const definitions = new Map<string, ToolDefinition>();
+  const createDefinition = (name: string): ToolDefinition => ({
+    name,
+    label: name,
+    description: name,
+    parameters: Type.Object({}),
+    async execute() {
+      return { content: [{ type: "text", text: "done" }], details: {} };
+    },
+  });
+  const wait = createDefinition("pipeline_child_wait");
+  wait.execute = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return { content: [{ type: "text", text: "waited" }], details: {} };
+  };
+  const other = createDefinition("pipeline_child_send");
+  other.execute = async () => new Promise(() => {});
+  definitions.set(wait.name, wait);
+  definitions.set(other.name, other);
+  const registry = {
+    getAllTools: () => [...definitions.keys()].map((name) => ({ name })),
+    getToolDefinition: (name: string) => definitions.get(name),
+  };
+  const guard = createToolCallTimeoutGuard(5, (toolName) =>
+    toolName === "pipeline_child_wait" ? null : undefined,
+  );
+  guard.apply(registry);
+  const execute = (definition: ToolDefinition) =>
+    definition.execute(
+      "fixture",
+      {},
+      undefined,
+      undefined,
+      {} as ExtensionContext,
+    );
+
+  const result = await execute(wait);
+  assert.equal(result.content[0]?.type, "text");
+  await assert.rejects(
+    execute(other),
+    (error: unknown) => error instanceof ToolCallTimeoutError,
+  );
+});
+
+test("a no-timeout call still honors parent cancellation", async () => {
+  const controller = new AbortController();
+  const reason = new Error("cancelled wait fixture");
+  let executionSignal: AbortSignal | undefined;
+  const pending = runWithToolCallTimeout(
+    "pipeline_child_wait",
+    undefined,
+    controller.signal,
+    (signal) => {
+      executionSignal = signal;
+      return new Promise(() => {});
+    },
+  );
+
+  controller.abort(reason);
+
+  await assert.rejects(pending, (error: unknown) => error === reason);
+  assert.equal(executionSignal?.aborted, true);
+});
+
+test("a pre-aborted no-timeout call does not start execution", async () => {
+  const controller = new AbortController();
+  const reason = new Error("already cancelled fixture");
+  controller.abort(reason);
+  let executed = false;
+
+  await assert.rejects(
+    runWithToolCallTimeout(
+      "pipeline_child_wait",
+      undefined,
+      controller.signal,
+      async () => {
+        executed = true;
+        return "unexpected";
+      },
+    ),
+    (error: unknown) => error === reason,
+  );
+  assert.equal(executed, false);
 });
 
 test("successful and terminating tool results pass through unchanged", async () => {

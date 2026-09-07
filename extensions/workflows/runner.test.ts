@@ -13,6 +13,7 @@ import {
   transcriptFromMessages,
   type ToolExecutionTiming,
 } from "./runner.ts";
+import { ToolCallTimeoutError } from "../shared/tool-call-timeout.ts";
 
 const zeroUsage = {
   input: 0,
@@ -270,4 +271,42 @@ test("workflow children guard structured, normal, and dynamically registered too
   );
   assert.equal(dynamicSignal?.aborted, true);
   unsubscribe();
+});
+
+test("workflow children do not exempt pipeline_child_wait from the default timeout", async () => {
+  let executionSignal: AbortSignal | undefined;
+  const wait = {
+    name: "pipeline_child_wait",
+    label: "Wait fixture",
+    description: "fixture",
+    parameters: Type.Object({}),
+    async execute(
+      _toolCallId: string,
+      _params: Record<string, never>,
+      signal?: AbortSignal,
+    ) {
+      executionSignal = signal;
+      return new Promise<never>(() => {});
+    },
+  } satisfies ToolDefinition;
+  const session = {
+    getAllTools: () => [{ name: wait.name }],
+    getToolDefinition: (name: string) =>
+      name === wait.name ? wait : undefined,
+    subscribe(_listener: AgentSessionEventListener) {
+      return () => {};
+    },
+  };
+
+  const unsubscribe = guardWorkflowChildTools(session, 5);
+  try {
+    await assert.rejects(
+      wait.execute("fixture", {}, undefined),
+      (error: unknown) => error instanceof ToolCallTimeoutError,
+    );
+    assert.equal(executionSignal?.aborted, true);
+    assert.equal(executionSignal?.reason instanceof ToolCallTimeoutError, true);
+  } finally {
+    unsubscribe();
+  }
 });
