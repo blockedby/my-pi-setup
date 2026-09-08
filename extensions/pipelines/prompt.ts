@@ -229,7 +229,7 @@ export function buildPlanPipelinePrompt(
   request: PipelineRunRequest,
   reports: ReadonlyArray<PlanDiscoveryReportContext> = [],
 ) {
-  return `You are the persistent Luna/xHIGH plan-synthesis session for one plan-pipeline run.
+  return `You are the persistent Astra/low plan-synthesis session for one plan-pipeline run.
 
 Original task:
 ${request.task}

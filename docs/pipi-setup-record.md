@@ -1890,3 +1890,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Workspace: `/home/kcnc/code/tools/pipi-alias/.worktrees/oxlint-setup`, branch `chore/oxlint-setup`. Application changes remain isolated from main and the installed runtime.
 - Verification: `bun run lint`, `bun run check`, `bun run format:check`, and `git diff --check` passed. Installer tests: 64 passed; deterministic extension tests: 581 passed; focused controller/check-input/provenance retest after final cleanup: 89 passed; nested agent-tree control tests also passed. Independent Luna initial review returned READY with no findings. No live provider or runtime installation checks were performed.
 - Pending: changes are uncommitted and unmerged in the isolated worktree; lint remains a separate command.
+
+## Operation entry: route plan pipeline synthesis through Astra low
+
+- Request: switch plan pipeline synthesis to Astra low directly on main and reinstall Pipi.
+- Action: changed the plan synthesis root from the current Luna/xhigh configuration to `openai-codex/gpt-6-astra` with `low` reasoning; retained all six Luna/medium discovery sessions. Updated the root title, synthesis prompt, controller/dashboard contract tests, and design documentation.
+- Affected paths: `extensions/pipelines/{domain,controller,prompt,controller.test,dashboard.test}.ts`, `docs/pipelines-v1-design.md`, this journal, and installer-managed runtime/settings/integrations under `~/.pipi/agent` and launcher `~/.local/bin/pipi`. Existing unrelated local edits were preserved.
+- Verification: TypeScript, formatting, lint, and all 581 deterministic extension tests passed. `bun run rollout:pipi-upgrade` completed successfully; installed-runtime verification confirmed Pi 0.85.1 and managed integrations. No live model request was made.
+- Pending: restart existing Pipi sessions to load the updated pipeline.

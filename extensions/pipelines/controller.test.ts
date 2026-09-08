@@ -4797,7 +4797,7 @@ test("feature completion appends committed and dirty Git facts without readiness
   fs.rmSync(workingDir, { recursive: true, force: true });
 });
 
-test("plan-pipeline uses six Luna discoveries and one xhigh synthesis for terminal-only output", async () => {
+test("plan-pipeline uses six Luna discoveries and one Astra low synthesis for terminal-only output", async () => {
   const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-new-"));
   const run = harness({ autoCompletePlan: true });
   const runId = run.controller.start({
@@ -4812,8 +4812,8 @@ test("plan-pipeline uses six Luna discoveries and one xhigh synthesis for termin
   assert.equal(snapshot?.stage, "complete");
   assert.equal(snapshot?.agents.length, 7);
   assert.equal(snapshot?.agents[0]?.role, PLAN_PIPELINE_SYNTHESIS_ROLE);
-  assert.equal(snapshot?.agents[0]?.model, LUNA_MODEL);
-  assert.equal(snapshot?.agents[0]?.thinkingLevel, "xhigh");
+  assert.equal(snapshot?.agents[0]?.model, ASTRA_MODEL);
+  assert.equal(snapshot?.agents[0]?.thinkingLevel, "low");
   assert.deepEqual(
     snapshot?.agents.slice(1).map((agent) => agent.role),
     [...PLAN_PIPELINE_DISCOVERY_ROLES],

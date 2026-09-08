@@ -250,8 +250,8 @@ export const PIPELINE_DEFINITIONS: ReadonlyArray<PipelineDefinition> = [
   {
     id: PLAN_PIPELINE_ID,
     title: "Plan pipeline",
-    rootTitle: "Plan pipeline Luna synthesis",
-    rootModel: LUNA_MODEL,
+    rootTitle: "Plan pipeline Astra synthesis",
+    rootModel: ASTRA_MODEL,
     childRoles: PLAN_PIPELINE_CHILD_ROLES,
   },
   {

@@ -1940,8 +1940,7 @@ export class PipelineController {
         attempt: 1,
         title: run.id,
         model: definitionFor(run.definition).rootModel,
-        thinkingLevel:
-          run.definition === PLAN_PIPELINE_ID ? "xhigh" : undefined,
+        thinkingLevel: run.definition === PLAN_PIPELINE_ID ? "low" : undefined,
         cwd: run.request.workingDir,
         prompt: buildPipelinePrompt(run.definition, run.request),
         persistent: true,

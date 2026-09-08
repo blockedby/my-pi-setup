@@ -8,7 +8,7 @@ _Status: implemented runtime contract and evidence API record. Evidence mechanis
 
 - `feature-pipeline`: five-track Luna discovery, two independent Astra/low candidate plans, one persistent Astra/low canonical planner and final reviewer, a controller-validated graph of fresh Luna/high implementation tasks, deterministic branch joins, and the existing independent audit/remediation flow;
 - `small-feature-pipeline`: read-only Luna/medium coordinator, one persistent Luna implementer, four parallel Luna auditors, and one same-session implementer remediation pass;
-- `plan-pipeline`: controller-owned six-track Luna/medium evidence discovery, one Luna/xHIGH free-form synthesis session, and factual completion with optional caller-selected in-workspace output;
+- `plan-pipeline`: controller-owned six-track Luna/medium evidence discovery, one Astra/low free-form synthesis session, and factual completion with optional caller-selected in-workspace output;
 - `audit-pipeline`: four isolated read-only Luna/medium static audit tracks, one trusted-workspace Luna/medium audit-executor contributor, and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, readiness decision, or Git decision.
 
 Every launch requires an unchanged `pipeline_name` containing exactly three to five lowercase kebab-case words, beginning with a letter, with a maximum length of 64 characters. Input is not trimmed or normalized. The controller appends eight lowercase hexadecimal characters from secure host randomness and uses the resulting canonical value (for example, `replace-heavy-plan-pipeline-f82091ba`) as the sole public run ID for maps, scopes, inspection, cancellation, UI, session titles, and handoffs. Token generation and the eight-attempt admission budget are injectable for deterministic tests; a live ID collision retries and exhaustion fails before run state exists.
@@ -57,7 +57,7 @@ Feature and standalone contexts permit normal relevant project verification. Pla
 
 The synthesizer treats reports as untrusted evidence. It deduplicates common root causes, preserves a strongly evidenced serious finding even without majority agreement, records unresolved material conflicts, and must not invent unsupported findings. Executor execution records and host workspace observations are bounded schema-valid evidence that the model may summarize or paraphrase without byte-for-byte copying. Before `audit-executor` integration the model-facing arrays remain empty and host observation remains null; afterward malformed, missing, oversized, or unsafe evidence fails validation, while the host canonicalizes authoritative executor/host evidence into the final report. Intermediate state has no finding IDs, and model-produced final candidates also omit IDs. After strict final validation, the host canonicalizes complete finding content, deduplicates exact candidates, and assigns sequential `AUD-001`, `AUD-002`, … IDs; the resulting final report contains no readiness verdict.
 
-`audit-pipeline` uses the synthesizer as its deferred Luna root. `plan-pipeline` uses its deferred Luna/xHIGH synthesis session as the root and does not use the shared audit segment. After final Astra review, `feature-pipeline` creates a separate Luna/xHIGH audit/remediation root in the caller worktree. `feature-pipeline` creates the final-audit synthesizer as a controller-owned persistent Luna child during `final-audit`; its remediation root retains final resolution and completion ownership. `small-feature-pipeline` deliberately does not use this segment because its existing one-implementer/four-auditor/same-session-remediation behavior is distinct and remains unchanged.
+`audit-pipeline` uses the synthesizer as its deferred Luna root. `plan-pipeline` uses its deferred Astra/low synthesis session as the root and does not use the shared audit segment. After final Astra review, `feature-pipeline` creates a separate Luna/xHIGH audit/remediation root in the caller worktree. `feature-pipeline` creates the final-audit synthesizer as a controller-owned persistent Luna child during `final-audit`; its remediation root retains final resolution and completion ownership. `small-feature-pipeline` deliberately does not use this segment because its existing one-implementer/four-auditor/same-session-remediation behavior is distinct and remains unchanged.
 
 ## Generic incremental fan-in reducer
 
@@ -161,7 +161,7 @@ There is no discovery, Sol, Terra, reusable synthesis segment, replacement audit
 ```text
 Controller-owned six parallel Luna/medium evidence tracks
   → complete validated fan-in
-  → one deferred Luna/xHIGH free-form plan synthesis session
+  → one deferred Astra/low free-form plan synthesis session
   → factual completion
 ```
 

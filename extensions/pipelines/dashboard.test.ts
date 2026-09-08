@@ -371,11 +371,11 @@ test("agent rows show configured thinking and omit the first attempt marker", ()
   );
 });
 
-test("plan pipeline renders six discovery agents and xhigh synthesis under its three stages", () => {
+test("plan pipeline renders six discovery agents and Astra low synthesis under its three stages", () => {
   const root = agent("root-1", {
     role: "plan-synthesis",
-    model: "openai-codex/gpt-5.6-luna",
-    thinkingLevel: "xhigh",
+    model: "openai-codex/gpt-6-astra",
+    thinkingLevel: "low",
     parentId: undefined,
   });
   const discoveryRoles = [
@@ -410,7 +410,7 @@ test("plan pipeline renders six discovery agents and xhigh synthesis under its t
   );
   assert.equal(
     rows.find((row) => row.kind === "agent" && row.agentId === root.id)?.label,
-    "plan-synthesis · openai-codex/gpt-5.6-luna · xhigh · running",
+    "plan-synthesis · openai-codex/gpt-6-astra · low · running",
   );
   assert.equal(
     rows.filter(
