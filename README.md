@@ -24,12 +24,12 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 
 ### Pipelines
 
-| Pipeline                 | Use it when you need                                                                                             |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `small-feature-pipeline` | One focused implementation, parallel review, and a fix pass                                                      |
-| `feature-pipeline`       | A broader feature with Astra planning, parallel Luna tasks, final review, and audit                                        |
-| `plan-pipeline`          | A repository-grounded implementation plan instead of code, returned directly or saved to a chosen workspace path |
-| `audit-pipeline`         | A read-only initial or closure audit with no remediation                                                         |
+| Pipeline                 | How it works                                                                                                    |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `small-feature-pipeline` | One implementer → four parallel reviewers → a final fix pass.                                                   |
+| `feature-pipeline`       | Parallel exploration → two candidate plans → one unified plan → graph implementation → final review and audit.  |
+| `plan-pipeline`          | Six parallel research tracks → Astra synthesis → one implementation plan, returned directly or saved to a file. |
+| `audit-pipeline`         | Four parallel code reviews + one verification track → one consolidated report.                                  |
 
 Run `/pipelines` to inspect progress or ask Pipi to cancel one or more active runs. Each launch gets a recognizable name plus a short unique suffix, so repeated runs remain easy to distinguish. Pipeline stages warn before a caller-selected wallclock limit; use `30s`–`24h` durations when launching a run, or omit the limit to leave timing disabled. Press `Enter` to expand a run or open the agent responsible for a stage. Status colors make running, completed, limited, and failed work easy to scan.
 

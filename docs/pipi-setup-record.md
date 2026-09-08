@@ -1898,3 +1898,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Affected paths: `extensions/pipelines/{domain,controller,prompt,controller.test,dashboard.test}.ts`, `docs/pipelines-v1-design.md`, this journal, and installer-managed runtime/settings/integrations under `~/.pipi/agent` and launcher `~/.local/bin/pipi`. Existing unrelated local edits were preserved.
 - Verification: TypeScript, formatting, lint, and all 581 deterministic extension tests passed. `bun run rollout:pipi-upgrade` completed successfully; installed-runtime verification confirmed Pi 0.85.1 and managed integrations. No live model request was made.
 - Pending: restart existing Pipi sessions to load the updated pipeline.
+
+## Operation entry: clarify README pipeline structure
+
+- Request: use the proposed concise pipeline descriptions with "graph implementation" for the feature pipeline.
+- Action: replaced the README pipeline table with the approved stage summaries, including graph implementation.
+- Affected paths: `README.md` and this journal.
+- Verification: README formatting, `bun run check`, `bun run format:check`, `bun run lint`, and `git diff --check` passed. Documentation-only change; no runtime installation needed.
+- Pending: none.
