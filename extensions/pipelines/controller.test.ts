@@ -53,8 +53,6 @@ import {
 import { planDiscoveryCoverage } from "./plan-discovery-report.ts";
 import {
   FEATURE_CANDIDATE_ROLES,
-  FEATURE_CANDIDATE_STEERING_LIMIT_MS,
-  FEATURE_CANDIDATE_STEERING_WARNING_MS,
   FEATURE_DISCOVERY_SYNTHESIS_ROLE,
   FEATURE_IMPLEMENTATION_SYNTHESIS_ROLE,
   type FeatureCandidateHandoff,

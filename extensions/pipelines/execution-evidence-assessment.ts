@@ -531,9 +531,12 @@ function assessProvenance(
       : invalid.length > 0
         ? `${invalid.length} session metadata record(s) are incomplete. Requested versus selected model provenance is unproven; serving revision is optional.`
         : `Observed ${sessions.length} requested/selected provider model record(s) (${selections.slice(0, 8).join(", ")}). Serving revision was present for ${servingRevisionCount} record(s) and is optional. This records metadata only and makes no provider-compute claim.`;
-  return criterion("model-provenance", status, detail, [
-    ...(sessions.length > 0 ? ["run-events:session_created"] : []),
-  ]);
+  return criterion(
+    "model-provenance",
+    status,
+    detail,
+    sessions.length > 0 ? ["run-events:session_created"] : [],
+  );
 }
 
 function sameSpawnIdentity(left: RunEvent, right: RunEvent) {

@@ -93,7 +93,6 @@ import {
 import {
   parsePlanDiscoveryReport,
   parsePlanDiscoveryReportText,
-  type PlanDiscoveryReport,
   type PlanDiscoveryReportContext,
 } from "./plan-discovery-report.ts";
 import {
@@ -1003,9 +1002,9 @@ export class PipelineController {
 
   private validatedProgress(run: MutableRun) {
     const progress: string[] = [];
-    for (const role of [...run.featureDiscoveryReports.keys()])
+    for (const role of run.featureDiscoveryReports.keys())
       progress.push(`Validated discovery report: ${role}.`);
-    for (const role of [...run.planDiscoveryReports.keys()])
+    for (const role of run.planDiscoveryReports.keys())
       progress.push(`Validated plan discovery report: ${role}.`);
     const audit = run.auditSegment?.progress();
     if (audit) {
@@ -1440,6 +1439,8 @@ export class PipelineController {
   }
 
   private notify() {
+    // Snapshot listeners so a callback may safely subscribe or unsubscribe.
+    // eslint-disable-next-line unicorn/no-useless-spread -- intentional reentrancy boundary.
     for (const listener of [...this.listeners]) {
       try {
         listener();
@@ -4860,6 +4861,8 @@ export class PipelineController {
   }
 
   createRootTools(runId: string): ToolDefinition[] {
+    // Tool callbacks retain the controller as a stable receiver.
+    // eslint-disable-next-line typescript/no-this-alias -- intentional callback boundary.
     const controller = this;
     const run = this.requireRun(runId);
     if (run.definition === PLAN_PIPELINE_ID) return [];

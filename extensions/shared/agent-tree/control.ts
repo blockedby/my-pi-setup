@@ -191,6 +191,8 @@ export class AgentTreeController {
   }
 
   private notify(id?: string) {
+    // Snapshot listeners so callbacks can safely add/remove subscriptions.
+    // eslint-disable-next-line unicorn/no-useless-spread -- mutation-safe notification snapshot.
     for (const listener of [...this.listeners]) {
       try {
         listener();
@@ -199,6 +201,8 @@ export class AgentTreeController {
       }
     }
     if (!id) return;
+    // Snapshot listeners so callbacks can safely add/remove subscriptions.
+    // eslint-disable-next-line unicorn/no-useless-spread -- mutation-safe notification snapshot.
     for (const listener of [...(this.idListeners.get(id) ?? [])]) {
       try {
         listener();

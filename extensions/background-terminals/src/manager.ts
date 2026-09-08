@@ -297,6 +297,8 @@ const makeManager = Effect.gen(function* () {
     ((snap: TerminalSnapshot, consumed: boolean) => void) | undefined;
 
   const notify = (id?: string) => {
+    // Snapshot listeners so callbacks can safely add/remove subscriptions.
+    // eslint-disable-next-line unicorn/no-useless-spread -- mutation-safe notification snapshot.
     for (const listener of [...listeners]) {
       try {
         listener();
@@ -794,7 +796,10 @@ const makeManager = Effect.gen(function* () {
         yield* Effect.forEach(
           running,
           (entry) => Deferred.await(entry.settled),
-          { concurrency: "unbounded", discard: true },
+          {
+            concurrency: "unbounded",
+            discard: true,
+          },
         );
         // Capture the report BEFORE the ensuring below releases interest and
         // prunes — a just-settled entry must not vanish out from under it.

@@ -33,6 +33,8 @@ class ControlledSession implements AgentTreeSession {
   emit(event: AgentTreeSessionEvent) {
     if (event.type === "run_started") this.isStreaming = true;
     if (event.type === "settled") this.isStreaming = false;
+    // Snapshot listeners so callbacks can safely add/remove subscriptions.
+    // eslint-disable-next-line unicorn/no-useless-spread -- mutation-safe notification snapshot.
     for (const listener of [...this.listeners]) listener(event);
   }
 

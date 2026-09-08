@@ -206,7 +206,7 @@ export function captureCheckInputRevision(options: CheckInputRevisionOptions) {
   hash.update("pipi-check-input-revision-v1\0");
   hash.update(`head\0${options.head}\0`);
   hash.update(`diff\0${options.evidence.fingerprint}\0`);
-  for (const [field, values] of fields) {
+  for (const [field] of fields) {
     hash.update(`${field}\0`);
     for (const filePath of fieldPaths.get(field)!) {
       hash.update(`${filePath}\0`);

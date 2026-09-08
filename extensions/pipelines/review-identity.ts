@@ -43,10 +43,14 @@ export interface CaptureReviewIdentityOptions {
 
 function errorDetail(error: unknown) {
   const detail = error instanceof Error ? error.message : String(error);
-  return detail
-    .replace(/[\u0000\r\n]+/g, " ")
-    .replace(/\s+/g, " ")
-    .slice(0, 2_048);
+  return (
+    detail
+      // Control characters are normalized out of untrusted diagnostic text.
+      // eslint-disable-next-line no-control-regex -- intentional security validation.
+      .replace(/[\u0000\r\n]+/g, " ")
+      .replace(/\s+/g, " ")
+      .slice(0, 2_048)
+  );
 }
 
 function unavailable(reason: string) {

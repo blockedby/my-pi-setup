@@ -177,7 +177,6 @@ function featureDiscoveryReport(role: FeaturePipelineDiscoveryRole) {
 }
 
 test("feature child report contracts reject malformed programmatic discovery", () => {
-  const valid = featureDiscoveryReport("discover-problem");
   for (const role of FEATURE_PIPELINE_DISCOVERY_ROLES) {
     assert.deepEqual(
       validatePipelineReport(

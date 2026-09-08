@@ -12,8 +12,8 @@ import {
 } from "@earendil-works/pi-tui";
 import type { SubagentSnapshot, TranscriptItem } from "../domain.ts";
 
+/* eslint-disable no-control-regex -- transcript sanitization intentionally matches control bytes. */
 const ANSI_PATTERN =
-  // eslint-disable-next-line no-control-regex
   /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
 
 /**
@@ -27,6 +27,7 @@ export function sanitizeText(text: string): string {
     .replaceAll("\t", "  ")
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
 }
+/* eslint-enable no-control-regex */
 
 function renderUserText(
   theme: Theme,

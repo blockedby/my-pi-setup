@@ -35,6 +35,7 @@
   },
   "devDependencies": {
     "@types/node": "26.1.1",
+    "oxlint": "1.81.0",
     "prettier": "3.9.6",
     "typescript": "7.0.2"
   },
@@ -118,6 +119,7 @@
     "test:live": "cd extensions/subagents && bun run test:live",
     "uninstall:pipi": "bun scripts/uninstall.mjs",
     "update:pipi": "bun scripts/update-pipi-version.mjs",
-    "verify:pipi-upgrade": "bun run install:dependencies && bun run check:bun-install && bun run check:pipi-version && bun run check:submodules && bun run test:deterministic && bun run test:browser && bun run check && bun run format:check && git diff --check"
+    "verify:pipi-upgrade": "bun run install:dependencies && bun run check:bun-install && bun run check:pipi-version && bun run check:submodules && bun run test:deterministic && bun run test:browser && bun run check && bun run format:check && git diff --check",
+    "lint": "oxlint --config .oxlintrc.json ."
   }
 }

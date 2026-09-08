@@ -15,7 +15,6 @@ import type { AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
 import type {
   AgentSession,
   AgentSessionEvent,
-  ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,

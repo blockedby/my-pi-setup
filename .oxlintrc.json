@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error"
+  },
+  "ignorePatterns": [
+    "vendor/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/coverage/**",
+    "bin/**"
+  ]
+}

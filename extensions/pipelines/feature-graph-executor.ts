@@ -20,7 +20,6 @@ import {
 import {
   createFeatureTaskWorktreeLifecycle,
   type FeatureTaskBranch,
-  type FeatureTaskWorktreeLifecycle,
   type FeatureTrackedResidualState,
 } from "./feature-task-worktrees.ts";
 import type { CleanupEvidenceSink } from "./cleanup-evidence.ts";

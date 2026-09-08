@@ -139,7 +139,7 @@ function redact(value) {
   return String(value)
     .replace(/Bearer\s+[^\s,;}]+/gi, "Bearer [redacted]")
     .replace(
-      /(authorization|api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret|password|secret)(\s*[:=]\s*)([\"']?)[^\s,;}\"']+\3/gi,
+      /(authorization|api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret|password|secret)(\s*[:=]\s*)(["']?)[^\s,;}"']+\3/gi,
       "$1$2[redacted]",
     )
     .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
@@ -879,6 +879,8 @@ class DeterministicSession {
   emit(event) {
     if (event.type === "run_started") this.isStreaming = true;
     if (event.type === "settled") this.isStreaming = false;
+    // Snapshot listeners so subscription changes during callbacks affect only later events.
+    // eslint-disable-next-line unicorn/no-useless-spread
     for (const listener of [...this.listeners]) listener(event);
   }
 

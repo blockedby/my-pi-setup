@@ -73,10 +73,7 @@ import {
 } from "./planning-readiness.ts";
 import type { PlanningReadinessResult } from "./domain.ts";
 import { planDiscoveryReportSchema } from "./plan-discovery-report.ts";
-import {
-  FEATURE_DISCOVERY_SYNTHESIS_ROLE,
-  FEATURE_DISCOVERY_SYNTHESIS_SCHEMA,
-} from "./feature-best-of-three.ts";
+import { FEATURE_DISCOVERY_SYNTHESIS_SCHEMA } from "./feature-best-of-three.ts";
 import { createFeatureToolBoundary } from "./feature-sandbox.ts";
 import type {
   AgentNodeSpec,

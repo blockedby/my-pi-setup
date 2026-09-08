@@ -127,6 +127,8 @@ function assertIdentifier(value: unknown, label: string) {
   if (
     value.includes("/") ||
     value.includes("\\") ||
+    // Control characters are rejected from path-safe identifiers.
+    // eslint-disable-next-line no-control-regex -- intentional security validation.
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
     throw new Error(

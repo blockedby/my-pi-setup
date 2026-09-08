@@ -135,6 +135,8 @@ function assertRepositoryRelativePath(
         segment.length === 0 ||
         segment === "." ||
         segment === ".." ||
+        // Control characters are explicitly rejected as unsafe path input.
+        // eslint-disable-next-line no-control-regex -- intentional security validation.
         /[\u0000-\u001f\u007f]/u.test(segment),
     )
   ) {

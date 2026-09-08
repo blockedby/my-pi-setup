@@ -253,7 +253,6 @@ function stageStatus(
   run: PipelineRunSnapshot,
   stage: DashboardStage,
   stages: ReadonlyArray<DashboardStage>,
-  children: ReadonlyArray<AgentNodeSnapshot>,
 ): DashboardStageStatus {
   const currentStageIndex = stages.indexOf(run.stage);
   const stageIndex = stages.indexOf(stage);
@@ -315,7 +314,7 @@ export function buildPipelineRows(
       }
       const stages = dashboardStages(run);
       for (const stage of stages) {
-        const status = stageStatus(run, stage, stages, children);
+        const status = stageStatus(run, stage, stages);
         rows.push({
           key: `stage:${run.id}:${stage}`,
           kind: "stage",

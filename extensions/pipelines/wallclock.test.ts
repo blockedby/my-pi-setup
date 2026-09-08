@@ -343,7 +343,7 @@ test("timed stage matrix leaves only plan completion untimed", () => {
           timedPipelineStage(definition, stage),
         ]),
       )
-      .filter(([definition, _stage, timed]) => timed === true) as Array<
+      .filter(([_definition, _stage, timed]) => timed === true) as Array<
       [PipelineDefinitionId, PipelineStage, true]
     >,
     [

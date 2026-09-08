@@ -1812,7 +1812,7 @@ test("auth sharing is explicit and creates a symlink without copying", async (t)
   assert.equal(readFileSync(regularAuthPath, "utf8"), secret);
 });
 
-test("late installer failures restore the complete prior managed state", async (t) => {
+test("late installer failures restore the complete prior managed state", async () => {
   const steps = [
     "legacy-removals",
     "runtime",
@@ -1942,7 +1942,7 @@ test("a failing late Herdr command restores configs, removals, links, launcher, 
   assert.deepEqual(snapshotManagedState(fixture.home), before);
 });
 
-test("fresh-state activation failures remove every created managed directory", async (t) => {
+test("fresh-state activation failures remove every created managed directory", async () => {
   for (const step of [
     "agent-activation",
     "session-activation",
@@ -1973,7 +1973,7 @@ test("fresh-state activation failures remove every created managed directory", a
   }
 });
 
-test("--skip-dependencies is unsupported before Bun, lock, HOME, launcher, or runtime mutation", async (t) => {
+test("--skip-dependencies is unsupported before Bun, lock, HOME, launcher, or runtime mutation", async () => {
   for (const name of ["path-pi", "counterfeit-runtime"]) {
     const fixture = await createFixture();
     try {

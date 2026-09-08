@@ -1,5 +1,4 @@
 import {
-  assessAcceptance,
   readAcceptanceEnvelope,
   type AcceptanceCriterion,
   type AcceptanceEnvelope,
