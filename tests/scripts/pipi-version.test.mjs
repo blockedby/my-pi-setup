@@ -8,9 +8,10 @@ import { extractChangelogRange } from "../../scripts/check-pipi-changelog.mjs";
 import {
   compareStableVersions,
   getDeclaredPipiVersion,
+  legacyPipiResolutionPackageNames,
   parseStableVersion,
   pipiPackageNames,
-  pipiResolutionPackageNames,
+  pipiResolutionPackageNamesFor,
   requiresChangelogReview,
   validatePipiVersionState,
 } from "../../scripts/pipi-version.mjs";
@@ -24,7 +25,10 @@ const manifestFor = (version) => ({
     pipiPackageNames.map((packageName) => [packageName, `^${version}`]),
   ),
   overrides: Object.fromEntries(
-    pipiResolutionPackageNames.map((packageName) => [packageName, version]),
+    pipiResolutionPackageNamesFor(version).map((packageName) => [
+      packageName,
+      version,
+    ]),
   ),
 });
 
@@ -41,7 +45,7 @@ const lockfileFor = (version) => ({
   workspaces: { "": { name: "fixture", ...manifestFor(version) } },
   packages: {
     ...Object.fromEntries(
-      pipiResolutionPackageNames.map((packageName) => [
+      pipiResolutionPackageNamesFor(version).map((packageName) => [
         packageName,
         packageEntry(packageName, version),
       ]),
@@ -62,11 +66,17 @@ const lockfileFor = (version) => ({
 
 const createFixture = async (version = "0.84.2") => {
   const root = await mkdtemp(join(tmpdir(), "pipi-version-"));
-  mkdirSync(root, { recursive: true });
+  const runtimeRoot = join(root, "config", "pipi-runtime");
+  mkdirSync(runtimeRoot, { recursive: true });
   writeFileSync(
     join(root, "package.json"),
     `${JSON.stringify(manifestFor(version), null, 2)}\n`,
   );
+  writeFileSync(
+    join(runtimeRoot, "package.json"),
+    `${JSON.stringify({ dependencies: { "@earendil-works/pi-coding-agent": version } }, null, 2)}\n`,
+  );
+  writeFileSync(join(runtimeRoot, "bun.lock"), "{}\n");
   writeFileSync(
     join(root, "bun.lock"),
     `${JSON.stringify(lockfileFor(version), null, 2)}\n`,
@@ -131,17 +141,18 @@ test("requires aligned caret ranges", () => {
 test("pins the requested patch with Bun overrides and regenerates bun.lock", async (t) => {
   const root = await createFixture("0.84.1");
   t.after(() => rm(root, { recursive: true, force: true }));
-  const targetVersion = "0.84.2";
+  const targetVersion = "0.85.1";
   const calls = [];
 
-  const runCommand = (command, args) => {
-    calls.push([command, args]);
+  const runCommand = (command, args, options = {}) => {
+    calls.push([command, args, options]);
     if (args[0] === "pm") return targetVersion;
     assert.equal(command, "bun");
     assert.deepEqual(args, lockfileInstallArgs(targetVersion));
+    const lockfile = options.cwd ? {} : lockfileFor(targetVersion);
     writeFileSync(
-      join(root, "bun.lock"),
-      `${JSON.stringify(lockfileFor(targetVersion), null, 2)}\n`,
+      join(options.cwd ?? root, "bun.lock"),
+      `${JSON.stringify(lockfile, null, 2)}\n`,
     );
     return "";
   };
@@ -161,8 +172,18 @@ test("pins the requested patch with Bun overrides and regenerates bun.lock", asy
     updated.dependencies["@earendil-works/pi-coding-agent"],
     `^${targetVersion}`,
   );
-  for (const packageName of pipiResolutionPackageNames) {
+  const runtimeManifest = JSON.parse(
+    readFileSync(join(root, "config", "pipi-runtime", "package.json"), "utf8"),
+  );
+  assert.equal(
+    runtimeManifest.dependencies["@earendil-works/pi-coding-agent"],
+    targetVersion,
+  );
+  for (const packageName of pipiResolutionPackageNamesFor(targetVersion)) {
     assert.equal(updated.overrides[packageName], targetVersion);
+  }
+  for (const packageName of legacyPipiResolutionPackageNames) {
+    assert.equal(updated.overrides[packageName], undefined);
   }
 });
 

@@ -10,11 +10,14 @@ export const pipiPackageNames = [
 export const pipiResolutionPackageNames = [
   "@earendil-works/pi-agent-core",
   "@earendil-works/pi-ai",
-  "@earendil-works/pi-client",
   "@earendil-works/pi-coding-agent",
-  "@earendil-works/pi-protocol",
   "@earendil-works/pi-telemetry",
   "@earendil-works/pi-tui",
+];
+
+export const legacyPipiResolutionPackageNames = [
+  "@earendil-works/pi-client",
+  "@earendil-works/pi-protocol",
 ];
 
 export const parseStableVersion = (value) => {
@@ -44,6 +47,11 @@ export const compareStableVersions = (left, right) => {
   }
   return 0;
 };
+
+export const pipiResolutionPackageNamesFor = (version) =>
+  compareStableVersions(version, "0.85.0") < 0
+    ? [...pipiResolutionPackageNames, ...legacyPipiResolutionPackageNames]
+    : pipiResolutionPackageNames;
 
 export const requiresChangelogReview = (currentVersion, targetVersion) => {
   if (compareStableVersions(targetVersion, currentVersion) <= 0) return false;
@@ -102,7 +110,7 @@ export const validatePipiVersionState = (repositoryRoot) => {
     }
   }
 
-  for (const packageName of pipiResolutionPackageNames) {
+  for (const packageName of pipiResolutionPackageNamesFor(version)) {
     if (manifest.overrides?.[packageName] !== version) {
       throw new Error(
         `package.json override for ${packageName} is not ${version}.`,
@@ -113,6 +121,16 @@ export const validatePipiVersionState = (repositoryRoot) => {
       throw new Error(
         `bun.lock resolves ${packageName} to ${lockedVersion ?? "nothing"}; expected ${version}.`,
       );
+    }
+  }
+
+  if (compareStableVersions(version, "0.85.0") >= 0) {
+    for (const packageName of legacyPipiResolutionPackageNames) {
+      if (manifest.overrides?.[packageName] !== undefined) {
+        throw new Error(
+          `package.json retains obsolete override ${packageName}.`,
+        );
+      }
     }
   }
 

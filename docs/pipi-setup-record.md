@@ -10,7 +10,7 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Source branch                           | `main`                                                   |
 | Launcher                                | `/home/kcnc/.local/bin/pipi`                             |
 | Pipi Pi executable                      | `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi`        |
-| Pipi runtime package                    | `@earendil-works/pi-coding-agent@0.84.3`                 |
+| Pipi runtime package                    | `@earendil-works/pi-coding-agent@0.85.1`                 |
 | Pipi settings                           | `/home/kcnc/.pipi/agent/settings.json`                   |
 | Pipi model overrides                    | `/home/kcnc/.pipi/agent/models.json`                     |
 | Tracked model-override record           | `config/pipi-model-overrides.json`                       |
@@ -27,13 +27,13 @@ This is the durable, user-facing record for the local `pipi` setup. Append futur
 | Canonical plan-gh-backlog skill         | `vendor/plan-gh-backlog`                                 |
 | Browser MCP config                      | `/home/kcnc/.pipi/agent/mcp.json`                        |
 | Theme                                   | `github-dark-default`                                    |
-| Current Pipi Pi version                 | `0.84.3`                                                 |
+| Current Pipi Pi version                 | `0.85.1`                                                 |
 | Original Pipi Pi version                | `0.82.1`                                                 |
 | Codex CLI version at initial acceptance | `0.145.0`                                                |
 
 ## Isolation contract
 
-- `pipi` launches the exact pinned runtime at `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi` (`@earendil-works/pi-coding-agent@0.84.3`); it is not a second global installation and does not replace or launch regular `pi` by default.
+- `pipi` launches the exact pinned runtime at `/home/kcnc/.pipi/agent/npm/node_modules/.bin/pi` (`@earendil-works/pi-coding-agent@0.85.1`); it is not a second global installation and does not replace or launch regular `pi` by default.
 - The installer brands that isolated runtime as `pipi`, so Pi's own banner, terminal title, help, and resume command use the Pipi name.
 - The launcher exports `PIPI_CODING_AGENT_DIR=/home/kcnc/.pipi/agent` and the compatibility alias `PI_CODING_AGENT_DIR`.
 - The launcher exports `PIPI_CODING_AGENT_SESSION_DIR=/home/kcnc/.pipi/sessions` and the compatibility alias `PI_CODING_AGENT_SESSION_DIR`.
@@ -1789,6 +1789,14 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Verification:** Before delivery, the rebased source passed 64 installer/script tests, 345 extension tests, 22 file-search tests, TypeScript, formatting, exact-submodule validation, and diff checks. `bun run install:pipi -- --skip-repository-dependencies` installed 233 isolated packages through Bun 1.4.0; `bun run check:pipi-install` verified Pipi 0.84.4, branded launcher/resume behavior, MCP 2.15.0, install policy, model overrides, and Herdr integration; `/home/kcnc/.local/bin/pipi --version` returned `0.84.4`.
 - **Pending:** Reload or restart sessions created before this reinstall so they load the candidate steering behavior.
 
+## Operation entry: upgrade Pipi to Pi 0.85.1
+
+- **Request:** Update Pipi to the latest available version.
+- **Action:** Confirmed `@earendil-works/pi-coding-agent` 0.85.1 as the latest npm release, reviewed the 0.85.0–0.85.1 release notes with no reported breaking changes, updated the aligned root Pi packages and isolated runtime, and rolled out the managed Pipi installation. Updated the upgrade tooling for Pi 0.85's removal of the published client/protocol dependency path, made isolated-runtime manifest and lock updates atomic with root metadata updates, and removed ambient browser-runtime variables from the installer fallback-path test.
+- **Affected paths or values:** `package.json`, `bun.lock`, `config/pipi-runtime/{package.json,bun.lock}`, `scripts/{pipi-version,update-pipi-version}.mjs`, `tests/scripts/{pipi-version,install}.test.mjs`, managed runtime/settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, browser/MCP assets, Herdr integration, and this record. MCP remains 2.15.0. Credentials, authentication isolation, model overrides, submodule pins, and regular Pi state are unchanged.
+- **Verification:** `bun run complete:pipi-upgrade` passed 64 installer/script tests, 345 deterministic extension tests, 22 file-search tests, 8 browser/MCP tests, TypeScript checking, formatting, Bun install policy, exact-submodule validation, version alignment, and `git diff --check`; it then installed and verified Pipi 0.85.1, branding, MCP 2.15.0, install policy, model overrides, and Herdr integration.
+- **Pending:** Reload or restart sessions created before this upgrade so they use Pi 0.85.1.
+
 ## Operation entry: implement Sol-planned dynamic Luna feature execution
 
 - **Request:** Split the supplied `pipi-feature-pipeline-dynamic-luna-architecture.html` architecture into tasks and implement it using Sol subagents.
@@ -1867,6 +1875,45 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - **Affected paths:** `extensions/pipelines`, disposable smoke wiring in `scripts/smoke-pipeline-evidence.mjs`, design documentation and this journal. No Jobber changes or automatic dependency repair; sandbox and Git authority remain unchanged.
 - **Verification:** Worktree bootstrap, baseline typecheck and formatting passed. Positive disposable production-path smoke `/tmp/pipi-pipeline-evidence-9FMFZ1/smoke-report.json` recorded source-confirmed readiness success before candidate planning, three fixture commits and 6/6 post-run fixture tests. Its deterministic model/audit adapter correctly leaves live implementation acceptance unproven; it exposed an outcome-only retained caller runtime requiring a narrow cleanup assessment correction. Negative smoke `/tmp/pipi-pipeline-evidence-lt7tKF/smoke-report.json` used a genuinely unavailable fixture command: exit 127 and stderr persisted, no candidate planners created, zero implementation commits. Both smoke environments retain diagnostics; neither changed host source/runtime, installed dependencies or invoked live providers. After fixture adaptation, the committed full regression passed 662 tests (64 installer, 576 extension, 22 file-search), exact pins, typecheck, formatting and diff checks. Initial independent review identified AUD-001: planner handoff omitted bounded diagnostic fields even though artifacts retained them. Remediation adds a bounded structured projection with the actual immutable artifact revision. Independent closure `planning-readiness-final-closure-2f599188` closed AUD-001 with no direct remediation regressions; 64 focused tests and the isolated complete deterministic suite passed. The audit executor also exposed fixed-delay fixture sensitivity under load; event-driven test synchronization replaced fixed-delay initialization waits. Its installer failure used ambient browser overrides, unlike the isolated successful parent run. Original review ancestry and 22-file diff were independently captured at `/tmp/planning-readiness-initial-review.diff` (SHA-256 `2b30afae96bf3464808223af63a4d08ba7f2b5d1a5ab33968bb98f7181174095`); the automatic audit baseline equaling HEAD is not the feature comparison base. Final remediation verification passed 667 tests (64 installer, 581 extension, 22 file-search), typecheck, formatting, exact pins and diff checks. Local rollout remains pending. Live-provider interpretation was outside this closure scope and is not claimed. A dedicated lint script remains a suggested separate improvement. Installed Pi 0.85.1 and dirty main upgrade files are untouched by implementation.
 
+## Operation entry: install dynamic feature pipeline and Astra planning
+
+- **Request:** Update local Pipi after merging the dynamic feature pipeline and Astra model routing into main.
+- **Action:** Ran `bun run complete:pipi-upgrade` to verify the current source and reinstall the managed local runtime at the already configured Pi 0.85.1. Local Pipi now loads dynamic Luna task execution, two Astra/low candidate planners, the persistent Astra/low canonical planner/DAG author/final reviewer, and Luna/xhigh audit remediation.
+- **Affected paths or values:** Managed runtime/settings under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, browser/MCP assets, Herdr integration, and this record. Preserved the existing uncommitted upgrade changes. Oxlint installation remains paused.
+- **Verification:** The complete upgrade command passed 64 installer tests, 388 extension tests, 22 file-search tests, 8 browser/MCP tests, TypeScript, formatting, dependency policy, version alignment, submodule validation, and diff checks. Installation verification confirmed Pipi 0.85.1, launcher branding/resume, MCP 2.15.0, model overrides, and Herdr integration. `pipi --version` returned 0.85.1. No live model request or end-to-end feature pipeline run was performed. No separate lint command exists; Oxlint is the agreed follow-up.
+- **Pending:** Restart existing Pipi sessions to load the updated feature pipeline and routing.
+
+## Operation entry: install verified feature-runtime fixes
+
+- **Request:** After thorough feature-runtime verification, update local Pipi without downgrading the installed Pi 0.85.1 or changing unrelated local work.
+- **Action:** Ran `bun run verify:pipi-upgrade` with ambient `BROWSER_CHROME_*` variables omitted only from its test/verification subprocess, followed by `bun run rollout:pipi-upgrade` with the normal environment. Installed the merged readiness, check diagnostics, retry/join state and ownership-safe scratch cleanup fixes together with the previously delivered graph visualization and skill-access changes.
+- **Affected paths or values:** Managed runtime/settings, MCP/browser assets and Herdr integration under `~/.pipi/agent`, launcher `/home/kcnc/.local/bin/pipi`, and this record. Kept Pi 0.85.1 and the original unrelated main-worktree edits; non-documentation files remain byte-identical to their pre-delivery backups. No authentication data was read or copied by this operation.
+- **Verification:** Both commands exited 0. Passed 64 installer, 417 extension, 22 file-search and 8 browser/MCP tests (511 total), TypeScript, formatting, dependency policy, version alignment, exact submodule pins and diff checks. Installation verification confirmed Pi 0.85.1, branded launcher/resume, MCP 2.15.0, model overrides and Herdr integration; `pipi --version` returned `0.85.1`. No standalone lint command exists; adding one remains a separate follow-up.
+- **Pending:** Restart existing Pipi sessions to load the updated extensions. No live-provider feature run or Jobber restart/resume was performed; Jobber's offline dependency preparation still needs separate correction before a fresh launch.
+
+## Operation entry: run disposable live-provider feature E2E
+
+- **Request:** Verify the updated pipelines with a real-provider end-to-end run, using a safe disposable repository rather than Jobber.
+- **Action:** Created a temporary Bun/JavaScript Git fixture and caller-prepared linked worktree, then ran `feature-pipeline` as `live-provider-smoke-feature-568987e5`. The accepted graph ran independent `math` and `text` branches, joined them, then ran `summary`, persistent final review and the complete Luna audit segment. No remote was configured and no push, PR, deployment or external project mutation was authorized.
+- **Affected paths or values:** Disposable fixture under `/tmp/pipi-live-provider-e2e`; durable run artifacts under `~/.pipi/agent/pipelines/live-provider-smoke-feature-568987e5` and corresponding session JSONL files. Product source, Jobber and credentials were not changed.
+- **Verification:** Native controller inspection reports status `completed`, stage `complete` 9/9, 22 agents with zero error/cancelled agents, one attempt per feature task, completed `join-1`, validated final review and finalized 5/5 audit fan-in. Provider records show Astra (`openai-codex/gpt-6-astra`) for candidate/canonical planning and final review and Luna (`openai-codex/gpt-5.6-luna`) for discovery, implementation and audit. Math and text session intervals overlap from approximately 11:22:15.632Z through 11:23:44.212Z; summary began at 11:23:47.645Z after both workers and join checks. Final HEAD `2b1861930e6e137875e91640c548f964a74686ed` is clean; all 24 fixture tests, formatting and diff checks pass. Controller-owned child worktree paths and feature refs are absent after completion.
+- **Observation:** The final audit found no implementation defect but emitted AUD-001 because its supplied handoff lacked enough native historical provenance to independently prove provider identities, temporal overlap and cleanup. Direct post-run controller/session inspection supplies that evidence, but it is not embedded in the final audit input. Some model tool calls were rejected and recovered as designed (schema corrections, sandbox-denied Git/metadata/out-of-scope writes, duplicate checks while verification was active, and one child-wait timeout); no agent entered error/cancelled state and no feature task retried.
+- **Pending:** Treat richer provider/timeline/cleanup provenance in final-audit handoff as an observability improvement, not a failed feature implementation. The Jobber dependency-preparation issue remains separate; no Jobber restart or live run was performed.
+
+## Operation entry: reinstall pipeline execution evidence on Pi 0.85.1
+
+- **Request:** Reinstall Pipi with the verified pipeline execution evidence implementation.
+- **Action:** Started the declared `bun run complete:pipi-upgrade` verification and rollout sequence from the main checkout, retaining configured Pi 0.85.1. Ambient `BROWSER_CHROME_*` variables are excluded only from this subprocess to isolate deterministic installer tests from session browser settings.
+- **Affected paths:** Repository dependency preparation, managed runtime/settings under `~/.pipi/agent`, launcher `~/.local/bin/pipi`, and managed integrations. Unrelated local upgrade content is preserved; Jobber is out of scope. No credentials are copied into this record.
+- **Verification:** Dependency/version/pin checks, deterministic and browser tests, typecheck and formatting passed. The first sequence stopped before installation on an extra trailing blank line in this journal; removed that whitespace. `git diff --check` then passed and `bun run rollout:pipi-upgrade` exited 0: installed Pi 0.85.1 on Bun 1.4.0, launcher/resume branding, MCP adapter 2.15.0, install-script policy, model overrides and Herdr integration verified by `check:pipi-install`. Auth remains isolated. Installation is complete; already running sessions retain their loaded code until restarted.
+
+## Operation entry: reinstall planning-time readiness locally
+
+- **Request:** Rebuild/reinstall the local Pipi copy with planning-time readiness and factual diagnostics, preserving Pi 0.85.1 and unrelated local changes.
+- **Action:** Run the declared `bun run complete:pipi-upgrade` verification and rollout sequence from the synchronized main checkout. Exclude inherited `BROWSER_CHROME_*` variables only in the verification subprocess to isolate browser installer fixtures.
+- **Affected paths:** Repository dependency cache, managed runtime/settings and integrations under `~/.pipi/agent`, launcher `~/.local/bin/pipi`, and this journal. All eight unrelated upgrade file contents were verified byte-for-byte against the safety stash; both journal histories are retained. No Jobber operation or credential copying.
+- **Verification:** `bun run complete:pipi-upgrade` exited 0. Dependency/version/pin checks, 667 deterministic tests and 8 browser tests, typecheck, formatting and diff checks passed on main with Pi 0.85.1. Installation and `check:pipi-install` verified Bun 1.4.0, Pi 0.85.1, launcher/resume branding, MCP adapter 2.15.0, install-script policy, model overrides and Herdr integration. Auth remains isolated. Local rollout is complete; existing sessions require restart to load updated extensions.
+
 ## Operation entry: prepare Oxlint in an isolated worktree
 
 - Request: prepare Oxlint in a linked worktree without running file-changing fixes while other changes are in progress.
@@ -1890,6 +1937,14 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Workspace: `/home/kcnc/code/tools/pipi-alias/.worktrees/oxlint-setup`, branch `chore/oxlint-setup`. Application changes remain isolated from main and the installed runtime.
 - Verification: `bun run lint`, `bun run check`, `bun run format:check`, and `git diff --check` passed. Installer tests: 64 passed; deterministic extension tests: 581 passed; focused controller/check-input/provenance retest after final cleanup: 89 passed; nested agent-tree control tests also passed. Independent Luna initial review returned READY with no findings. No live provider or runtime installation checks were performed.
 - Pending: changes are uncommitted and unmerged in the isolated worktree; lint remains a separate command.
+
+## Operation entry: rebuild local Pipi with Oxlint cleanup
+
+- Request: rebuild the app after delivering the lint changes to main.
+- Action: ran `bun run complete:pipi-upgrade` from the canonical repository, reinstalling the local Pipi runtime and managed integrations with the merged source. Retained configured Pi version `0.85.1` and preserved all existing uncommitted version-upgrade edits.
+- Affected paths: repository dependency cache; `/home/kcnc/.local/bin/pipi`; `~/.pipi/agent` runtime settings, skills, and integrations managed by the installer. No authentication data was copied or recorded.
+- Verification: the complete upgrade workflow passed dependency/lock/version/submodule checks, deterministic and browser tests, TypeScript, formatting, diff checks, installation, and installed-runtime verification. Separate `bun run lint` passed on main. `pipi --version` returned `0.85.1`. Full execution log: `/tmp/pipi-oxlint-rebuild.log`.
+- Pending: restart existing Pipi sessions to load the updated source. No live model requests were used for verification.
 
 ## Operation entry: route plan pipeline synthesis through Astra low
 
@@ -1940,3 +1995,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Pending: reload Pipi before new planner sessions to load the updated instructions. Existing session prompts are not changed retroactively.
 
 - Delivery update: user requested commit, push, and application update. Ran `bun run rollout:pipi-upgrade`; installed Pipi 0.85.1 and runtime integration checks passed. Affected installed state: `/home/kcnc/.pipi/agent` and the branded launcher. Log: `/tmp/pipi-cwd-update.log`. Open sessions still require `/reload` or restart.
+
+## Operation entry: default to Astra low with a 200k context
+
+- Request: make `openai-codex/gpt-6-astra` the default Pipi model at low reasoning, cap its context at 200,000 tokens, trigger automatic compaction at 170,000 tokens, run tests, push the current branch, and update the local Pipi installation.
+- Action: added the tracked Astra context-window override; made the installer enforce Astra, low reasoning, and automatic compaction with a 30,000-token response reserve (the Pi 0.85.1 threshold is `contextWindow - reserveTokens`, yielding 170,000 tokens). Reinstalls now refresh the tracked model overrides instead of retaining a stale installed copy, while preserving unrelated settings and `keepRecentTokens`. Installed-state verification now checks all requested defaults.
+- Affected paths or values: `config/pipi-model-overrides.json`, `scripts/{install,check-pipi-install}.mjs`, `tests/scripts/install.test.mjs`, managed settings and model overrides under `~/.pipi/agent`, launcher/runtime managed by the installer, and this record. Existing unrelated Pi 0.85.1 upgrade changes in the current branch are preserved. No authentication data was read, copied, or recorded.
+- Verification: focused installer tests passed 41/41. The full `bun run verify:pipi-upgrade` chain passed 41 installer tests, 589 extension tests, 22 file-search tests, 8 browser/MCP tests, TypeScript, formatting, dependency/version/submodule checks, and `git diff --check`. Local rollout and final installed-state checks are performed before delivery; full verification log: `/tmp/pipi-astra-default-verify.log`.
+- Pending: restart already-running Pipi sessions so they load the new default model, context override, and compaction settings.

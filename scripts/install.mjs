@@ -75,11 +75,11 @@ const modelOverridesSource = join(
   "config",
   "pipi-model-overrides.json",
 );
-const modelDefaults = [
-  "defaultProvider",
-  "defaultModel",
-  "defaultThinkingLevel",
-];
+const pipiModelDefaults = {
+  defaultProvider: "openai-codex",
+  defaultModel: "gpt-6-astra",
+  defaultThinkingLevel: "low",
+};
 
 const git = (args, cwd = repositoryRoot) =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -801,7 +801,6 @@ const install = () => {
   const pipiSettingsPath = join(agentDir, "settings.json");
   const pipiMcpPath = join(agentDir, "mcp.json");
   const regularAgentDir = join(home, ".pi", "agent");
-  const regularSettingsPath = join(regularAgentDir, "settings.json");
   const regularAuthPath = join(regularAgentDir, "auth.json");
   const pipiAuthPath = join(agentDir, "auth.json");
   const isolatedRuntimePrefix = join(agentDir, "runtime");
@@ -927,7 +926,6 @@ const install = () => {
       join(stagedAgentDir, "settings.json"),
       true,
     );
-    const regularSettings = readSettings(regularSettingsPath, false);
     let packages = Array.isArray(pipiSettings.packages)
       ? [...pipiSettings.packages]
       : [];
@@ -954,6 +952,12 @@ const install = () => {
     });
     const nextSettings = {
       ...pipiSettings,
+      ...pipiModelDefaults,
+      compaction: {
+        ...pipiSettings.compaction,
+        enabled: true,
+        reserveTokens: 30_000,
+      },
       httpIdleTimeoutMs: 300_000,
       retry: {
         ...pipiSettings.retry,
@@ -964,24 +968,14 @@ const install = () => {
       theme: "github-dark-default",
       packages,
     };
-    for (const key of modelDefaults) {
-      if (
-        nextSettings[key] === undefined &&
-        regularSettings[key] !== undefined
-      ) {
-        nextSettings[key] = regularSettings[key];
-      }
-    }
     writeJson(join(stagedAgentDir, "settings.json"), nextSettings);
     transaction.injectFailure("settings-config");
 
     const stagedModelOverrides = join(stagedAgentDir, "models.json");
-    if (!existsSync(stagedModelOverrides)) {
-      writeFileSync(stagedModelOverrides, readFileSync(modelOverridesSource), {
-        mode: 0o600,
-      });
-      chmodSync(stagedModelOverrides, 0o600);
-    }
+    writeFileSync(stagedModelOverrides, readFileSync(modelOverridesSource), {
+      mode: 0o600,
+    });
+    chmodSync(stagedModelOverrides, 0o600);
     transaction.injectFailure("model-config");
 
     transaction.activateAgent();

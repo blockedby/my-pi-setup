@@ -445,9 +445,13 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   );
 
   const settings = readJson(settingsPath);
-  assert.equal(settings.defaultProvider, "provider-test");
-  assert.equal(settings.defaultModel, "model-test");
-  assert.equal(settings.defaultThinkingLevel, "high");
+  assert.equal(settings.defaultProvider, "openai-codex");
+  assert.equal(settings.defaultModel, "gpt-6-astra");
+  assert.equal(settings.defaultThinkingLevel, "low");
+  assert.deepEqual(settings.compaction, {
+    enabled: true,
+    reserveTokens: 30_000,
+  });
   assert.equal(settings.theme, "github-dark-default");
   assert.equal(settings.httpIdleTimeoutMs, 300_000);
   assert.deepEqual(settings.retry, {
@@ -1438,12 +1442,13 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   const settingsPath = join(pipiAgentDir, "settings.json");
   writeFileSync(
     settingsPath,
-    `${JSON.stringify({ quietStartup: true, theme: "old-theme", packages: ["existing-package", repositoryRoot, { source: legacyMcpAdapterPackage, extensions: ["index.ts"] }, { source: legacyPiSubagentsPackage, skills: [] }] }, null, 2)}\n`,
+    `${JSON.stringify({ quietStartup: true, theme: "old-theme", compaction: { enabled: false, reserveTokens: 1, keepRecentTokens: 12_345 }, packages: ["existing-package", repositoryRoot, { source: legacyMcpAdapterPackage, extensions: ["index.ts"] }, { source: legacyPiSubagentsPackage, skills: [] }] }, null, 2)}\n`,
   );
   writeFileSync(
     join(pipiAgentDir, "mcp.json"),
     `${JSON.stringify({ mcpServers: { existing: { command: "existing-command" } } }, null, 2)}\n`,
   );
+  writeFileSync(join(pipiAgentDir, "models.json"), '{"stale":true}\n');
   const staleSkillDir = join(pipiAgentDir, "skills", "browser-chrome");
   mkdirSync(staleSkillDir, { recursive: true });
   writeFileSync(join(staleSkillDir, "stale.txt"), "remove me\n");
@@ -1473,6 +1478,14 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   assert.deepEqual(readJson(settingsPath), {
     quietStartup: true,
     theme: "github-dark-default",
+    defaultProvider: "openai-codex",
+    defaultModel: "gpt-6-astra",
+    defaultThinkingLevel: "low",
+    compaction: {
+      enabled: true,
+      reserveTokens: 30_000,
+      keepRecentTokens: 12_345,
+    },
     httpIdleTimeoutMs: 300_000,
     retry: { enabled: true, maxRetries: 2, baseDelayMs: 1000 },
     packages: [
@@ -1491,6 +1504,13 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
       ...expectedBrowserMcpServers(fixture.home),
     },
   });
+  assert.equal(
+    readFileSync(join(pipiAgentDir, "models.json"), "utf8"),
+    readFileSync(
+      join(repositoryRoot, "config", "pipi-model-overrides.json"),
+      "utf8",
+    ),
+  );
   assert.equal(existsSync(join(staleSkillDir, "stale.txt")), false);
   assert.equal(existsSync(removedTaskSkill), false);
   assert.equal(existsSync(removedAgent), false);
@@ -2212,6 +2232,7 @@ test("installed direct browser, install-local, and generated MCP paths stay on p
     BROWSER_CHROME_HEADED_URL: "http://127.0.0.1:9233",
   };
   delete directEnv.PIPI_BUN_RUNTIME;
+  delete directEnv.BROWSER_CHROME_NODE;
   delete directEnv.BROWSER_CHROME_NPX;
   delete directEnv.BROWSER_CHROME_MCP_PACKAGE;
   const direct = JSON.parse(

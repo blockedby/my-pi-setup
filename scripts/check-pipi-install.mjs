@@ -86,6 +86,25 @@ if (!trackedOverrides.equals(installedOverrides)) {
   );
 }
 
+const installedSettings = readJson(
+  join(home, ".pipi", "agent", "settings.json"),
+);
+if (
+  installedSettings.defaultProvider !== "openai-codex" ||
+  installedSettings.defaultModel !== "gpt-6-astra" ||
+  installedSettings.defaultThinkingLevel !== "low"
+) {
+  throw new Error("Installed Pipi does not default to Astra low.");
+}
+if (
+  installedSettings.compaction?.enabled !== true ||
+  installedSettings.compaction?.reserveTokens !== 30_000
+) {
+  throw new Error(
+    "Installed Pipi does not auto-compact the 200k Astra context at 170k tokens.",
+  );
+}
+
 const herdrExecutable = findExecutable("herdr");
 const herdrIntegrationPath = join(
   home,

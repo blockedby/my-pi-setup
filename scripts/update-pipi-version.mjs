@@ -4,9 +4,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   getDeclaredPipiVersion,
+  legacyPipiResolutionPackageNames,
   parseStableVersion,
   pipiPackageNames,
-  pipiResolutionPackageNames,
+  pipiResolutionPackageNamesFor,
   readJson,
   validatePipiVersionState,
 } from "./pipi-version.mjs";
@@ -27,7 +28,7 @@ const createCommandRunner =
   (repositoryRoot) =>
   (command, args, options = {}) => {
     const result = spawnSync(command, args, {
-      cwd: repositoryRoot,
+      cwd: options.cwd ?? repositoryRoot,
       encoding: "utf8",
       stdio: options.capture ? "pipe" : "inherit",
     });
@@ -66,11 +67,26 @@ export const updatePipiVersion = ({
   runCommand = createCommandRunner(repositoryRoot),
 }) => {
   const manifestPath = join(repositoryRoot, "package.json");
+  const runtimeManifestPath = join(
+    repositoryRoot,
+    "config",
+    "pipi-runtime",
+    "package.json",
+  );
+  const runtimeLockfilePath = join(
+    repositoryRoot,
+    "config",
+    "pipi-runtime",
+    "bun.lock",
+  );
   const lockfilePath = join(repositoryRoot, "bun.lock");
   const version = parseStableVersion(targetVersion);
   const originalManifest = readFileSync(manifestPath, "utf8");
+  const originalRuntimeManifest = readFileSync(runtimeManifestPath, "utf8");
+  const originalRuntimeLockfile = readFileSync(runtimeLockfilePath, "utf8");
   const originalLockfile = readFileSync(lockfilePath, "utf8");
   const manifest = readJson(manifestPath);
+  const runtimeManifest = readJson(runtimeManifestPath);
   const currentVersion = getDeclaredPipiVersion(manifest);
 
   for (const packageName of pipiPackageNames) {
@@ -82,14 +98,30 @@ export const updatePipiVersion = ({
       manifest.dependencies[packageName] = `^${version}`;
     }
     manifest.overrides ??= {};
-    for (const packageName of pipiResolutionPackageNames) {
+    const resolutionPackageNames = pipiResolutionPackageNamesFor(version);
+    for (const packageName of resolutionPackageNames) {
       manifest.overrides[packageName] = version;
     }
+    for (const packageName of legacyPipiResolutionPackageNames) {
+      if (!resolutionPackageNames.includes(packageName)) {
+        delete manifest.overrides[packageName];
+      }
+    }
+    runtimeManifest.dependencies["@earendil-works/pi-coding-agent"] = version;
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeFileSync(
+      runtimeManifestPath,
+      `${JSON.stringify(runtimeManifest, null, 2)}\n`,
+    );
     runCommand("bun", lockfileInstallArgs(version));
+    runCommand("bun", lockfileInstallArgs(version), {
+      cwd: dirname(runtimeManifestPath),
+    });
     validatePipiVersionState(repositoryRoot);
   } catch (error) {
     writeFileSync(manifestPath, originalManifest);
+    writeFileSync(runtimeManifestPath, originalRuntimeManifest);
+    writeFileSync(runtimeLockfilePath, originalRuntimeLockfile);
     writeFileSync(lockfilePath, originalLockfile);
     throw error;
   }
