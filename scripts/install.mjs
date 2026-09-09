@@ -954,6 +954,13 @@ const install = () => {
     });
     const nextSettings = {
       ...pipiSettings,
+      httpIdleTimeoutMs: 300_000,
+      retry: {
+        ...pipiSettings.retry,
+        enabled: true,
+        maxRetries: 2,
+        baseDelayMs: 1000,
+      },
       theme: "github-dark-default",
       packages,
     };

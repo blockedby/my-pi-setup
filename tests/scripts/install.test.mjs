@@ -449,6 +449,12 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   assert.equal(settings.defaultModel, "model-test");
   assert.equal(settings.defaultThinkingLevel, "high");
   assert.equal(settings.theme, "github-dark-default");
+  assert.equal(settings.httpIdleTimeoutMs, 300_000);
+  assert.deepEqual(settings.retry, {
+    enabled: true,
+    maxRetries: 2,
+    baseDelayMs: 1000,
+  });
   assert.deepEqual(settings.packages, [
     repositoryRoot,
     mcpAdapterPackage(fixture.home),
@@ -1467,6 +1473,8 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   assert.deepEqual(readJson(settingsPath), {
     quietStartup: true,
     theme: "github-dark-default",
+    httpIdleTimeoutMs: 300_000,
+    retry: { enabled: true, maxRetries: 2, baseDelayMs: 1000 },
     packages: [
       "existing-package",
       repositoryRoot,
