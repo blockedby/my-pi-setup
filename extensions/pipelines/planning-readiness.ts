@@ -5,7 +5,7 @@ import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 
 /**
- * The readiness verifier proves source provenance only. It never interprets or
+ * The readiness verifier proves source provenance only. It never rewrites or
  * executes `command`, and it does not make a shell command safe. A sandbox or
  * controller retains execution authority and must enforce execution policy
  * separately.
@@ -262,15 +262,194 @@ function readSourceFile(root: string, sourcePath: string, excerpt: string) {
       "Planning readiness source does not contain the exact excerpt.",
     );
   }
-  return contents;
+  return { contents, resolved };
+}
+
+const BARE_SCRIPT_INVOCATION_PATTERN =
+  /^(?:bun|npm|pnpm|yarn) run ([A-Za-z0-9_@%+=:,./-]+)$/u;
+
+function bareScriptName(command: string) {
+  const match = BARE_SCRIPT_INVOCATION_PATTERN.exec(command);
+  if (!match || match[1].startsWith("-")) return undefined;
+  return match[1];
+}
+
+function isJsonWhitespace(code: number) {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
+}
+
+function skipJsonWhitespace(source: string, start: number) {
+  let index = start;
+  while (index < source.length && isJsonWhitespace(source.charCodeAt(index)))
+    index += 1;
+  return index;
+}
+
+function parseJsonStringToken(source: string, start: number) {
+  if (source[start] !== '"') throw new Error("Invalid JSON string token.");
+  let escaped = false;
+  for (let index = start + 1; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      const value: unknown = JSON.parse(source.slice(start, index + 1));
+      if (typeof value !== "string")
+        throw new Error("Invalid JSON string token.");
+      return { start, end: index + 1, value };
+    }
+    if (character.charCodeAt(0) < 0x20)
+      throw new Error("Invalid JSON string token.");
+  }
+  throw new Error("Unterminated JSON string token.");
+}
+
+function isJsonValueTerminator(character: string | undefined) {
+  return (
+    character === undefined ||
+    character === "," ||
+    character === "]" ||
+    character === "}" ||
+    isJsonWhitespace(character.charCodeAt(0))
+  );
+}
+
+function skipJsonValue(source: string, start: number): number {
+  const index = skipJsonWhitespace(source, start);
+  const character = source[index];
+  if (character === '"') return parseJsonStringToken(source, index).end;
+  if (character === "{") return parseJsonObjectEntries(source, index).end;
+  if (character === "[") return skipJsonArray(source, index);
+  for (const literal of ["true", "false", "null"]) {
+    if (source.startsWith(literal, index)) return index + literal.length;
+  }
+  if (character === "-" || (character >= "0" && character <= "9")) {
+    let end = index;
+    while (!isJsonValueTerminator(source[end])) end += 1;
+    return end;
+  }
+  throw new Error("Invalid JSON value.");
+}
+
+function skipJsonArray(source: string, start: number) {
+  let index = skipJsonWhitespace(source, start + 1);
+  if (source[index] === "]") return index + 1;
+  while (index < source.length) {
+    index = skipJsonValue(source, index);
+    index = skipJsonWhitespace(source, index);
+    if (source[index] === ",") {
+      index = skipJsonWhitespace(source, index + 1);
+      continue;
+    }
+    if (source[index] === "]") return index + 1;
+    throw new Error("Invalid JSON array.");
+  }
+  throw new Error("Unterminated JSON array.");
+}
+
+function parseJsonObjectEntries(source: string, start: number) {
+  if (source[start] !== "{") throw new Error("Invalid JSON object.");
+  const entries: Array<{
+    start: number;
+    key: string;
+    valueStart: number;
+    valueEnd: number;
+  }> = [];
+  let index = skipJsonWhitespace(source, start + 1);
+  if (source[index] === "}") return { end: index + 1, entries };
+  while (index < source.length) {
+    const key = parseJsonStringToken(source, index);
+    index = skipJsonWhitespace(source, key.end);
+    if (source[index] !== ":") throw new Error("Invalid JSON object.");
+    const valueStart = skipJsonWhitespace(source, index + 1);
+    const valueEnd = skipJsonValue(source, valueStart);
+    entries.push({
+      start: key.start,
+      key: key.value,
+      valueStart,
+      valueEnd,
+    });
+    index = skipJsonWhitespace(source, valueEnd);
+    if (source[index] === ",") {
+      index = skipJsonWhitespace(source, index + 1);
+      continue;
+    }
+    if (source[index] === "}") return { end: index + 1, entries };
+    throw new Error("Invalid JSON object.");
+  }
+  throw new Error("Unterminated JSON object.");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function excerptContainsSpan(
+  source: string,
+  excerpt: string,
+  start: number,
+  end: number,
+) {
+  let offset = source.indexOf(excerpt);
+  while (offset !== -1) {
+    if (offset <= start && offset + excerpt.length >= end) return true;
+    offset = source.indexOf(excerpt, offset + 1);
+  }
+  return false;
+}
+
+function confirmsBareScriptInvocation(
+  source: string,
+  excerpt: string,
+  scriptName: string,
+  scripts: unknown,
+) {
+  if (
+    !isRecord(scripts) ||
+    !Object.prototype.hasOwnProperty.call(scripts, scriptName) ||
+    typeof scripts[scriptName] !== "string"
+  )
+    return false;
+
+  const rootStart = skipJsonWhitespace(source, 0);
+  if (source[rootStart] !== "{") return false;
+  const rootEntries = parseJsonObjectEntries(source, rootStart).entries;
+  const scriptsEntry = rootEntries
+    .filter((entry) => entry.key === "scripts")
+    .pop();
+  if (!scriptsEntry || source[scriptsEntry.valueStart] !== "{") return false;
+
+  const scriptEntries = parseJsonObjectEntries(
+    source,
+    scriptsEntry.valueStart,
+  ).entries;
+  const matchingEntry = scriptEntries
+    .filter((entry) => entry.key === scriptName)
+    .pop();
+  if (!matchingEntry || source[matchingEntry.valueStart] !== '"') return false;
+  const value = parseJsonStringToken(source, matchingEntry.valueStart);
+  if (value.end !== matchingEntry.valueEnd) return false;
+  return excerptContainsSpan(
+    source,
+    excerpt,
+    matchingEntry.start,
+    matchingEntry.valueEnd,
+  );
 }
 
 /**
  * Resolve and fingerprint a source-backed readiness check without executing it.
- * The command must be copied verbatim from the bounded source excerpt; wrapper
- * commands are not inferred. This is provenance evidence, not shell safety:
- * the sandbox/controller remains responsible for deciding whether and how to
- * execute the command.
+ * The command is copied verbatim from the bounded source excerpt, except for a
+ * bare package-script runner whose key/value definition is copied instead;
+ * wrapper commands are not inferred. This is provenance evidence, not shell
+ * safety: the sandbox/controller remains responsible for deciding whether and
+ * how to execute the command.
  */
 export function verifyPlanningReadinessSource(
   workspaceRoot: string,
@@ -303,7 +482,7 @@ export function verifyPlanningReadinessSource(
     throw new Error("Planning readiness cwd must resolve to a directory.");
   }
 
-  const contents = readSourceFile(
+  const { contents, resolved: sourcePath } = readSourceFile(
     root,
     check.source.path,
     check.source.excerpt,
@@ -315,12 +494,35 @@ export function verifyPlanningReadinessSource(
       typeof manifest === "object" && manifest !== null && "scripts" in manifest
         ? manifest.scripts
         : undefined;
+    const scriptName = bareScriptName(check.command);
+    const packageJsonAtCwd =
+      path.basename(sourcePath) === "package.json" &&
+      sourcePath === path.join(cwd, "package.json");
     commandConfirmed =
-      typeof scripts === "object" &&
-      scripts !== null &&
-      Object.values(scripts).some((value) => value === check.command) &&
-      (commandConfirmed ||
-        check.source.excerpt.includes(JSON.stringify(check.command)));
+      isRecord(scripts) &&
+      Object.entries(scripts).some(
+        ([name, value]) =>
+          value === check.command &&
+          (scriptName
+            ? confirmsBareScriptInvocation(
+                contents.toString("utf8"),
+                check.source.excerpt,
+                name,
+                scripts,
+              )
+            : commandConfirmed ||
+              check.source.excerpt.includes(JSON.stringify(check.command))),
+      );
+    if (!commandConfirmed && scriptName) {
+      commandConfirmed =
+        packageJsonAtCwd &&
+        confirmsBareScriptInvocation(
+          contents.toString("utf8"),
+          check.source.excerpt,
+          scriptName,
+          scripts,
+        );
+    }
   }
   if (!commandConfirmed) {
     throw new Error(

@@ -6,6 +6,10 @@ import * as path from "node:path";
 import test from "node:test";
 import { Value } from "typebox/value";
 import {
+  cleanupFeatureSandboxRuntime,
+  runFeatureSandboxCommand,
+} from "./feature-sandbox.ts";
+import {
   PLANNING_READINESS_MAX_EXCERPT_BYTES,
   PLANNING_READINESS_MAX_SOURCE_BYTES,
   PlanningReadinessCheckSchema,
@@ -114,6 +118,219 @@ test("verifies JSON-escaped script bodies without changing the shell command", (
       /exact command/,
     );
   } finally {
+    repo.cleanup();
+  }
+});
+
+test("verifies exact bare package script invocations for supported runners", () => {
+  const repo = fixture();
+  try {
+    const contents = '{\n  "scripts": {\n    "lint": "eslint"\n  }\n}\n';
+    fs.writeFileSync(path.join(repo.root, "package.json"), contents);
+    const source = {
+      path: "package.json",
+      excerpt: '    "lint": "eslint"',
+    };
+
+    for (const runner of ["bun", "npm", "pnpm", "yarn"]) {
+      const verified = verifyPlanningReadinessSource(
+        repo.root,
+        check(source, { command: `${runner} run lint` }),
+      );
+      assert.equal(verified.command, `${runner} run lint`);
+      assert.equal(verified.sourceHash, digest(contents));
+      assert.equal(
+        Value.Check(PlanningReadinessVerifiedCheckSchema, verified),
+        true,
+      );
+    }
+
+    const nestedCwd = path.join(repo.root, "packages", "app");
+    fs.mkdirSync(nestedCwd, { recursive: true });
+    fs.writeFileSync(path.join(nestedCwd, "package.json"), contents);
+    const nestedVerified = verifyPlanningReadinessSource(
+      repo.root,
+      check(
+        {
+          path: "packages/app/package.json",
+          excerpt: source.excerpt,
+        },
+        { command: "bun run lint", cwd: "packages/app" },
+      ),
+    );
+    assert.equal(nestedVerified.sourceHash, digest(contents));
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("rejects missing scripts, foreign cwd, and unrelated package excerpts", () => {
+  const repo = fixture();
+  try {
+    const contents =
+      '{\n  "description": "bun run lint",\n  "scripts": {\n    "lint": "eslint",\n    "other": "bun run lint"\n  }\n}\n';
+    fs.writeFileSync(path.join(repo.root, "package.json"), contents);
+    fs.mkdirSync(path.join(repo.root, "other"));
+
+    assert.throws(() =>
+      verifyPlanningReadinessSource(
+        repo.root,
+        check(
+          { path: "package.json", excerpt: '    "lint": "eslint"' },
+          { command: "bun run missing" },
+        ),
+      ),
+    );
+    assert.throws(() =>
+      verifyPlanningReadinessSource(
+        repo.root,
+        check(
+          { path: "package.json", excerpt: '    "lint": "eslint"' },
+          { command: "bun run lint", cwd: "other" },
+        ),
+      ),
+    );
+    assert.throws(() =>
+      verifyPlanningReadinessSource(
+        repo.root,
+        check(
+          {
+            path: "package.json",
+            excerpt: '  "description": "bun run lint"',
+          },
+          { command: "bun run lint" },
+        ),
+      ),
+    );
+    // This is a real exact script body, not the new inferred runner route.
+    const exactBody = verifyPlanningReadinessSource(
+      repo.root,
+      check(
+        {
+          path: "package.json",
+          excerpt: '    "other": "bun run lint"',
+        },
+        { command: "bun run lint" },
+      ),
+    );
+    assert.equal(exactBody.command, "bun run lint");
+
+    const nonStringContents = '{"scripts":{"lint":false}}\n';
+    fs.writeFileSync(path.join(repo.root, "package.json"), nonStringContents);
+    assert.throws(() =>
+      verifyPlanningReadinessSource(
+        repo.root,
+        check(
+          { path: "package.json", excerpt: '"lint":false' },
+          { command: "bun run lint" },
+        ),
+      ),
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("rejects arguments, flags, and shell chains for bare package invocations", () => {
+  const repo = fixture();
+  try {
+    fs.writeFileSync(
+      path.join(repo.root, "package.json"),
+      '{"scripts":{"lint":"eslint"}}\n',
+    );
+    const source = {
+      path: "package.json",
+      excerpt: '"lint":"eslint"',
+    };
+    for (const command of [
+      "bun run lint --watch",
+      "bun run --silent lint",
+      "bun run lint && echo unexpected",
+      "bun run lint; echo unexpected",
+    ]) {
+      assert.throws(() =>
+        verifyPlanningReadinessSource(repo.root, check(source, { command })),
+      );
+    }
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preserves exact script bodies that are themselves runner invocations", () => {
+  const repo = fixture();
+  try {
+    const contents = '{"scripts":{"verify":"bun run check"}}\n';
+    fs.writeFileSync(path.join(repo.root, "package.json"), contents);
+    const verified = verifyPlanningReadinessSource(
+      repo.root,
+      check({ path: "package.json", excerpt: '"verify":"bun run check"' }),
+    );
+    assert.equal(verified.command, "bun run check");
+    assert.equal(verified.sourceHash, digest(contents));
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("matches escaped script keys and values in pretty JSON", () => {
+  const repo = fixture();
+  try {
+    const escapedValue = JSON.stringify('node -e "process.exit(23)"');
+    const contents = `{
+  "scripts": {
+    "li\\u006et": ${escapedValue}
+  }
+}\n`;
+    fs.writeFileSync(path.join(repo.root, "package.json"), contents);
+    const verified = verifyPlanningReadinessSource(
+      repo.root,
+      check(
+        {
+          path: "package.json",
+          excerpt: `    "li\\u006et": ${escapedValue}`,
+        },
+        { command: "bun run lint" },
+      ),
+    );
+    assert.equal(verified.sourceHash, digest(contents));
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("executes a verified bun script through its local binary and preserves failure", async () => {
+  const repo = fixture();
+  try {
+    fs.mkdirSync(path.join(repo.root, "node_modules", ".bin"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(repo.root, "node_modules", ".bin", "lint"),
+      "#!/bin/sh\nexit 37\n",
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(
+      path.join(repo.root, "package.json"),
+      '{"scripts":{"lint":"lint"}}\n',
+    );
+    const verified = verifyPlanningReadinessSource(
+      repo.root,
+      check(
+        { path: "package.json", excerpt: '"lint":"lint"' },
+        {
+          command: "bun run lint",
+        },
+      ),
+    );
+    const result = await runFeatureSandboxCommand({
+      workspaceRoot: repo.root,
+      cwd: verified.cwd,
+      command: verified.command,
+    });
+    assert.equal(result.exitCode, 37, result.stderr);
+  } finally {
+    cleanupFeatureSandboxRuntime(repo.root);
     repo.cleanup();
   }
 });
