@@ -4,6 +4,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { assertPipelineGitCommitSupported } from "./domain.ts";
+import { PIPELINE_DEFINITION_IDS } from "./domain.ts";
+import { buildPipelineCommandMessage } from "./commands.ts";
 import {
   assertPipelineName,
   canonicalPipelineId,
@@ -14,6 +16,50 @@ import pipelinesExtension, {
   resolvePipelineDefinition,
   resolvePipelineWorkingDir,
 } from "./index.ts";
+
+test("pipeline slash commands dispatch the selected pipeline as a follow-up turn", async () => {
+  const commands = new Map<
+    string,
+    Parameters<ExtensionAPI["registerCommand"]>[1]
+  >();
+  const messages: Parameters<ExtensionAPI["sendUserMessage"]>[] = [];
+  const api = {
+    on: () => {},
+    registerTool: () => {},
+    registerMessageRenderer: () => {},
+    registerCommand: (name, command) => commands.set(name, command),
+    sendUserMessage: (...args) => messages.push(args),
+  } satisfies Partial<ExtensionAPI>;
+  pipelinesExtension(api as unknown as ExtensionAPI);
+
+  assert.deepEqual(
+    [...commands.keys()].sort(),
+    [
+      ...PIPELINE_DEFINITION_IDS.map((id) => `pipeline:${id}`),
+      "pipelines",
+    ].sort(),
+  );
+  const ctx = {} as Parameters<
+    Parameters<ExtensionAPI["registerCommand"]>[1]["handler"]
+  >[1];
+  for (const pipeline of PIPELINE_DEFINITION_IDS) {
+    const command = commands.get(`pipeline:${pipeline}`);
+    assert.ok(command);
+    for (const task of [
+      "Add a search field\nKeep keyboard navigation",
+      "",
+      "   ",
+    ]) {
+      const before = messages.length;
+      await command.handler(task, ctx);
+      assert.equal(messages.length, before + 1);
+      assert.deepEqual(messages.at(-1), [
+        buildPipelineCommandMessage(pipeline, task),
+        { deliverAs: "followUp" },
+      ]);
+    }
+  }
+});
 
 test("pipeline extension registers run/cancel/check/list without status/wait aliases", () => {
   const tools: string[] = [];

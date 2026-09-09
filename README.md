@@ -31,6 +31,8 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 | `plan-pipeline`          | Six parallel research tracks → Astra synthesis → one implementation plan, returned directly or saved to a file. |
 | `audit-pipeline`         | Four parallel code reviews + one verification track → one consolidated report.                                  |
 
+Start a pipeline with `/pipeline:<name> <task>`, for example `/pipeline:plan-pipeline Plan the search feature`. Omit the task to use the current conversation. Type `/pipeline:` to see the available commands.
+
 Run `/pipelines` to inspect progress or ask Pipi to cancel one or more active runs. Each launch gets a recognizable name plus a short unique suffix, so repeated runs remain easy to distinguish. Pipeline stages warn before a caller-selected wallclock limit; use `30s`–`24h` durations when launching a run, or omit the limit to leave timing disabled. Press `Enter` to expand a run or open the agent responsible for a stage. Status colors make running, completed, limited, and failed work easy to scan.
 
 Implementation agents work in dedicated Git worktrees, keeping feature changes isolated from the main checkout while pipelines handle implementation, review, and verification.

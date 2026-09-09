@@ -19,6 +19,7 @@ import {
   PIPELINE_CANCEL_PARAMETERS,
 } from "./cancellation.ts";
 import { PipelineController } from "./controller.ts";
+import { registerPipelineCommands } from "./commands.ts";
 import { showPipelineDashboard } from "./dashboard.ts";
 import {
   AUDIT_PIPELINE_ID,
@@ -598,6 +599,8 @@ export default function pipelines(pi: ExtensionAPI) {
       return new Text(`${header}\n${theme.fg("toolOutput", preview)}`, 0, 0);
     },
   );
+
+  registerPipelineCommands(pi);
 
   pi.registerCommand("pipelines", {
     description: "Inspect and take over pipeline runs and agents",

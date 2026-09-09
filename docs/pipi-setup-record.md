@@ -1906,3 +1906,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Affected paths: `README.md` and this journal.
 - Verification: README formatting, `bun run check`, `bun run format:check`, `bun run lint`, and `git diff --check` passed. Documentation-only change; no runtime installation needed.
 - Pending: none.
+
+## Operation entry: launch pipelines from application slash commands
+
+- Request: allow invoking pipelines from the application with `/pipeline:<name>`.
+- Action: registered commands for all four pipeline definitions; each sends a follow-up request to the main agent for the selected pipeline, preserving caller-owned preparation. Optional task text is accepted; omission uses the current conversation.
+- Affected paths: `extensions/pipelines/commands.ts`, `extensions/pipelines/index.ts`, `extensions/pipelines/index.test.ts`, `README.md`, and this journal.
+- Verification: `bun run check`, `bun run format:check`, `bun run lint`, and all 582 extension tests passed; `git diff --check` passed. Inspected the installed host command parser and local package registration. No live model-backed pipeline was launched.
+- Pending: run `/reload` in the open Pipi application or restart it to load the commands. The installed package already references this repository; no reinstall is required.
