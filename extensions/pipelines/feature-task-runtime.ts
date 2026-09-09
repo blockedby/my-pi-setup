@@ -12,7 +12,10 @@ import {
   captureCheckInputRevision,
   type CheckInputRevision,
 } from "./check-input-revision.ts";
-import { runFeatureSandboxCommand } from "./feature-sandbox.ts";
+import {
+  runFeatureReadinessCommand,
+  runFeatureSandboxCommand,
+} from "./feature-sandbox.ts";
 import {
   createFeatureRootTaskGitTarget,
   type FeatureDiffPageRequest,
@@ -320,8 +323,8 @@ function resolveCheckCwd(worktree: string, relativeCwd: string) {
 }
 
 export async function runFeatureCheckCommand(input: FeatureCheckCommandInput) {
-  // Only this exact, read-only operation crosses the Git boundary. Arbitrary
-  // shell checks remain sandboxed: never expose repository metadata to them.
+  // Only this exact operation uses live controller Git state (including the
+  // task base). Other checks stay sandboxed with sanitized read-only metadata.
   if (input.kind === "check" && input.command.trim() === "git diff --check") {
     const root = fs.realpathSync.native(input.workspaceRoot);
     const cwd = resolveCheckCwd(root, path.relative(root, input.cwd) || ".");
@@ -447,6 +450,17 @@ export async function runFeatureCheckCommand(input: FeatureCheckCommandInput) {
       "--",
       ".",
     ]);
+  }
+  if (
+    input.kind === "check" &&
+    fs.existsSync(path.join(input.workspaceRoot, ".git"))
+  ) {
+    return runFeatureReadinessCommand({
+      workspaceRoot: input.workspaceRoot,
+      cwd: input.cwd,
+      command: input.command,
+      signal: input.signal,
+    });
   }
   return runFeatureSandboxCommand({
     workspaceRoot: input.workspaceRoot,

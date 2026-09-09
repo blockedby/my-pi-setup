@@ -20,6 +20,8 @@ import {
   type CleanupEvidenceSink,
 } from "./cleanup-evidence.ts";
 
+import { createReadinessGitSnapshot } from "./readiness-git-snapshot.ts";
+
 export type FeatureSandboxMode = "candidate" | "selection" | "augmentation";
 
 export interface FeatureToolBoundary {
@@ -915,6 +917,7 @@ function sandboxCommandArguments(
   executionCwd = cwd,
   resources: SkillResources = [],
   preparation = false,
+  gitBindings: ReadonlyArray<{ source: string; destination: string }> = [],
 ) {
   assertFeatureRuntimeDirectories(runtime);
   const roots = visibleRoots(mode, tempRoot, cwd);
@@ -987,6 +990,12 @@ function sandboxCommandArguments(
       args.push("--ro-bind", source, destination);
       if (directory) exposedDirectories.push(destination);
     }
+  }
+  // Only controller-owned verification snapshots may restore a Git view. Never
+  // expose the live common directory or grant these mounts to agent tools.
+  for (const { source, destination } of gitBindings) {
+    args.push("--dir", path.dirname(destination));
+    args.push("--ro-bind", source, destination);
   }
   args.push("--chdir", executionCwd, "--", "/bin/bash", "-lc", command);
   return args;
@@ -1139,6 +1148,31 @@ export async function runFeatureSandboxCommand(options: {
   signal?: AbortSignal;
   preparation?: boolean;
 }) {
+  return runSandboxCommand(options);
+}
+
+/** Controller readiness/baseline checks receive an immutable view of their own Git state. */
+export async function runFeatureReadinessCommand(
+  options: Omit<Parameters<typeof runFeatureSandboxCommand>[0], "preparation">,
+) {
+  if (options.signal?.aborted) throw new Error("Feature command cancelled.");
+  const snapshot = createReadinessGitSnapshot(options.workspaceRoot);
+  try {
+    const result = await runSandboxCommand(
+      { ...options, preparation: false },
+      snapshot.bindings,
+    );
+    snapshot.verifyUnchanged();
+    return result;
+  } finally {
+    snapshot.dispose();
+  }
+}
+
+async function runSandboxCommand(
+  options: Parameters<typeof runFeatureSandboxCommand>[0],
+  gitBindings?: ReadonlyArray<{ source: string; destination: string }>,
+) {
   if (options.signal?.aborted) throw new Error("Feature command cancelled.");
   const workspaceRoot = comparableExistingPath(options.workspaceRoot);
   const cwd = comparableExistingPath(path.resolve(workspaceRoot, options.cwd));
@@ -1158,6 +1192,7 @@ export async function runFeatureSandboxCommand(options: {
     cwd,
     [],
     options.preparation === true,
+    gitBindings,
   );
   const maxBytes = 256 * 1024;
   return new Promise<{
@@ -1168,6 +1203,30 @@ export async function runFeatureSandboxCommand(options: {
     const child = spawn("/usr/bin/bwrap", args, {
       cwd: "/",
       stdio: ["ignore", "pipe", "pipe"],
+      ...(gitBindings
+        ? {
+            env: {
+              ...Object.fromEntries(
+                Object.entries(process.env).filter(
+                  ([key]) => !key.startsWith("GIT_"),
+                ),
+              ),
+              GIT_CONFIG_NOSYSTEM: "1",
+              GIT_CONFIG_SYSTEM: "/dev/null",
+              GIT_CONFIG_GLOBAL: "/dev/null",
+              GIT_OPTIONAL_LOCKS: "0",
+              GIT_ATTR_NOSYSTEM: "1",
+              GIT_TERMINAL_PROMPT: "0",
+              GIT_CONFIG_COUNT: "3",
+              GIT_CONFIG_KEY_0: "core.hooksPath",
+              GIT_CONFIG_VALUE_0: "/dev/null",
+              GIT_CONFIG_KEY_1: "core.fsmonitor",
+              GIT_CONFIG_VALUE_1: "false",
+              GIT_CONFIG_KEY_2: "protocol.allow",
+              GIT_CONFIG_VALUE_2: "never",
+            },
+          }
+        : {}),
     });
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);

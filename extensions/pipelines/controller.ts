@@ -127,7 +127,7 @@ import {
 import type { PlanningReadinessResult } from "./domain.ts";
 import { buildPlanningReadinessHandoff } from "./planning-readiness-handoff.ts";
 import {
-  runFeatureSandboxCommand,
+  runFeatureReadinessCommand,
   cleanupFeatureSandboxRuntime,
 } from "./feature-sandbox.ts";
 import {
@@ -456,7 +456,7 @@ export interface PipelineControllerOptions {
   readonly executeFeatureGraph?: typeof executeFeatureGraph;
   readonly createFeatureReviewRuntime?: typeof createFeatureReviewRuntime;
   readonly artifactRoot?: string;
-  readonly runPlanningReadinessCommand?: typeof runFeatureSandboxCommand;
+  readonly runPlanningReadinessCommand?: typeof runFeatureReadinessCommand;
   /** Concise aliases used by deterministic controller fixtures. */
   readonly clock?: PipelineMonotonicClock;
   readonly scheduler?: PipelineWallclockScheduler;
@@ -541,7 +541,7 @@ export class PipelineController {
   constructor(options: PipelineControllerOptions) {
     this.onHandoff = options.onHandoff;
     this.readinessCommand =
-      options.runPlanningReadinessCommand ?? runFeatureSandboxCommand;
+      options.runPlanningReadinessCommand ?? runFeatureReadinessCommand;
     this.clock =
       options.monotonicClock ?? options.clock ?? systemPipelineMonotonicClock;
     this.scheduler =
@@ -3789,7 +3789,7 @@ export class PipelineController {
   }
 
   private readonly evidenceDeliveries = new Set<string>();
-  private readonly readinessCommand: typeof runFeatureSandboxCommand;
+  private readonly readinessCommand: typeof runFeatureReadinessCommand;
 
   private deliver(run: MutableRun) {
     if (
