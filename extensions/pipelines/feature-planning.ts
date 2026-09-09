@@ -117,7 +117,11 @@ const verificationSchema = Type.Object(
   {
     id: identifier("CHECK"),
     command: prose(),
-    cwd: prose(),
+    cwd: Type.String({
+      ...prose(),
+      description:
+        'Directory relative to the assigned worktree root: "." or "apps/core". Never an absolute path, working_dir/workspaceRoot, "~", or a path containing "..". Preserve existing verified command/cwd pairs exactly.',
+    }),
     purpose: prose(),
     proves: Type.Array(Type.Union([identifier("AC"), identifier("INV")]), {
       minItems: 1,
@@ -190,7 +194,11 @@ const executionCheckSchema = Type.Object(
       maxLength: 128,
     }),
     command: prose(),
-    cwd: prose(),
+    cwd: Type.String({
+      ...prose(),
+      description:
+        'Directory relative to the assigned worktree root: "." or "apps/core". Never an absolute path, working_dir/workspaceRoot, "~", or a path containing "..". Preserve existing verified command/cwd pairs exactly.',
+    }),
     purpose: prose(),
     required: Type.Boolean(),
   },

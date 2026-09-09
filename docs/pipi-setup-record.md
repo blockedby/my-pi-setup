@@ -1930,3 +1930,13 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Affected paths: `extensions/response-watchdog/guard.ts`, `guard.test.ts`, `index.ts`, `index.test.ts`, `scripts/install.mjs`, `tests/scripts/install.test.mjs`, `/home/kcnc/.pipi/agent/settings.json`, and this journal.
 - Verification: native AgentSession integration covered configured built-in registration, stable wrappers across model selection, one completed tool followed by a stalled response and successful native retry with no repeated tool execution, and exhaustion after exactly two retries. Guard tests covered silent providers, activity resetting the deadline, late completion, partial tool calls, and explicit cancellation. All 589 extension tests, 41 installer tests, check, formatting, lint, and diff checks passed. Independent review closed the registration blocker and returned READY. Local settings were read back. Logs: `/tmp/pipi-watchdog-extensions.log` and `/tmp/pipi-watchdog-installer.log`.
 - Pending: restart Pipi to load the extension and updated settings; requests already in flight do not acquire the new watchdog retroactively. No live model request was sent. Earlier logs establish stalled responses and WebSocket errors, but do not prove the exact upstream network failure.
+
+## Operation entry: clarify planner check working directories
+
+- Request: strengthen planner guidance after an absolute check cwd was rejected by the repository-relative path contract.
+- Action: added shared cwd guidance to discovery readiness and candidate/canonical/graph planning prompts. Explicit examples use `.` or `apps/core`; working_dir/workspaceRoot must not be copied into cwd, and verified command/cwd pairs stay unchanged. Added matching field descriptions to plan verification and execution-check schemas.
+- Affected paths: `extensions/pipelines/prompt.ts`, `extensions/pipelines/feature-planning.ts`, and this journal.
+- Verification: check, format:check, lint, all 18 focused prompt/planning/submission-contract tests, and git diff --check passed. No literal prompt assertions were added; runtime path validation is unchanged.
+- Pending: reload Pipi before new planner sessions to load the updated instructions. Existing session prompts are not changed retroactively.
+
+- Delivery update: user requested commit, push, and application update. Ran `bun run rollout:pipi-upgrade`; installed Pipi 0.85.1 and runtime integration checks passed. Affected installed state: `/home/kcnc/.pipi/agent` and the branded launcher. Log: `/tmp/pipi-cwd-update.log`. Open sessions still require `/reload` or restart.
