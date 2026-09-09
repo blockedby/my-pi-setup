@@ -453,6 +453,7 @@ export async function runFeatureCheckCommand(input: FeatureCheckCommandInput) {
     cwd: input.cwd,
     command: input.command,
     signal: input.signal,
+    preparation: input.kind === "prepare",
   });
 }
 

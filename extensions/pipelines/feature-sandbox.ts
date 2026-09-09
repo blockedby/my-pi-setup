@@ -914,6 +914,7 @@ function sandboxCommandArguments(
   runtime: FeatureRuntimeDirectories,
   executionCwd = cwd,
   resources: SkillResources = [],
+  preparation = false,
 ) {
   assertFeatureRuntimeDirectories(runtime);
   const roots = visibleRoots(mode, tempRoot, cwd);
@@ -931,6 +932,9 @@ function sandboxCommandArguments(
     "--tmpfs",
     tempRoot,
   ];
+  // Only caller-declared preparation may download dependencies. Agent tools
+  // and verification commands keep their isolated network namespace.
+  if (preparation) args.push("--share-net");
   for (const root of roots) {
     args.push("--dir", root);
     args.push(mode === "selection" ? "--ro-bind" : "--bind", root, root);
@@ -939,10 +943,23 @@ function sandboxCommandArguments(
   if (gitDir) args.push("--tmpfs", gitDir);
   args.push("--dir", runtime.root);
   args.push("--bind", runtime.root, runtime.root);
-  args.push("--setenv", "TMPDIR", runtime.temp);
-  args.push("--setenv", "TMP", runtime.temp);
-  args.push("--setenv", "TEMP", runtime.temp);
+  // Keep Unix-socket paths below sun_path limits even for deeply nested graph
+  // worktrees. The short alias is namespace-local; storage stays branch-owned.
+  const sandboxTemp = "/dev/shm/pipi-tmp";
+  args.push("--dir", sandboxTemp);
+  args.push("--bind", runtime.temp, sandboxTemp);
+  args.push("--setenv", "TMPDIR", sandboxTemp);
+  args.push("--setenv", "TMP", sandboxTemp);
+  args.push("--setenv", "TEMP", sandboxTemp);
   args.push("--setenv", "XDG_CACHE_HOME", runtime.cache);
+  if (preparation) {
+    args.push(
+      "--setenv",
+      "BUN_INSTALL_CACHE_DIR",
+      path.join(runtime.cache, "bun"),
+    );
+    args.push("--setenv", "npm_config_cache", path.join(runtime.cache, "npm"));
+  }
   for (const root of roots) {
     for (const name of [".git", ".pi-subagents", ".pipi"]) {
       const protectedPath = path.join(root, name);
@@ -1120,6 +1137,7 @@ export async function runFeatureSandboxCommand(options: {
   cwd: string;
   command: string;
   signal?: AbortSignal;
+  preparation?: boolean;
 }) {
   if (options.signal?.aborted) throw new Error("Feature command cancelled.");
   const workspaceRoot = comparableExistingPath(options.workspaceRoot);
@@ -1138,6 +1156,8 @@ export async function runFeatureSandboxCommand(options: {
     workspaceRoot,
     runtime,
     cwd,
+    [],
+    options.preparation === true,
   );
   const maxBytes = 256 * 1024;
   return new Promise<{

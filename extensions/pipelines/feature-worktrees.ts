@@ -214,14 +214,17 @@ function requireGitRaw(
   }
 }
 
-function cleanStatus(workingDir: string) {
+function cleanStatus(
+  workingDir: string,
+  ignored: "matching" | "no" = "matching",
+) {
   return requireGit(
     workingDir,
     [
       "status",
       "--porcelain=v1",
       "--untracked-files=normal",
-      "--ignored=matching",
+      `--ignored=${ignored}`,
     ],
     "Unable to inspect worktree cleanliness",
   );
@@ -334,7 +337,9 @@ export function validateDedicatedFeatureWorktree(
     ["rev-parse", "HEAD"],
     "Unable to capture feature base commit",
   );
-  const status = cleanStatus(resolved);
+  // Caller-owned dependency installation and builds legitimately create ignored
+  // files. Admission fences source changes, not these prepared runtime outputs.
+  const status = cleanStatus(resolved, "no");
   if (status) {
     throw new Error(
       `feature-pipeline requires a clean dedicated worktree; status is non-empty (${status.slice(0, 1024)}).`,

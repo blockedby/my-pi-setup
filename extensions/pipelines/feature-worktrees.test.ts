@@ -165,6 +165,55 @@ test("feature preflight accepts only a clean attached dedicated linked worktree"
   }
 });
 
+test("feature preflight accepts ignored preparation outputs but rejects source changes", () => {
+  const repo = fixture();
+  try {
+    fs.writeFileSync(
+      path.join(repo.caller, ".gitignore"),
+      "node_modules/\ndist/\n",
+    );
+    git(repo.caller, ["add", ".gitignore"]);
+    git(repo.caller, ["commit", "-qm", "declare preparation outputs"]);
+    const expected = validateDedicatedFeatureWorktree(repo.caller);
+    fs.mkdirSync(path.join(repo.caller, "node_modules", ".bin"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(repo.caller, "node_modules", ".bin", "tsc"),
+      "prepared compiler\n",
+    );
+    fs.mkdirSync(path.join(repo.caller, "dist"));
+    fs.writeFileSync(
+      path.join(repo.caller, "dist", "index.js"),
+      "prepared build\n",
+    );
+    assert.deepEqual(validateDedicatedFeatureWorktree(repo.caller), expected);
+    for (const file of ["base.txt", "untracked-source.ts"]) {
+      fs.writeFileSync(path.join(repo.caller, file), "changed source\n");
+      assert.throws(
+        () => validateDedicatedFeatureWorktree(repo.caller),
+        /requires a clean dedicated worktree/,
+      );
+      git(repo.caller, ["add", file]);
+      assert.throws(
+        () => validateDedicatedFeatureWorktree(repo.caller),
+        /requires a clean dedicated worktree/,
+      );
+      git(repo.caller, ["reset", "--hard", "HEAD"]);
+    }
+    assert.deepEqual(validateDedicatedFeatureWorktree(repo.caller), expected);
+    assert.equal(
+      fs.readFileSync(
+        path.join(repo.caller, "node_modules", ".bin", "tsc"),
+        "utf8",
+      ),
+      "prepared compiler\n",
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("controller lifecycle creates same-base isolated candidates, promotes exact primary-derived synthesis, and preserves refs", () => {
   const repo = fixture();
   try {

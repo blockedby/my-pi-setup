@@ -104,7 +104,7 @@ const PIPELINE_RUN_COMMON_PROPERTIES = {
   working_dir: Type.Optional(
     Type.String({
       description:
-        "Existing working directory in which the pipeline operates. feature-pipeline and small-feature-pipeline require the exact root of a caller-prepared dedicated linked Git worktree; feature additionally requires Linux bubblewrap, a clean stable HEAD, and rejects the primary checkout. Plan and audit default to the current directory.",
+        "Existing working directory in which the pipeline operates. feature-pipeline and small-feature-pipeline require the exact root of a caller-prepared dedicated linked Git worktree. Install dependencies and build required workspace packages before launch; ignored dependency/build outputs are allowed. feature additionally requires Linux bubblewrap, clean source files and a stable HEAD, and rejects the primary checkout. Plan and audit default to the current directory.",
       minLength: 1,
       maxLength: 16 * 1024,
     }),
@@ -161,7 +161,7 @@ const FEATURE_PIPELINE_PARAMETERS = Type.Object(
       Type.String({ minLength: 1, maxLength: 32 * 1024 }),
       {
         description:
-          "Required ordered child-worktree preparation commands; pass an empty array when none are needed.",
+          "Required ordered child-worktree preparation commands, including dependency installation and required workspace builds. These caller-declared commands have network access and writable isolated package caches; verification and agent commands remain offline. Pass an empty array only when no preparation is needed.",
         maxItems: 64,
       },
     ),

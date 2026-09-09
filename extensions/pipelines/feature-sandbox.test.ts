@@ -11,6 +11,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { CleanupEvidence } from "./cleanup-evidence.ts";
+import { runFeatureCheckCommand } from "./feature-task-runtime.ts";
 import {
   cleanupFeatureSandboxRuntime,
   createFeatureToolBoundary,
@@ -82,10 +83,8 @@ test("candidate tools cannot read or mutate sibling worktrees and bash sees only
       .trim()
       .split(/\r?\n/);
     assert.equal(runtimePaths.length, 4);
-    assert.equal(
-      runtimePaths.every((item) => item.includes("/.pipi-runtime/")),
-      true,
-    );
+    assert.equal(new Set(runtimePaths.slice(0, 3)).size, 1);
+    assert.ok(runtimePaths[3]?.includes("/.pipi-runtime/"));
     assert.equal(
       runtimePaths.every((item) => !item.startsWith(candidateA)),
       true,
@@ -287,6 +286,38 @@ test("graph commands use the contained package cwd and reject symlink escapes", 
       }),
       /cancelled/,
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("deep worktrees support Unix sockets in sandbox temporary directories", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-long-socket-"));
+  const workspace = path.join(root, "feature-branch-".repeat(8));
+  fs.mkdirSync(workspace);
+  fs.writeFileSync(
+    path.join(workspace, "socket.cjs"),
+    `
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "supervisor-"));
+    const socket = path.join(dir, "supervisor.sock");
+    const server = require("node:net").createServer();
+    server.on("error", error => { console.error(error); process.exit(1); });
+    server.listen(socket, () => {
+      if (!fs.statSync(socket).isSocket()) throw new Error("Socket is not reachable at its requested path");
+      server.close(() => fs.rmSync(dir, {recursive: true, force: true}));
+    });
+  `,
+  );
+  try {
+    const result = await runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      command: "node socket.cjs",
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -691,14 +722,14 @@ test("runtime parent and root symlinks are rejected before sandbox mounting", ()
   }
 });
 
-test("declared shell checks retain network isolation", async () => {
+test("caller preparation can fetch packages while subsequent checks retain network isolation", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-check-network-"));
   const workspace = path.join(root, "workspace");
   fs.mkdirSync(workspace);
   let requests = 0;
   const server = createServer((_request, response) => {
     requests++;
-    response.end("not exposed");
+    response.end("package fixture");
   });
   try {
     server.listen(0, "127.0.0.1");
@@ -706,13 +737,30 @@ test("declared shell checks retain network isolation", async () => {
     const address = server.address();
     assert.ok(address && typeof address !== "string");
     const script = `fetch("http://127.0.0.1:${address.port}", { signal: AbortSignal.timeout(1000) }).then(() => process.exit(0), () => process.exit(7))`;
-    const result = await runFeatureSandboxCommand({
+    for (const kind of ["check", "prepare", "check"] as const) {
+      const result = await runFeatureCheckCommand({
+        kind,
+        workspaceRoot: workspace,
+        cwd: workspace,
+        command: `${JSON.stringify(process.execPath)} -e '${script}'`,
+        signal: AbortSignal.timeout(5000),
+      });
+      assert.equal(result.exitCode, kind === "prepare" ? 0 : 7, result.stderr);
+    }
+    assert.equal(requests, 1);
+    const cache = await runFeatureCheckCommand({
+      kind: "prepare",
       workspaceRoot: workspace,
-      cwd: ".",
-      command: `${JSON.stringify(process.execPath)} -e '${script}'`,
+      cwd: workspace,
+      command:
+        'mkdir -p "$BUN_INSTALL_CACHE_DIR" "$npm_config_cache" && touch "$BUN_INSTALL_CACHE_DIR/probe" "$npm_config_cache/probe" && printf "%s\\n" "$BUN_INSTALL_CACHE_DIR" "$npm_config_cache"',
+      signal: AbortSignal.timeout(5000),
     });
-    assert.equal(result.exitCode, 7, result.stderr);
-    assert.equal(requests, 0);
+    assert.equal(cache.exitCode, 0, cache.stderr);
+    for (const cachePath of cache.stdout.trim().split("\n")) {
+      assert.ok(cachePath.startsWith(`${root}${path.sep}`));
+      assert.ok(fs.existsSync(path.join(cachePath, "probe")));
+    }
   } finally {
     server.close();
     fs.rmSync(root, { recursive: true, force: true });
