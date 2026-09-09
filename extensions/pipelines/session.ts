@@ -892,7 +892,7 @@ export function createPipelineSessionFactory(
               name: "pipeline_feature_readiness_check",
               label: "Check repository readiness",
               description:
-                "Execute a source-confirmed existing repository check in the implementation worktree sandbox during discovery. Returns controller-observed results; never installs or changes tools to repair a failed check.",
+                "Execute a source-confirmed existing repository check in the implementation worktree sandbox during discovery. Prefer the repository's normal runner: a bare bun/npm/pnpm/yarn run <script> can cite its script definition in cwd's package.json; other commands require an exact source invocation. The supplied command executes unchanged; the controller does not add a runner. Returns controller-observed results; never installs or changes tools to repair a failed check.",
               parameters: PlanningReadinessCheckSchema,
               async execute(_id, input, signal) {
                 const result = await options.planningReadinessCheck!(
