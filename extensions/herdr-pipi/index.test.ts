@@ -88,6 +88,7 @@ class ExtensionHarness {
 
 class HerdrSocketFixture {
   readonly requests: Request[] = [];
+  supportsPipiResume = true;
   private readonly sockets = new Set<Socket>();
   private readonly waiters = new Set<() => void>();
   private readonly server = createServer((socket) => {
@@ -110,9 +111,18 @@ class HerdrSocketFixture {
           request = undefined;
         }
         if (!request) continue;
+        const envelope: unknown = JSON.parse(line);
+        if (request.method === "ping") {
+          socket.end(
+            `${JSON.stringify({ id: isRecord(envelope) ? envelope.id : undefined, result: { type: "pong", capabilities: { pipi_resume_launcher: this.supportsPipiResume } } })}\n`,
+          );
+          continue;
+        }
         this.requests.push(request);
         for (const waiter of Array.from(this.waiters)) waiter();
-        socket.write('{"ok":true}\n');
+        socket.end(
+          `${JSON.stringify({ id: isRecord(envelope) ? envelope.id : undefined, result: { type: "ok" } })}\n`,
+        );
       }
     });
   });
@@ -239,11 +249,13 @@ function context(
   mode: "tui" | "rpc" | "json" | "print",
   idle: boolean,
   sessionId = "session-fixture",
+  notifications: string[] = [],
 ) {
   return {
     mode,
     hasUI: mode === "tui" || mode === "rpc",
     isIdle: () => idle,
+    ui: { notify: (message: string) => notifications.push(message) },
     sessionManager: {
       getSessionFile: () => "/tmp/pipi-herdr-session.jsonl",
       getSessionId: () => sessionId,
@@ -290,6 +302,7 @@ function assertSessionIdentity(socket: HerdrSocketFixture) {
   assert.equal(session.params.pane_id, "pane-fixture");
   assert.equal(session.params.source, "herdr:pi");
   assert.equal(session.params.agent, "pi");
+  assert.equal(session.params.resume_launcher, "pipi");
   assert.equal(
     session.params.agent_session_path,
     "/tmp/pipi-herdr-session.jsonl",
@@ -307,6 +320,7 @@ function assertStateSessionIdentity(socket: HerdrSocketFixture) {
   assert.ok(states.length > 0);
   const sessionIndex = socket.requests.indexOf(session);
   for (const state of states) {
+    assert.equal(state.params.resume_launcher, "pipi");
     assert.ok(socket.requests.indexOf(state) > sessionIndex);
     assert.equal(
       state.params.agent_session_path,
@@ -329,6 +343,30 @@ function assertMonotonicSequences(socket: HerdrSocketFixture) {
     assert.ok(sequences[index]! > sequences[index - 1]!);
   }
 }
+
+test("unsupported servers keep activity without claiming launcher support, and reconnect reprobes", async () => {
+  await withHerdrSocket(async (socket) => {
+    socket.supportsPipiResume = false;
+    const notices: string[] = [];
+    const ctx = context("tui", true, "session-fixture", notices);
+    const harness = new ExtensionHarness(new TestEventBus());
+    await harness.install(await loadReporter());
+    await harness.emit("session_start", sessionStart("startup"), ctx);
+    await socket.waitForState("idle");
+    assert.equal(notices.length, 1);
+    assert.ok(
+      socket.requests.every(
+        (request) => request.params.resume_launcher === undefined,
+      ),
+    );
+    socket.supportsPipiResume = true;
+    await harness.emit("agent_start", agentStart, ctx);
+    const working = await socket.waitForState("working");
+    assert.equal(working.params.resume_launcher, "pipi");
+    assert.equal(notices.length, 1);
+    await harness.emit("session_shutdown", sessionShutdown("quit"), ctx);
+  });
+});
 
 test("TUI lifecycle reports session identity and derived root activity", async () => {
   await withHerdrSocket(async (socket) => {
