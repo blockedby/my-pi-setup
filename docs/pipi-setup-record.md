@@ -2046,3 +2046,11 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Action: removed only `/home/kcnc/code/tools/pipi-alias/.worktrees/herdr-activity-bridge` from `packages` in `~/.pipi/agent/settings.json`; retained the canonical primary repository, MCP adapter and pi-codex package registrations. No worktree files, auth data or other settings were changed.
 - Verification: `pipi list` reports only the three intended packages; `bun run check:pipi-install` passed. Full startup in the user's next process remains to be confirmed.
 - Pending: fully restart Pipi to remove already-loaded duplicate extensions; the older worktree remains on disk.
+
+## Operation entry: implement Pipi-owned Herdr activity reporting
+
+- Request: report background subagent/pipeline work and interactive Questionary waits in Herdr; implement directly after feature-pipeline readiness failures. Defer Herdr source/resume changes.
+- Action: implement a single Pipi-owned reporter and root activity aggregation; migrate the legacy managed reporter transactionally rather than invoking the Herdr installer. Preserve regular Pi and headless child isolation.
+- Affected paths: `extensions/herdr-pipi/`, lifecycle wiring in `extensions/subagents/index.ts` and `extensions/pipelines/index.ts`, `scripts/{install,check-pipi-install}.mjs`, installer/extension tests, and `docs/herdr-pipi-integration.md`.
+- Verification: final `bun run test:deterministic` passed (614 extension tests, 22 file-search tests, 67 script tests including 44 installer tests); `check:submodules`, TypeScript, lint, formatting and `git diff --check` passed. Initial audit `herdr-bridge-source-audit-c5105f16` found ambiguous `.js` imports and dangling-symlink migration handling; remediation adds explicit `.ts` imports, real Pi loader verification and filesystem-entry migration checks. Closure audit `herdr-bridge-closure-audit-169c2e48` closed AUD-001 and AUD-002 with no remaining findings or conflicts; only explicitly deferred live checks remain unproven.
+- Pending: no host runtime installation or live Herdr state changes performed. The new installed-state check correctly rejects the still-installed legacy reporter until an authorized migration. Authorized installation/reload and visual checks remain separate, as does fixing Herdr's resume executable.
