@@ -22,7 +22,11 @@ Herdr transport retains the existing `pi` agent identity, `herdr:pi` source, ses
 
 ## Deferred work and live verification
 
-This change does **not** update Herdr, install the changed Pipi runtime, or fix Herdr restoring sessions through the regular `pi` executable. Configurable Pipi resume commands remain a separate Herdr task; do not globally alias `pi` to `pipi` as a workaround.
+The reporter now checks Herdr's `pipi_resume_launcher` capability before sending a Pipi launcher marker with session/state reports. Supporting Herdr builds can restore those sessions with `pipi`, or the runtime host's configured `[session].pipi_resume_executable`. Ordinary Pi remains unchanged. Older servers continue receiving activity reports, with a one-time warning that Pipi launcher preservation is unavailable. Probe and report use separate one-request connections and share a bounded timeout; no support result is cached across reports.
+
+Install Pipi on the host that owns the pane, including remote SSH/Cloud hosts. A custom executable path belongs in that host's Herdr config, not in a session report. Old unlabeled snapshots cannot distinguish Pipi from Pi and may need manual restoration. Do not globally alias `pi` to `pipi`.
+
+These source changes do **not** install either runtime or restart Herdr. Multiplatform command construction needs native-platform/live verification before claiming full end-to-end support.
 
 After an explicitly authorized installation and Pipi reload, verify in a disposable Herdr pane:
 
