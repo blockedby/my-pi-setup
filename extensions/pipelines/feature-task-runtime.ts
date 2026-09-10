@@ -116,6 +116,7 @@ export interface FeatureTaskCapsule {
     }>;
     readonly knownResidualPaths: ReadonlyArray<string>;
     readonly preparationBaseline: ReadonlyArray<string>;
+    readonly preparationChanges?: ReadonlyArray<FeatureTrackedResidualState>;
     readonly previousFailure: string | null;
     readonly provisionalCommit: string | null;
     readonly previousChecks: ReadonlyArray<RetryCheckEvidence>;
@@ -143,6 +144,7 @@ export interface FeatureTaskDiffResult {
   readonly conflictPaths: ReadonlyArray<string>;
   readonly knownResidualPaths: ReadonlyArray<string>;
   readonly preparationBaseline: ReadonlyArray<string>;
+  readonly preparationChanges?: ReadonlyArray<FeatureTrackedResidualState>;
   readonly provisionalCommit?: string;
   readonly previousChecks: ReadonlyArray<FeatureCheckResult>;
   readonly diff: {
@@ -178,6 +180,7 @@ export interface FeatureTaskToolHost {
   check(request: { readonly checkId: string }): Promise<FeatureCheckResult>;
   finalize(request: {
     readonly commitPaths: ReadonlyArray<string>;
+    readonly discardPaths?: ReadonlyArray<string>;
     readonly summary: string;
   }): Promise<FeatureTaskFinalizeResult>;
 }
@@ -700,6 +703,7 @@ export function createFeatureTaskRuntime(options: {
       conflictPaths: evidence.conflictPaths,
       knownResidualPaths: [...state.residualPaths],
       preparationBaseline: [...preparationBaseline].sort(),
+      preparationChanges: options.target.preparationChanges?.() ?? [],
       ...(state.provisionalCommit
         ? { provisionalCommit: state.provisionalCommit }
         : {}),
@@ -883,10 +887,20 @@ export function createFeatureTaskRuntime(options: {
   const executeFinalize = async (
     request: {
       readonly commitPaths: ReadonlyArray<string>;
+      readonly discardPaths?: ReadonlyArray<string>;
       readonly summary: string;
     },
     operation: ActiveFinalizeOperation,
   ) => {
+    const discardPaths = request.discardPaths ?? [];
+    if (options.target.prepareFinalization) {
+      options.target.prepareFinalization(request.commitPaths, discardPaths);
+    } else if (
+      discardPaths.length > 0 ||
+      (options.target.preparationChanges?.().length ?? 0) > 0
+    ) {
+      throw new Error("This task cannot resolve preparation changes.");
+    }
     let commitResult: ReturnType<FeatureTaskGitTarget["commit"]> | undefined;
     if (options.conflict && !state.provisionalCommit) {
       commitResult = options.target.continueCherryPick(request.commitPaths);
@@ -988,6 +1002,7 @@ export function createFeatureTaskRuntime(options: {
 
   const finalize = (request: {
     readonly commitPaths: ReadonlyArray<string>;
+    readonly discardPaths?: ReadonlyArray<string>;
     readonly summary: string;
   }) => {
     try {
@@ -1111,6 +1126,7 @@ export function createFeatureTaskRuntime(options: {
           })),
           knownResidualPaths: [...state.residualPaths],
           preparationBaseline: [...preparationBaseline].sort(),
+          preparationChanges: options.target.preparationChanges?.() ?? [],
           previousFailure: previousFailure ?? null,
           provisionalCommit: state.provisionalCommit ?? null,
           previousChecks: state.checks.map((result) => ({
@@ -1141,7 +1157,8 @@ export function createFeatureTaskRuntime(options: {
                 Math.floor((16 * 1024) / Math.max(1, state.checks.length)),
               ),
           })),
-          ...(attempt > 1
+          ...(attempt > 1 ||
+          (options.target.preparationChanges?.().length ?? 0) > 0
             ? {
                 currentDiff: (() => {
                   const diff = options.target.inspect(

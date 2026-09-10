@@ -59,6 +59,7 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
   let finalized = 0;
   const diffRequests: unknown[] = [];
   const checkRequests: string[] = [];
+  const finalizeRequests: unknown[] = [];
 
   try {
     const skillDir = path.join(fixture.agentDir, "skills", "fixture");
@@ -167,8 +168,9 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
             finishedAt: 2,
           };
         },
-        async finalize() {
+        async finalize(request) {
           finalized++;
+          finalizeRequests.push(request);
           return {
             validated: true,
             status: "satisfied_without_changes" as const,
@@ -386,15 +388,74 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
 
     const finalize = sdkSession.getToolDefinition("pipeline_task_finalize");
     assert.ok(finalize);
-    const result = await finalize.execute(
-      "feature-finalizer-finalize",
-      { commitPaths: [], summary: "The accepted feature needs no changes." },
+    const omittedDiscardPaths = {
+      commitPaths: [],
+      summary: "The accepted feature needs no changes.",
+    };
+    const emptyDiscardPaths = {
+      ...omittedDiscardPaths,
+      discardPaths: [],
+    };
+    const multipleDiscardPaths = {
+      ...omittedDiscardPaths,
+      discardPaths: ["generated.log", "tmp/cache.json"],
+    };
+    assert.equal(Value.Check(finalize.parameters, omittedDiscardPaths), true);
+    assert.equal(Value.Check(finalize.parameters, emptyDiscardPaths), true);
+    assert.equal(Value.Check(finalize.parameters, multipleDiscardPaths), true);
+    for (const invalid of [
+      {
+        ...omittedDiscardPaths,
+        discardPaths: ["generated.log", "generated.log"],
+      },
+      { ...omittedDiscardPaths, discardPaths: [42] },
+      { ...omittedDiscardPaths, discardPaths: [""] },
+      {
+        ...omittedDiscardPaths,
+        discardPaths: ["x".repeat(4 * 1024 + 1)],
+      },
+      {
+        ...omittedDiscardPaths,
+        discardPaths: Array.from(
+          { length: 512 + 1 },
+          (_, index) => `discard-${index}`,
+        ),
+      },
+      { ...emptyDiscardPaths, unexpected: true },
+    ]) {
+      assert.equal(Value.Check(finalize.parameters, invalid), false);
+    }
+
+    const omittedResult = await finalize.execute(
+      "feature-finalizer-finalize-omitted-discard-paths",
+      omittedDiscardPaths,
       undefined,
       undefined,
       { cwd: fixture.cwd } as unknown as ExtensionContext,
     );
-    assert.equal(result.terminate, true);
-    assert.equal(finalized, 1);
+    const emptyResult = await finalize.execute(
+      "feature-finalizer-finalize-empty-discard-paths",
+      emptyDiscardPaths,
+      undefined,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
+    );
+    const multipleResult = await finalize.execute(
+      "feature-finalizer-finalize-multiple-discard-paths",
+      multipleDiscardPaths,
+      undefined,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
+    );
+    assert.equal(omittedResult.terminate, true);
+    assert.equal(emptyResult.terminate, true);
+    assert.equal(multipleResult.terminate, true);
+    assert.deepEqual(finalizeRequests, [
+      omittedDiscardPaths,
+      emptyDiscardPaths,
+      multipleDiscardPaths,
+    ]);
+    assert.equal(finalized, 3);
   } finally {
     await session?.dispose();
     fauxProvider?.unregister();

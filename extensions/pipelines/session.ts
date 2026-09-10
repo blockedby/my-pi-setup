@@ -459,12 +459,18 @@ export function createFeatureTaskHostTools(
       name: "pipeline_task_finalize",
       label: "Finalize Feature Task",
       description:
-        "Ask the controller to create or amend this task's one logical commit, run all required checks, and validate either the commit or an explicit no-change result.",
+        "Ask the controller to create or amend this task's one logical commit and run all required checks. Inspect preparationChanges and the diff first: explicitly include each preparation path in commitPaths or reject it with discardPaths. Omitted preparation paths reject finalization without implicit cleanup. An empty commitPaths list alone never discards preparation output.",
       parameters: Type.Object(
         {
           commitPaths: Type.Array(
             Type.String({ minLength: 1, maxLength: 4 * 1024 }),
             { maxItems: 512 },
+          ),
+          discardPaths: Type.Optional(
+            Type.Array(Type.String({ minLength: 1, maxLength: 4 * 1024 }), {
+              maxItems: 512,
+              uniqueItems: true,
+            }),
           ),
           summary: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
         },

@@ -56,6 +56,7 @@ export interface FeatureBranchSnapshot {
     readonly attempts: number;
     readonly complete: boolean;
     readonly baselinePaths: ReadonlyArray<string>;
+    readonly changes?: ReadonlyArray<FeatureTrackedResidualState>;
     readonly commands?: ReadonlyArray<FeaturePreparationCommandResult>;
     readonly error?: string;
   };
@@ -186,6 +187,7 @@ interface MutableBranchSnapshot {
     attempts: number;
     complete: boolean;
     baselinePaths: string[];
+    changes: FeatureTrackedResidualState[];
     commands: FeaturePreparationCommandResult[];
     error?: string;
   };
@@ -292,6 +294,7 @@ function branchSnapshot(
       attempts: branch.preparationAttempts,
       complete: branch.prepared,
       baselinePaths: [...branch.preparationBaseline],
+      changes: [...(branch.preparationChanges ?? [])],
       commands: [],
     },
     taskIds: [],
@@ -304,6 +307,7 @@ function copyBranch(branch: MutableBranchSnapshot): FeatureBranchSnapshot {
     preparation: {
       ...branch.preparation,
       baselinePaths: [...branch.preparation.baselinePaths],
+      changes: branch.preparation.changes.map((change) => ({ ...change })),
       commands: branch.preparation.commands.map((command) => ({ ...command })),
     },
     taskIds: [...branch.taskIds],
@@ -479,6 +483,9 @@ export async function executeFeatureGraph(
     mutable.preparation.attempts = current.preparationAttempts;
     mutable.preparation.complete = current.prepared;
     mutable.preparation.baselinePaths = [...current.preparationBaseline];
+    mutable.preparation.changes = (current.preparationChanges ?? []).map(
+      (change) => ({ ...change }),
+    );
     publish();
   };
 
