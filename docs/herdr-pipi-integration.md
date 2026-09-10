@@ -6,7 +6,7 @@ Pipi reports one status for its terminal pane:
 - **Working** while the root agent, a direct subagent, or a pipeline is active.
 - **Idle** when neither work nor a prompt remains.
 
-Answering or dismissing a prompt restores the aggregate status, not necessarily idle. Headless child sessions do not create panes or report the parent's state.
+Answering or dismissing a prompt restores the aggregate status, not necessarily idle. Herdr 0.8 may display a completed idle report as **done** in an unfocused pane. Headless child sessions do not create panes or report the parent's state.
 
 ## Installation and ownership
 
