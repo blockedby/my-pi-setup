@@ -36,6 +36,7 @@ export interface FeatureTaskBranch {
   readonly preparationAttempts: number;
   readonly prepared: boolean;
   readonly preparationBaseline: ReadonlyArray<string>;
+  readonly preparationChanges?: ReadonlyArray<FeatureTrackedResidualState>;
   readonly trackedResidualPaths: ReadonlyArray<string>;
   readonly trackedResiduals: ReadonlyArray<FeatureTrackedResidualState>;
 }
@@ -83,6 +84,11 @@ export interface FeatureTaskGitTarget {
     request?: FeatureDiffPageRequest,
   ): FeatureTaskGitDiff;
   trackedResidualPaths?(): ReadonlyArray<string>;
+  preparationChanges?(): ReadonlyArray<FeatureTrackedResidualState>;
+  prepareFinalization?(
+    commitPaths: ReadonlyArray<string>,
+    discardPaths: ReadonlyArray<string>,
+  ): void;
   assertRecordedResidualsUnchanged?(
     excludedPaths?: ReadonlyArray<string>,
   ): void;
@@ -165,6 +171,7 @@ interface MutableBranch {
   preparationAttempts: number;
   prepared: boolean;
   preparationBaseline: string[];
+  preparationChanges: Map<string, string>;
   trackedResiduals: Map<string, string>;
   removed: boolean;
   refRemoved: boolean;
@@ -174,6 +181,7 @@ interface MutableBranch {
 interface TrackedResidualOwner {
   readonly id: string;
   readonly worktree: string;
+  readonly preparationChanges?: ReadonlyMap<string, string>;
   trackedResiduals: Map<string, string>;
 }
 
@@ -322,7 +330,18 @@ function changedBetween(cwd: string, from: string, to: string) {
   );
 }
 
+function preparationChangeSnapshots(
+  preparationChanges: ReadonlyMap<string, string>,
+) {
+  return [...preparationChanges]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([path, fingerprint]) => ({ path, fingerprint }));
+}
+
 function toSnapshot(branch: MutableBranch): FeatureTaskBranch {
+  const preparationChanges = preparationChangeSnapshots(
+    branch.preparationChanges,
+  );
   return {
     id: branch.id,
     ...(branch.parentId ? { parentId: branch.parentId } : {}),
@@ -336,6 +355,7 @@ function toSnapshot(branch: MutableBranch): FeatureTaskBranch {
     preparationAttempts: branch.preparationAttempts,
     prepared: branch.prepared,
     preparationBaseline: [...branch.preparationBaseline],
+    ...(preparationChanges.length > 0 ? { preparationChanges } : {}),
     trackedResidualPaths: [...branch.trackedResiduals.keys()].sort(),
     trackedResiduals: [...branch.trackedResiduals]
       .sort(([left], [right]) => left.localeCompare(right))
@@ -353,34 +373,57 @@ function safeSlug(value: string) {
   );
 }
 
-function assertSafeCommitPaths(
+function assertSafePathList(
   cwd: string,
-  commitPaths: ReadonlyArray<string>,
-  changedPaths: ReadonlySet<string>,
+  paths: ReadonlyArray<string>,
+  label: string,
 ) {
-  if (commitPaths.length > PATH_LIMIT) {
-    throw new Error(`commitPaths exceeds the ${PATH_LIMIT}-path limit.`);
+  if (paths.length > PATH_LIMIT) {
+    throw new Error(`${label} exceeds the ${PATH_LIMIT}-path limit.`);
   }
-  const unique = new Set(commitPaths);
-  if (unique.size !== commitPaths.length) {
-    throw new Error("commitPaths must contain unique paths.");
+  const unique = new Set(paths);
+  if (unique.size !== paths.length) {
+    throw new Error(`${label} must contain unique paths.`);
   }
-  for (const filePath of commitPaths) {
+  for (const filePath of paths) {
     if (
       Buffer.byteLength(filePath, "utf8") > PATH_BYTES_LIMIT ||
       !isSafeRepositoryRelativePath(filePath) ||
       filePath.split("/").includes(".git")
     ) {
       throw new Error(
-        `commitPaths contains an unsafe repository path: ${JSON.stringify(filePath)}.`,
+        `${label} contains an unsafe repository path: ${JSON.stringify(filePath)}.`,
       );
     }
+    assertNoEscapingSymlink(cwd, filePath);
+  }
+}
+
+function assertSafeCommitPaths(
+  cwd: string,
+  commitPaths: ReadonlyArray<string>,
+  changedPaths: ReadonlySet<string>,
+) {
+  assertSafePathList(cwd, commitPaths, "commitPaths");
+  for (const filePath of commitPaths) {
     if (!changedPaths.has(filePath)) {
       throw new Error(
         `commitPaths path is not an exact changed, added, or deleted path: ${JSON.stringify(filePath)}.`,
       );
     }
-    assertNoEscapingSymlink(cwd, filePath);
+  }
+}
+
+function assertDisjointPathLists(
+  commitPaths: ReadonlyArray<string>,
+  discardPaths: ReadonlyArray<string>,
+) {
+  const discard = new Set(discardPaths);
+  const overlap = commitPaths.filter((filePath) => discard.has(filePath));
+  if (overlap.length > 0) {
+    throw new Error(
+      `commitPaths and discardPaths must not overlap: ${overlap.join(", ")}.`,
+    );
   }
 }
 
@@ -425,6 +468,20 @@ function assertNoEscapingSymlink(cwd: string, filePath: string) {
       const metadata = entry?.split("\t")[0]?.split(" ");
       if (metadata?.[0] === "120000" && metadata[2]) {
         link = gitRaw(root, ["cat-file", "blob", metadata[2]]);
+      }
+      if (link === undefined) {
+        const indexEntry = gitRaw(root, [
+          "--literal-pathspecs",
+          "ls-files",
+          "--stage",
+          "-z",
+          "--",
+          relative,
+        ]).split("\0")[0];
+        const indexMetadata = indexEntry?.split("\t")[0]?.split(" ");
+        if (indexMetadata?.[0] === "120000" && indexMetadata[1]) {
+          link = gitRaw(root, ["cat-file", "blob", indexMetadata[1]]);
+        }
       }
     }
     if (link === undefined) continue;
@@ -628,11 +685,14 @@ function trackedPathFingerprint(cwd: string, filePath: string) {
 }
 
 function recordTrackedResiduals(branch: TrackedResidualOwner) {
+  const preparationPaths = branch.preparationChanges;
   branch.trackedResiduals = new Map(
-    currentTrackedPaths(branch.worktree).map((filePath) => [
-      filePath,
-      trackedPathFingerprint(branch.worktree, filePath),
-    ]),
+    currentTrackedPaths(branch.worktree)
+      .filter((filePath) => !preparationPaths?.has(filePath))
+      .map((filePath) => [
+        filePath,
+        trackedPathFingerprint(branch.worktree, filePath),
+      ]),
   );
 }
 
@@ -658,14 +718,231 @@ function assertRecordedResidualsUnchanged(
 
 function verifyTrackedResiduals(branch: TrackedResidualOwner) {
   const actual = assertRecordedResidualsUnchanged(branch);
+  const preparationPaths = branch.preparationChanges;
   const unexpected = [...actual].filter(
-    (filePath) => !branch.trackedResiduals.has(filePath),
+    (filePath) =>
+      !preparationPaths?.has(filePath) &&
+      !branch.trackedResiduals.has(filePath),
   );
   if (unexpected.length > 0) {
     throw new Error(
       `Feature graph tracked drift exists on branch ${branch.id}: ${unexpected.join(", ")}.`,
     );
   }
+}
+
+function assertPreparationChangesSelected(
+  branch: MutableBranch,
+  commitPaths: ReadonlyArray<string>,
+) {
+  const selected = new Set(commitPaths);
+  const unresolved = [...branch.preparationChanges.keys()]
+    .filter((filePath) => !selected.has(filePath))
+    .sort();
+  if (unresolved.length > 0) {
+    throw new Error(
+      `Preparation changes must be explicitly selected or discarded before finalization: ${unresolved.join(", ")}.`,
+    );
+  }
+  return new Set(
+    [...branch.preparationChanges.keys()].filter((filePath) =>
+      selected.has(filePath),
+    ),
+  );
+}
+
+function assertPreparationDisposition(
+  branch: MutableBranch,
+  commitPaths: ReadonlyArray<string>,
+  discardPaths: ReadonlyArray<string>,
+) {
+  const preparationPaths = new Set(branch.preparationChanges.keys());
+  const unknownDiscardPaths = discardPaths.filter(
+    (filePath) => !preparationPaths.has(filePath),
+  );
+  if (unknownDiscardPaths.length > 0) {
+    throw new Error(
+      `discardPaths contains paths without pending preparation ownership: ${unknownDiscardPaths.join(", ")}.`,
+    );
+  }
+  const selected = new Set(commitPaths);
+  const discarded = new Set(discardPaths);
+  const unresolved = [...preparationPaths]
+    .filter((filePath) => !selected.has(filePath) && !discarded.has(filePath))
+    .sort();
+  if (unresolved.length > 0) {
+    throw new Error(
+      `Preparation changes must be explicitly selected or discarded before finalization: ${unresolved.join(", ")}.`,
+    );
+  }
+  return {
+    selected: new Set(
+      [...preparationPaths].filter((filePath) => selected.has(filePath)),
+    ),
+    discarded: new Set(discardPaths),
+  };
+}
+
+function pathTrackedAtCommit(cwd: string, commit: string, filePath: string) {
+  return (
+    requireGitRaw(
+      cwd,
+      ["--literal-pathspecs", "ls-tree", "-r", "-z", commit, "--", filePath],
+      `Unable to inspect preparation base for ${filePath}`,
+    ).length > 0
+  );
+}
+
+function pathInIndex(cwd: string, filePath: string) {
+  return (
+    requireGitRaw(
+      cwd,
+      ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", filePath],
+      `Unable to inspect preparation index for ${filePath}`,
+    ).length > 0
+  );
+}
+
+function exactPathStats(cwd: string, filePath: string) {
+  try {
+    return fs.lstatSync(path.resolve(cwd, filePath));
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    ) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function assertExactPreparationRemovalSafe(cwd: string, filePath: string) {
+  const absolute = path.resolve(cwd, filePath);
+  const root = canonical(cwd);
+  if (!isInside(absolute, root) || absolute === root) {
+    throw new Error(
+      `Refusing preparation discard outside worktree: ${filePath}.`,
+    );
+  }
+  const stats = exactPathStats(cwd, filePath);
+  if (!stats) return;
+  if (!isInside(canonical(path.dirname(absolute)), root)) {
+    throw new Error(
+      `Refusing preparation discard through symlink: ${filePath}.`,
+    );
+  }
+  if (stats.isDirectory() && !stats.isSymbolicLink()) {
+    if (fs.readdirSync(absolute).length > 0) {
+      throw new Error(
+        `Refusing preparation discard of non-empty directory: ${filePath}.`,
+      );
+    }
+  }
+}
+
+function removeExactPreparationPath(cwd: string, filePath: string) {
+  assertExactPreparationRemovalSafe(cwd, filePath);
+  const absolute = path.resolve(cwd, filePath);
+  const stats = exactPathStats(cwd, filePath);
+  if (!stats) return;
+  if (stats.isDirectory() && !stats.isSymbolicLink()) fs.rmdirSync(absolute);
+  else fs.unlinkSync(absolute);
+}
+
+function discardPreparationChange(
+  branch: MutableBranch,
+  preparationBase: string,
+  filePath: string,
+) {
+  if (!branch.preparationChanges.has(filePath)) {
+    throw new Error(
+      `discardPaths contains paths without pending preparation ownership: ${filePath}.`,
+    );
+  }
+  const trackedAtBase = pathTrackedAtCommit(
+    branch.worktree,
+    preparationBase,
+    filePath,
+  );
+  if (trackedAtBase) {
+    requireGit(
+      branch.worktree,
+      [
+        "--literal-pathspecs",
+        "restore",
+        `--source=${preparationBase}`,
+        "--staged",
+        "--worktree",
+        "--",
+        filePath,
+      ],
+      `Unable to discard preparation change ${filePath}`,
+    );
+    if (currentTrackedPaths(branch.worktree).includes(filePath)) {
+      throw new Error(
+        `Preparation change remained after discard: ${filePath}.`,
+      );
+    }
+  } else {
+    if (pathInIndex(branch.worktree, filePath)) {
+      requireGit(
+        branch.worktree,
+        ["--literal-pathspecs", "restore", "--staged", "--", filePath],
+        `Unable to unstage preparation addition ${filePath}`,
+      );
+    }
+    removeExactPreparationPath(branch.worktree, filePath);
+    if (
+      pathInIndex(branch.worktree, filePath) ||
+      exactPathStats(branch.worktree, filePath)
+    ) {
+      throw new Error(
+        `Preparation addition remained after discard: ${filePath}.`,
+      );
+    }
+  }
+  branch.preparationChanges.delete(filePath);
+}
+
+function prepareTrackedFinalization(
+  branch: MutableBranch,
+  commitPaths: ReadonlyArray<string>,
+  discardPaths: ReadonlyArray<string>,
+) {
+  if (
+    readBranch(branch.worktree) !== branch.branch ||
+    readHead(branch.worktree) !== branch.head
+  ) {
+    throw new Error(
+      "Task Git branch or HEAD drifted outside controller ownership.",
+    );
+  }
+  const changed = new Set([
+    ...readStaged(branch.worktree),
+    ...readTracked(branch.worktree),
+    ...readConflicts(branch.worktree),
+    ...readUntracked(branch.worktree),
+  ]);
+  assertSafeCommitPaths(branch.worktree, commitPaths, changed);
+  assertSafePathList(branch.worktree, discardPaths, "discardPaths");
+  assertDisjointPathLists(commitPaths, discardPaths);
+  const disposition = assertPreparationDisposition(
+    branch,
+    commitPaths,
+    discardPaths,
+  );
+  const preparationBase = branch.head;
+  for (const filePath of disposition.discarded) {
+    if (!pathTrackedAtCommit(branch.worktree, preparationBase, filePath)) {
+      assertExactPreparationRemovalSafe(branch.worktree, filePath);
+    }
+  }
+  for (const filePath of disposition.discarded) {
+    discardPreparationChange(branch, preparationBase, filePath);
+  }
+  return disposition.selected;
 }
 
 function removeUntrackedPath(
@@ -734,6 +1011,7 @@ function cleanupAfterCommit(
   preparationBaseline: ReadonlyArray<string> = [],
   cleanupEvidence?: CleanupEvidenceSink,
   expectedIdentity?: string,
+  preservedTrackedPaths: ReadonlySet<string> = new Set(),
 ) {
   const warnings: string[] = [];
   const phase = "feature-worktree-finalization";
@@ -742,8 +1020,17 @@ function cleanupAfterCommit(
       (baseline) =>
         filePath === baseline ||
         (baseline.endsWith("/") && filePath.startsWith(baseline)),
+    ) ||
+    [...preservedTrackedPaths].some(
+      (pending) =>
+        filePath === pending ||
+        filePath.startsWith(`${pending}/`) ||
+        (filePath.endsWith("/") &&
+          (pending === filePath.slice(0, -1) || pending.startsWith(filePath))),
     );
-  const tracked = [...new Set([...readStaged(cwd), ...readTracked(cwd)])];
+  const tracked = [
+    ...new Set([...readStaged(cwd), ...readTracked(cwd)]),
+  ].filter((filePath) => !preservedTrackedPaths.has(filePath));
   const trackedRecorders = tracked.map((filePath) => {
     const resource = path.resolve(cwd, filePath);
     const recorder = cleanupRecorder(cleanupEvidence, {
@@ -955,6 +1242,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       preparationBaseline: [
         ...new Set([...readUntracked(workingDir), ...readIgnored(workingDir)]),
       ],
+      preparationChanges: new Map(),
       trackedResiduals: new Map(),
       removed: false,
       refRemoved: false,
@@ -995,6 +1283,15 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       inspect: (baseCommit, maxBytes, request) =>
         this.inspect(branchId, baseCommit, maxBytes, request),
       trackedResidualPaths: () => [...branch.trackedResiduals.keys()].sort(),
+      preparationChanges: () =>
+        preparationChangeSnapshots(branch.preparationChanges),
+      prepareFinalization: (commitPaths, discardPaths) => {
+        prepareTrackedFinalization(
+          this.mutable(branchId),
+          commitPaths,
+          discardPaths,
+        );
+      },
       assertRecordedResidualsUnchanged: (excludedPaths) =>
         assertRecordedResidualsUnchanged(branch, new Set(excludedPaths ?? [])),
       commit: (baseCommit, commitPaths, message) =>
@@ -1081,6 +1378,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       preparationAttempts: 0,
       prepared: false,
       preparationBaseline: [],
+      preparationChanges: new Map(),
       trackedResiduals: new Map(),
       removed: false,
       refRemoved: false,
@@ -1099,14 +1397,8 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
 
   recordPreparationBaseline(branchId: string) {
     const branch = this.mutable(branchId);
-    if (
-      readStaged(branch.worktree).length > 0 ||
-      readTracked(branch.worktree).length > 0
-    ) {
-      throw new Error(
-        `Child worktree preparation changed tracked files on ${branch.id}.`,
-      );
-    }
+    if (!branch.owned)
+      throw new Error("Root worktree preparation is caller-owned.");
     if (
       readHead(branch.worktree) !== branch.head ||
       readBranch(branch.worktree) !== branch.branch
@@ -1115,12 +1407,33 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
         `Child worktree preparation changed Git state on ${branch.id}.`,
       );
     }
-    branch.preparationBaseline = [
+    const conflicts = readConflicts(branch.worktree);
+    if (conflicts.length > 0) {
+      throw new Error(
+        `Child worktree preparation left conflicts on ${branch.id}: ${conflicts.join(", ")}.`,
+      );
+    }
+    const tracked = currentTrackedPaths(branch.worktree);
+    assertSafePathList(branch.worktree, tracked, "preparation tracked paths");
+    if (branch.prepared) {
+      throw new Error(
+        `Preparation baseline for ${branch.id} has already been recorded.`,
+      );
+    }
+    const preparationBaseline = [
       ...new Set([
         ...readUntracked(branch.worktree),
         ...readIgnored(branch.worktree),
       ]),
     ].sort();
+    const preparationChanges = new Map(
+      tracked.map((filePath) => [
+        filePath,
+        trackedPathFingerprint(branch.worktree, filePath),
+      ]),
+    );
+    branch.preparationBaseline = preparationBaseline;
+    branch.preparationChanges = preparationChanges;
     branch.prepared = true;
     return toSnapshot(branch);
   }
@@ -1167,6 +1480,10 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       ...readUntracked(branch.worktree),
     ]);
     assertSafeCommitPaths(branch.worktree, commitPaths, changed);
+    const selectedPreparationPaths = assertPreparationChangesSelected(
+      branch,
+      commitPaths,
+    );
     const selected = new Set(commitPaths);
     assertRecordedResidualsUnchanged(branch, selected);
     const inheritedStaged = readStaged(branch.worktree).filter(
@@ -1220,11 +1537,16 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
     const commit = readHead(branch.worktree);
     const changedPaths = changedBetween(branch.worktree, baseCommit, commit);
     branch.head = commit;
+    for (const filePath of selectedPreparationPaths) {
+      if (changedPaths.includes(filePath))
+        branch.preparationChanges.delete(filePath);
+    }
     const cleanup = cleanupAfterCommit(
       branch.worktree,
       branch.preparationBaseline,
       this.cleanupEvidence,
       commit,
+      new Set(branch.preparationChanges.keys()),
     );
     recordTrackedResiduals(branch);
     return { commit, changedPaths, ...cleanup };
@@ -1282,6 +1604,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
 
   cherryPick(parentBranchId: string, sourceCommit: string) {
     const parent = this.mutable(parentBranchId);
+    assertPreparationChangesSelected(parent, []);
     this.verify(parentBranchId);
     try {
       requireGit(
@@ -1336,6 +1659,10 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       ...readUntracked(parent.worktree),
     ]);
     assertSafeCommitPaths(parent.worktree, commitPaths, changed);
+    const selectedPreparationPaths = assertPreparationChangesSelected(
+      parent,
+      commitPaths,
+    );
     if (commitPaths.length > 0) {
       requireGit(
         parent.worktree,
@@ -1372,11 +1699,16 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
         "Unable to inspect continued cherry-pick",
       ),
     );
+    for (const filePath of selectedPreparationPaths) {
+      if (changedPaths.includes(filePath))
+        parent.preparationChanges.delete(filePath);
+    }
     const cleanup = cleanupAfterCommit(
       parent.worktree,
       parent.preparationBaseline,
       this.cleanupEvidence,
       commit,
+      new Set(parent.preparationChanges.keys()),
     );
     recordTrackedResiduals(parent);
     return {
@@ -1739,6 +2071,21 @@ export function createFeatureRootTaskGitTarget(
     }),
     trackedResidualPaths: () =>
       [...residualOwner.trackedResiduals.keys()].sort(),
+    preparationChanges: () => [],
+    prepareFinalization: (commitPaths, discardPaths) => {
+      const changed = new Set([
+        ...readStaged(worktree),
+        ...readTracked(worktree),
+        ...readConflicts(worktree),
+        ...readUntracked(worktree),
+      ]);
+      assertSafeCommitPaths(worktree, commitPaths, changed);
+      assertSafePathList(worktree, discardPaths, "discardPaths");
+      assertDisjointPathLists(commitPaths, discardPaths);
+      if (discardPaths.length > 0) {
+        throw new Error("Final review has no preparation changes to discard.");
+      }
+    },
     assertRecordedResidualsUnchanged: (excludedPaths) =>
       assertRecordedResidualsUnchanged(
         residualOwner,

@@ -32,6 +32,17 @@ function evidenceCapture() {
   };
 }
 
+function gitState(cwd: string) {
+  return {
+    branch: git(cwd, ["branch", "--show-current"]),
+    head: git(cwd, ["rev-parse", "HEAD"]),
+    index: git(cwd, ["ls-files", "--stage"]),
+    stagedDiff: git(cwd, ["diff", "--cached", "--binary"]),
+    worktreeDiff: git(cwd, ["diff", "--binary"]),
+    status: git(cwd, ["status", "--short", "--untracked-files=all"]),
+  };
+}
+
 function fixture({
   trackedExternalSymlink = false,
 }: {
@@ -51,6 +62,10 @@ function fixture({
   fs.writeFileSync(path.join(primary, ".gitignore"), "node_modules/\n");
   fs.writeFileSync(path.join(primary, "selected.txt"), "base\n");
   fs.writeFileSync(path.join(primary, "amendment.txt"), "base\n");
+  fs.writeFileSync(
+    path.join(primary, "build-identity.json"),
+    '{"identity":"base"}\n',
+  );
   if (trackedExternalSymlink) {
     fs.symlinkSync(external, path.join(primary, "external-link"));
   }
@@ -526,6 +541,607 @@ test("caller and child preparation baselines survive commit and amend", () => {
       "child-cache.tmp",
       "node_modules/",
     ]);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preparation baselines retain untracked outputs and report tracked changes", () => {
+  const repo = fixture();
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "feature-preparation-tracked-f1a2b3c4",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "tracked-preparation");
+    lifecycle.notePreparationAttempt(child.id);
+
+    fs.writeFileSync(
+      path.join(child.worktree, "child-cache.tmp"),
+      "preparation cache\n",
+    );
+    fs.mkdirSync(path.join(child.worktree, "node_modules", ".bin"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(child.worktree, "node_modules", ".bin", "tool"),
+      "tool\n",
+    );
+    fs.writeFileSync(
+      path.join(child.worktree, "build-identity.json"),
+      '{"identity":"prepared"}\n',
+    );
+    fs.writeFileSync(
+      path.join(child.worktree, "amendment.txt"),
+      "preparation update\n",
+    );
+    fs.writeFileSync(
+      path.join(child.worktree, "preparation-added.txt"),
+      "staged preparation output\n",
+    );
+    git(child.worktree, [
+      "add",
+      "--",
+      "amendment.txt",
+      "preparation-added.txt",
+    ]);
+
+    const prepared = lifecycle.recordPreparationBaseline(child.id);
+    assert.equal(prepared.prepared, true);
+    assert.deepEqual(prepared.preparationBaseline, [
+      "child-cache.tmp",
+      "node_modules/",
+    ]);
+    assert.ok(prepared.preparationChanges);
+    assert.deepEqual(
+      prepared.preparationChanges.map(({ path: filePath }) => filePath),
+      ["amendment.txt", "build-identity.json", "preparation-added.txt"],
+    );
+    assert.equal(
+      prepared.preparationChanges.every(
+        ({ fingerprint }) => fingerprint.length > 0,
+      ),
+      true,
+    );
+
+    const target = lifecycle.target(child.id);
+    assert.deepEqual(target.preparationChanges!(), prepared.preparationChanges);
+    assert.deepEqual(
+      lifecycle.branch(child.id).preparationChanges,
+      prepared.preparationChanges,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preparation finalization rejects omissions and invalid selections without mutation", () => {
+  const repo = fixture();
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "feature-preparation-validation-a2b3c4d5",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "preparation-validation");
+    lifecycle.notePreparationAttempt(child.id);
+    fs.writeFileSync(
+      path.join(child.worktree, "build-identity.json"),
+      '{"identity":"prepared"}\n',
+    );
+    fs.writeFileSync(
+      path.join(child.worktree, "amendment.txt"),
+      "staged preparation update\n",
+    );
+    fs.writeFileSync(
+      path.join(child.worktree, "preparation-added.txt"),
+      "staged preparation output\n",
+    );
+    git(child.worktree, [
+      "add",
+      "--",
+      "amendment.txt",
+      "preparation-added.txt",
+    ]);
+    lifecycle.recordPreparationBaseline(child.id);
+
+    const target = lifecycle.target(child.id);
+    const pendingPaths = target.preparationChanges!()
+      .map(({ path: filePath }) => filePath)
+      .sort();
+    const before = gitState(child.worktree);
+    const rejectWithoutMutation = (
+      commitPaths: ReadonlyArray<string>,
+      discardPaths: ReadonlyArray<string>,
+    ) => {
+      assert.throws(() =>
+        target.prepareFinalization!(commitPaths, discardPaths),
+      );
+      assert.deepEqual(gitState(child.worktree), before);
+      assert.deepEqual(
+        target.preparationChanges!()
+          .map(({ path: filePath }) => filePath)
+          .sort(),
+        pendingPaths,
+      );
+    };
+
+    rejectWithoutMutation(["build-identity.json"], ["amendment.txt"]);
+    rejectWithoutMutation([], []);
+    rejectWithoutMutation(
+      ["build-identity.json", "build-identity.json"],
+      ["amendment.txt", "preparation-added.txt"],
+    );
+    rejectWithoutMutation(
+      ["build-identity.json"],
+      ["build-identity.json", "amendment.txt", "preparation-added.txt"],
+    );
+    rejectWithoutMutation(
+      [
+        "build-identity.json",
+        "amendment.txt",
+        "preparation-added.txt",
+        "../outside",
+      ],
+      [],
+    );
+    rejectWithoutMutation(
+      ["build-identity.json", "amendment.txt", "preparation-added.txt"],
+      ["selected.txt"],
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preparation changes require explicit selection before a task commit", () => {
+  const repo = fixture();
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "feature-preparation-commit-b3c4d5e6",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "preparation-commit");
+    lifecycle.notePreparationAttempt(child.id);
+    fs.writeFileSync(
+      path.join(child.worktree, "build-identity.json"),
+      '{"identity":"prepared"}\n',
+    );
+    lifecycle.recordPreparationBaseline(child.id);
+    fs.writeFileSync(path.join(child.worktree, "selected.txt"), "task\n");
+
+    const target = lifecycle.target(child.id);
+    const base = child.head;
+    const before = gitState(child.worktree);
+    assert.throws(() =>
+      target.commit(base, ["selected.txt"], "bypass preparation selection"),
+    );
+    assert.deepEqual(gitState(child.worktree), before);
+    assert.deepEqual(
+      target.preparationChanges!().map(({ path: filePath }) => filePath),
+      ["build-identity.json"],
+    );
+
+    target.prepareFinalization!(["build-identity.json", "selected.txt"], []);
+    assert.deepEqual(
+      target.preparationChanges!().map(({ path: filePath }) => filePath),
+      ["build-identity.json"],
+    );
+    const result = target.commit(
+      base,
+      ["build-identity.json", "selected.txt"],
+      "commit selected preparation output",
+    );
+
+    assert.deepEqual(result.changedPaths, [
+      "build-identity.json",
+      "selected.txt",
+    ]);
+    assert.deepEqual(
+      lines(
+        git(child.worktree, [
+          "show",
+          "--format=",
+          "--name-only",
+          result.commit,
+        ]),
+      ),
+      ["build-identity.json", "selected.txt"],
+    );
+    assert.deepEqual(target.preparationChanges!(), []);
+    assert.deepEqual(lifecycle.branch(child.id).preparationChanges ?? [], []);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preparation fingerprints stay as provenance when selecting edited output", () => {
+  const repo = fixture();
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "feature-preparation-edited-output-c5d6e7f8",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "edited-preparation");
+    const preparationPath = "build-identity.json";
+    lifecycle.notePreparationAttempt(child.id);
+    fs.writeFileSync(
+      path.join(child.worktree, preparationPath),
+      '{"identity":"generated"}\n',
+    );
+    lifecycle.recordPreparationBaseline(child.id);
+
+    const target = lifecycle.target(child.id);
+    const pendingBeforeAgentEdit = target.preparationChanges!();
+    assert.deepEqual(
+      pendingBeforeAgentEdit.map(({ path: filePath }) => filePath),
+      [preparationPath],
+    );
+
+    fs.writeFileSync(
+      path.join(child.worktree, preparationPath),
+      '{"identity":"rebuilt-by-agent"}\n',
+    );
+    git(child.worktree, ["add", "--", preparationPath]);
+
+    target.prepareFinalization!([preparationPath], []);
+    assert.deepEqual(target.preparationChanges!(), pendingBeforeAgentEdit);
+    const result = target.commit(
+      child.head,
+      [preparationPath],
+      "select edited preparation output",
+    );
+
+    assert.deepEqual(result.changedPaths, [preparationPath]);
+    assert.equal(
+      git(child.worktree, ["show", `${result.commit}:${preparationPath}`]),
+      '{"identity":"rebuilt-by-agent"}',
+    );
+    assert.deepEqual(target.preparationChanges!(), []);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preparation discard restores the base path without touching unrelated edits", () => {
+  const repo = fixture();
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "feature-preparation-edited-discard-d6e7f8a9",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild(
+      "root",
+      1,
+      "discard-edited-preparation",
+    );
+    const preparationPath = "build-identity.json";
+    const unrelatedPath = "selected.txt";
+    lifecycle.notePreparationAttempt(child.id);
+    fs.writeFileSync(
+      path.join(child.worktree, preparationPath),
+      '{"identity":"generated"}\n',
+    );
+    lifecycle.recordPreparationBaseline(child.id);
+
+    const target = lifecycle.target(child.id);
+    const pendingBeforeAgentEdit = target.preparationChanges!();
+    fs.writeFileSync(
+      path.join(child.worktree, preparationPath),
+      '{"identity":"edited-after-generation"}\n',
+    );
+    git(child.worktree, ["add", "--", preparationPath]);
+    fs.writeFileSync(
+      path.join(child.worktree, unrelatedPath),
+      "unrelated edit\n",
+    );
+    git(child.worktree, ["add", "--", unrelatedPath]);
+
+    const beforeOmittedDiscard = gitState(child.worktree);
+    assert.throws(() => target.prepareFinalization!([], []));
+    assert.deepEqual(gitState(child.worktree), beforeOmittedDiscard);
+    assert.deepEqual(target.preparationChanges!(), pendingBeforeAgentEdit);
+
+    target.prepareFinalization!([], [preparationPath]);
+    assert.equal(
+      fs.readFileSync(path.join(child.worktree, preparationPath), "utf8"),
+      '{"identity":"base"}\n',
+    );
+    assert.equal(
+      fs.readFileSync(path.join(child.worktree, unrelatedPath), "utf8"),
+      "unrelated edit\n",
+    );
+    assert.equal(
+      git(child.worktree, [
+        "diff",
+        "--cached",
+        "--name-only",
+        "--",
+        preparationPath,
+      ]),
+      "",
+    );
+    assert.equal(
+      git(child.worktree, ["diff", "--name-only", "--", preparationPath]),
+      "",
+    );
+    assert.equal(
+      git(child.worktree, ["diff", "--cached", "--name-only"]),
+      unrelatedPath,
+    );
+    assert.deepEqual(target.preparationChanges!(), []);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("explicit empty commit selection discards only preparation changes", () => {
+  const repo = fixture();
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "feature-preparation-discard-c4d5e6f7",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "preparation-discard");
+    lifecycle.notePreparationAttempt(child.id);
+    fs.writeFileSync(
+      path.join(child.worktree, "child-cache.tmp"),
+      "preparation cache\n",
+    );
+    fs.mkdirSync(path.join(child.worktree, "node_modules", "nested"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(child.worktree, "node_modules", "nested", "one.js"),
+      "one\n",
+    );
+    fs.writeFileSync(
+      path.join(child.worktree, "build-identity.json"),
+      '{"identity":"prepared"}\n',
+    );
+    fs.writeFileSync(
+      path.join(child.worktree, "amendment.txt"),
+      "staged preparation update\n",
+    );
+    fs.writeFileSync(
+      path.join(child.worktree, "preparation-added.txt"),
+      "staged preparation output\n",
+    );
+    git(child.worktree, [
+      "add",
+      "--",
+      "amendment.txt",
+      "preparation-added.txt",
+    ]);
+    lifecycle.recordPreparationBaseline(child.id);
+    fs.writeFileSync(
+      path.join(child.worktree, "unrelated-after-preparation.txt"),
+      "keep this file\n",
+    );
+
+    const target = lifecycle.target(child.id);
+    target.prepareFinalization!(
+      [],
+      ["amendment.txt", "build-identity.json", "preparation-added.txt"],
+    );
+
+    assert.equal(
+      fs.readFileSync(path.join(child.worktree, "build-identity.json"), "utf8"),
+      '{"identity":"base"}\n',
+    );
+    assert.equal(
+      fs.readFileSync(path.join(child.worktree, "amendment.txt"), "utf8"),
+      "base\n",
+    );
+    assert.equal(
+      fs.existsSync(path.join(child.worktree, "preparation-added.txt")),
+      false,
+    );
+    assert.equal(
+      fs.existsSync(path.join(child.worktree, "child-cache.tmp")),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(
+        path.join(child.worktree, "node_modules", "nested", "one.js"),
+      ),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(
+        path.join(child.worktree, "unrelated-after-preparation.txt"),
+      ),
+      true,
+    );
+    assert.equal(git(child.worktree, ["diff", "--cached", "--name-only"]), "");
+    assert.equal(git(child.worktree, ["rev-parse", "HEAD"]), child.head);
+    assert.deepEqual(target.preparationChanges!(), []);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("mixed preparation commit and discard clears pending paths after the commit", () => {
+  const repo = fixture();
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "feature-preparation-mixed-d5e6f7a8",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "preparation-mixed");
+    lifecycle.notePreparationAttempt(child.id);
+    fs.writeFileSync(
+      path.join(child.worktree, "build-identity.json"),
+      '{"identity":"prepared"}\n',
+    );
+    fs.writeFileSync(
+      path.join(child.worktree, "preparation-added.txt"),
+      "discard this preparation output\n",
+    );
+    git(child.worktree, ["add", "--", "preparation-added.txt"]);
+    lifecycle.recordPreparationBaseline(child.id);
+    fs.writeFileSync(path.join(child.worktree, "selected.txt"), "task\n");
+
+    const target = lifecycle.target(child.id);
+    const base = child.head;
+    target.prepareFinalization!(
+      ["build-identity.json", "selected.txt"],
+      ["preparation-added.txt"],
+    );
+    assert.equal(
+      fs.readFileSync(path.join(child.worktree, "build-identity.json"), "utf8"),
+      '{"identity":"prepared"}\n',
+    );
+    assert.equal(
+      fs.existsSync(path.join(child.worktree, "preparation-added.txt")),
+      false,
+    );
+    assert.deepEqual(
+      target.preparationChanges!().map(({ path: filePath }) => filePath),
+      ["build-identity.json"],
+    );
+
+    const result = target.commit(
+      base,
+      ["build-identity.json", "selected.txt"],
+      "commit and discard preparation outputs",
+    );
+    assert.deepEqual(result.changedPaths, [
+      "build-identity.json",
+      "selected.txt",
+    ]);
+    assert.deepEqual(target.preparationChanges!(), []);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("failed preparation commit keeps pending selection for a successful retry", () => {
+  const repo = fixture();
+  const originalPath = process.env.PATH;
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "feature-preparation-retry-e6f7a8b9",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "preparation-retry");
+    lifecycle.notePreparationAttempt(child.id);
+    fs.writeFileSync(
+      path.join(child.worktree, "build-identity.json"),
+      '{"identity":"prepared"}\n',
+    );
+    lifecycle.recordPreparationBaseline(child.id);
+    const target = lifecycle.target(child.id);
+    const base = child.head;
+    target.prepareFinalization!(["build-identity.json"], []);
+
+    const wrapperDirectory = path.join(repo.root, "git-wrapper");
+    const wrapper = path.join(wrapperDirectory, "git");
+    const failedOnce = path.join(wrapperDirectory, "failed-once");
+    const realGit = execFileSync("which", ["git"], {
+      encoding: "utf8",
+    }).trim();
+    const quotedGit = "'" + realGit.replaceAll("'", "'\"'\"'") + "'";
+    fs.mkdirSync(wrapperDirectory);
+    fs.writeFileSync(
+      wrapper,
+      [
+        "#!/bin/sh",
+        'case " $* " in',
+        '  *" commit "*)',
+        '    if [ ! -e "' + failedOnce + '" ]; then',
+        '      : > "' + failedOnce + '"',
+        "      exit 42",
+        "    fi",
+        "    ;;",
+        "esac",
+        "exec " + quotedGit + ' "$@"',
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${wrapperDirectory}${path.delimiter}${originalPath ?? ""}`;
+    assert.throws(() =>
+      target.commit(
+        base,
+        ["build-identity.json"],
+        "retryable preparation commit",
+      ),
+    );
+    process.env.PATH = originalPath;
+
+    assert.equal(git(child.worktree, ["rev-parse", "HEAD"]), base);
+    assert.deepEqual(
+      target.preparationChanges!().map(({ path: filePath }) => filePath),
+      ["build-identity.json"],
+    );
+    const retried = target.commit(
+      base,
+      ["build-identity.json"],
+      "retryable preparation commit",
+    );
+    assert.notEqual(retried.commit, base);
+    assert.deepEqual(target.preparationChanges!(), []);
+  } finally {
+    process.env.PATH = originalPath;
+    repo.cleanup();
+  }
+});
+
+test("successful amend clears a selected preparation change", () => {
+  const repo = fixture();
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "feature-preparation-amend-f7a8b9c0",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "preparation-amend");
+    lifecycle.notePreparationAttempt(child.id);
+    const target = lifecycle.target(child.id);
+    const base = child.head;
+    fs.writeFileSync(path.join(child.worktree, "selected.txt"), "task\n");
+    const provisional = target.commit(
+      base,
+      ["selected.txt"],
+      "provisional task",
+    );
+
+    lifecycle.notePreparationAttempt(child.id);
+    fs.writeFileSync(
+      path.join(child.worktree, "build-identity.json"),
+      '{"identity":"prepared-after-provisional"}\n',
+    );
+    git(child.worktree, ["add", "--", "build-identity.json"]);
+    lifecycle.recordPreparationBaseline(child.id);
+    target.prepareFinalization!(["build-identity.json"], []);
+
+    const beforeOmittedAmend = gitState(child.worktree);
+    assert.throws(() => target.amend(provisional.commit, []));
+    assert.deepEqual(gitState(child.worktree), beforeOmittedAmend);
+    assert.deepEqual(
+      target.preparationChanges!().map(({ path: filePath }) => filePath),
+      ["build-identity.json"],
+    );
+
+    const amended = target.amend(provisional.commit, ["build-identity.json"]);
+    assert.notEqual(amended.commit, provisional.commit);
+    assert.equal(
+      git(child.worktree, ["rev-parse", `${amended.commit}^`]),
+      base,
+    );
+    assert.equal(
+      git(child.worktree, ["rev-list", "--count", `${base}..HEAD`]),
+      "1",
+    );
+    assert.deepEqual(target.preparationChanges!(), []);
   } finally {
     repo.cleanup();
   }
