@@ -18,7 +18,7 @@ export function buildPipelineCommandMessage(
 
 export function registerPipelineCommands(pi: ExtensionAPI) {
   for (const pipeline of PIPELINE_DEFINITION_IDS) {
-    pi.registerCommand(`pipeline:${pipeline}`, {
+    pi.registerCommand(`pipelines:${pipeline}`, {
       description: `Run ${pipeline} with an optional task description`,
       handler: async (args) => {
         pi.sendUserMessage(buildPipelineCommandMessage(pipeline, args), {

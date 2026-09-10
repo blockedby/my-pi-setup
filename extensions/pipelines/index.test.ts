@@ -35,7 +35,7 @@ test("pipeline slash commands dispatch the selected pipeline as a follow-up turn
   assert.deepEqual(
     [...commands.keys()].sort(),
     [
-      ...PIPELINE_DEFINITION_IDS.map((id) => `pipeline:${id}`),
+      ...PIPELINE_DEFINITION_IDS.map((id) => `pipelines:${id}`),
       "pipelines",
     ].sort(),
   );
@@ -43,7 +43,7 @@ test("pipeline slash commands dispatch the selected pipeline as a follow-up turn
     Parameters<ExtensionAPI["registerCommand"]>[1]["handler"]
   >[1];
   for (const pipeline of PIPELINE_DEFINITION_IDS) {
-    const command = commands.get(`pipeline:${pipeline}`);
+    const command = commands.get(`pipelines:${pipeline}`);
     assert.ok(command);
     for (const task of [
       "Add a search field\nKeep keyboard navigation",
