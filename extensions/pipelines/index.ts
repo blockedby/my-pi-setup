@@ -48,6 +48,7 @@ import {
   PIPELINE_CHECK_PARAMETERS,
   PIPELINE_LIST_PARAMETERS,
 } from "./inspection.ts";
+import { createActivityPublisher } from "../herdr-pipi/activity.ts";
 
 export {
   PIPELINE_CANCEL_PARAMETERS,
@@ -262,11 +263,17 @@ export default function pipelines(pi: ExtensionAPI) {
   let controller: PipelineController | undefined;
   let sessionContext: ExtensionContext | undefined;
   let unsubscribeStatus: (() => void) | undefined;
+  let activityPublisher: ReturnType<typeof createActivityPublisher> | undefined;
 
   const updateStatus = () => {
+    const runs = controller?.list() ?? [];
+    activityPublisher?.update(
+      runs
+        .filter((run) => run.status === "starting" || run.status === "running")
+        .map((run) => run.id),
+    );
     const ui = sessionContext?.hasUI ? sessionContext.ui : undefined;
-    if (!ui || !controller) return;
-    const runs = controller.list();
+    if (!ui) return;
     if (runs.length === 0) {
       ui.setStatus("pipelines", undefined);
       return;
@@ -359,6 +366,11 @@ export default function pipelines(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", (_event, ctx) => {
+    activityPublisher?.dispose();
+    activityPublisher =
+      ctx.mode === "tui"
+        ? createActivityPublisher(pi.events, "pipelines")
+        : undefined;
     sessionContext = ctx;
     updateStatus();
   });
@@ -367,6 +379,8 @@ export default function pipelines(pi: ExtensionAPI) {
     sessionContext = undefined;
     unsubscribeStatus?.();
     unsubscribeStatus = undefined;
+    activityPublisher?.dispose();
+    activityPublisher = undefined;
     const closing = controller;
     controller = undefined;
     await closing?.dispose();
