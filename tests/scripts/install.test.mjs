@@ -37,6 +37,11 @@ const repositoryRoot = resolve(
   "../..",
 );
 const installScript = join(repositoryRoot, "scripts", "install.mjs");
+const checkPipiInstallScript = join(
+  repositoryRoot,
+  "scripts",
+  "check-pipi-install.mjs",
+);
 const uninstallScript = join(repositoryRoot, "scripts", "uninstall.mjs");
 const mcpAdapterPackage = (home) =>
   join(home, ".pipi", "agent", "runtime", "node_modules", "pi-mcp-adapter");
@@ -67,6 +72,16 @@ const runtimePiSpec = rootManifest.dependencies[runtimePiPackage];
 const runtimePiVersion = runtimePiSpec.match(/^\^(\d+\.\d+\.\d+)$/)?.[1];
 if (!runtimePiVersion)
   throw new Error(`Unexpected Pi runtime dependency range: ${runtimePiSpec}`);
+const herdrLegacyIntegrationPath = (home) =>
+  join(home, ".pipi", "agent", "extensions", "herdr-agent-state.ts");
+const herdrPipiIntegrationPath = join(
+  repositoryRoot,
+  "extensions",
+  "herdr-pipi",
+  "index.ts",
+);
+const managedHerdrIntegration =
+  "// installed by herdr\n// HERDR_INTEGRATION_ID=pi\n";
 const createFixture = async () => {
   const home = await mkdtemp(join(tmpdir(), "pipi-install-"));
   const fakeBin = join(home, "fake-bin");
@@ -310,27 +325,18 @@ const browserTransactionArtifacts = (browserTarget) =>
     .filter((entry) => entry.startsWith(`${basename(browserTarget)}.`))
     .sort();
 
-const addFakeHerdr = (
-  fixture,
-  { fail = false, writeIntegration = true } = {},
-) => {
+const addFakeHerdr = (fixture, { fail = false } = {}) => {
   const herdrPath = join(fixture.fakeBin, "herdr");
   writeFileSync(
     herdrPath,
     `#!${process.execPath}
-const { appendFileSync, mkdirSync, writeFileSync } = require("node:fs");
-const { dirname, join } = require("node:path");
+const { appendFileSync } = require("node:fs");
 const record = {
   args: process.argv.slice(2),
   agentDir: process.env.PI_CODING_AGENT_DIR,
 };
 appendFileSync(process.env.HERDR_TEST_LOG, JSON.stringify(record) + "\\n");
 if (${JSON.stringify(fail)}) process.exit(23);
-if (${JSON.stringify(writeIntegration)}) {
-  const integrationPath = join(process.env.PI_CODING_AGENT_DIR, "extensions", "herdr-agent-state.ts");
-  mkdirSync(dirname(integrationPath), { recursive: true });
-  writeFileSync(integrationPath, "// fake official Herdr Pi integration\\n");
-}
 `,
   );
   chmodSync(herdrPath, 0o755);
@@ -582,93 +588,254 @@ test("launcher scopes the Pi process hint to Herdr panes", async (t) => {
   assert.equal(insideHerdr.herdrAgent, "pi");
 });
 
-test("install adds the official Pi integration when Herdr is available", async (t) => {
+test("install migrates the managed Herdr reporter and preserves regular Pi reporters", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
-  addFakeHerdr(fixture);
 
-  const first = install(fixture);
-  assert.equal(first.status, 0, first.stderr);
-  const integrationPath = join(
+  const legacyIntegrationPath = herdrLegacyIntegrationPath(fixture.home);
+  const regularReporterPath = join(
     fixture.home,
-    ".pipi",
+    ".pi",
     "agent",
     "extensions",
     "herdr-agent-state.ts",
   );
-  assert.equal(existsSync(integrationPath), true);
-  assert.match(
-    first.stdout,
-    new RegExp(`Herdr Pi integration: ${integrationPath}`),
+  const regularReporter =
+    "// regular Pi reporter; this profile is outside Pipi ownership\n";
+  mkdirSync(dirname(legacyIntegrationPath), { recursive: true });
+  mkdirSync(dirname(regularReporterPath), { recursive: true });
+  writeFileSync(legacyIntegrationPath, managedHerdrIntegration, {
+    mode: 0o640,
+  });
+  writeFileSync(regularReporterPath, regularReporter, { mode: 0o640 });
+
+  const first = install(fixture);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(existsSync(legacyIntegrationPath), false);
+  assert.equal(readFileSync(regularReporterPath, "utf8"), regularReporter);
+  assert.equal(existsSync(herdrPipiIntegrationPath), true);
+  assert.equal(
+    first.stdout.includes(
+      `Herdr Pipi integration: ${herdrPipiIntegrationPath}`,
+    ),
+    true,
   );
+  const firstSettings = readFileSync(
+    join(fixture.home, ".pipi", "agent", "settings.json"),
+    "utf8",
+  );
+  const settings = readJson(
+    join(fixture.home, ".pipi", "agent", "settings.json"),
+  );
+  assert.equal(settings.packages.includes(repositoryRoot), true);
+  assert.equal(settings.packages.includes(herdrPipiIntegrationPath), false);
 
   const second = install(fixture);
   assert.equal(second.status, 0, second.stderr);
-  const records = readFileSync(fixture.herdrLog, "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  assert.deepEqual(records, [
-    {
-      args: ["integration", "install", "pi"],
-      agentDir: join(fixture.home, ".pipi", "agent"),
-    },
-    {
-      args: ["integration", "install", "pi"],
-      agentDir: join(fixture.home, ".pipi", "agent"),
-    },
-  ]);
+  assert.equal(existsSync(legacyIntegrationPath), false);
+  assert.equal(readFileSync(regularReporterPath, "utf8"), regularReporter);
+  assert.equal(
+    readFileSync(join(fixture.home, ".pipi", "agent", "settings.json"), "utf8"),
+    firstSettings,
+  );
+  assert.equal(
+    second.stdout.includes(
+      `Herdr Pipi integration: ${herdrPipiIntegrationPath}`,
+    ),
+    true,
+  );
+  assert.equal(existsSync(fixture.herdrLog), false);
 });
 
-test("install skips the optional integration when Herdr is unavailable", async (t) => {
+test("install never invokes a failing Herdr CLI", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  addFakeHerdr(fixture, { fail: true });
+
+  const legacyIntegrationPath = herdrLegacyIntegrationPath(fixture.home);
+  mkdirSync(dirname(legacyIntegrationPath), { recursive: true });
+  writeFileSync(legacyIntegrationPath, managedHerdrIntegration);
+
+  const result = install(fixture);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(fixture.herdrLog), false);
+  assert.equal(existsSync(legacyIntegrationPath), false);
+  assert.equal(
+    result.stdout.includes(
+      `Herdr Pipi integration: ${herdrPipiIntegrationPath}`,
+    ),
+    true,
+  );
+});
+
+test("install keeps the registered Herdr reporter available without the CLI", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
 
   const result = install(fixture);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(
-    result.stdout,
-    /Herdr CLI not found; skipped the optional Pi integration\./,
+  assert.equal(existsSync(fixture.herdrLog), false);
+  assert.equal(existsSync(herdrPipiIntegrationPath), true);
+  assert.equal(
+    readJson(join(repositoryRoot, "package.json")).pi.extensions.includes(
+      "./extensions",
+    ),
+    true,
   );
+  assert.equal(
+    readJson(
+      join(fixture.home, ".pipi", "agent", "settings.json"),
+    ).packages.includes(repositoryRoot),
+    true,
+  );
+  assert.equal(
+    result.stdout.includes(
+      `Herdr Pipi integration: ${herdrPipiIntegrationPath}`,
+    ),
+    true,
+  );
+});
+
+test("install refuses an unrecognized Herdr reporter and preserves it transactionally", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+  const legacyIntegrationPath = herdrLegacyIntegrationPath(fixture.home);
+  const regularReporterPath = join(
+    fixture.home,
+    ".pi",
+    "agent",
+    "extensions",
+    "herdr-agent-state.ts",
+  );
+  const unrecognizedReporter =
+    "// installed by herdr\n// custom reporter; migrate manually\n";
+  const regularReporter =
+    "// regular Pi reporter; this profile is outside Pipi ownership\n";
+  mkdirSync(dirname(legacyIntegrationPath), { recursive: true });
+  mkdirSync(dirname(regularReporterPath), { recursive: true });
+  writeFileSync(legacyIntegrationPath, unrecognizedReporter, { mode: 0o640 });
+  writeFileSync(regularReporterPath, regularReporter, { mode: 0o640 });
+  const before = snapshotManagedState(fixture.home);
+
+  const result = install(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unrecognized Herdr integration/);
+  assert.deepEqual(snapshotManagedState(fixture.home), before);
+  assert.equal(
+    readFileSync(legacyIntegrationPath, "utf8"),
+    unrecognizedReporter,
+  );
+  assert.equal(readFileSync(regularReporterPath, "utf8"), regularReporter);
   assert.equal(existsSync(fixture.herdrLog), false);
 });
 
-test("install fails clearly when the detected Herdr integration fails", async (t) => {
+test("install refuses a dangling legacy Herdr integration and preserves other profiles", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
-  addFakeHerdr(fixture, { fail: true });
+
+  const legacyIntegrationPath = herdrLegacyIntegrationPath(fixture.home);
+  const missingTarget = join(fixture.home, "missing-herdr-target.ts");
+  const regularReporterPath = join(
+    fixture.home,
+    ".pi",
+    "agent",
+    "extensions",
+    "herdr-agent-state.ts",
+  );
+  const regularReporter =
+    "// regular Pi reporter; this profile is outside Pipi ownership\n";
+  mkdirSync(dirname(legacyIntegrationPath), { recursive: true });
+  mkdirSync(dirname(regularReporterPath), { recursive: true });
+  symlinkSync(missingTarget, legacyIntegrationPath);
+  writeFileSync(regularReporterPath, regularReporter);
+  const before = snapshotManagedState(fixture.home);
 
   const result = install(fixture);
   assert.notEqual(result.status, 0);
-  assert.match(
-    result.stderr,
-    /Failed to install the official Herdr Pi integration/,
-  );
-  assert.equal(
-    existsSync(
-      join(
+  assert.match(result.stderr, /Unrecognized Herdr integration/);
+  assert.deepEqual(snapshotManagedState(fixture.home), before);
+  assert.equal(lstatSync(legacyIntegrationPath).isSymbolicLink(), true);
+  assert.equal(readlinkSync(legacyIntegrationPath), missingTarget);
+  assert.equal(existsSync(missingTarget), false);
+  assert.equal(readFileSync(regularReporterPath, "utf8"), regularReporter);
+});
+
+test("install refuses directory and nonregular legacy Herdr integrations", async () => {
+  if (process.platform === "win32") return;
+
+  for (const [name, createEntry, assertEntry] of [
+    ["directory", (path) => mkdirSync(path), (stat) => stat.isDirectory()],
+    ["FIFO", (path) => execFileSync("mkfifo", [path]), (stat) => stat.isFIFO()],
+  ]) {
+    const fixture = await createFixture();
+    try {
+      const legacyIntegrationPath = herdrLegacyIntegrationPath(fixture.home);
+      const regularReporterPath = join(
         fixture.home,
-        ".pipi",
+        ".pi",
         "agent",
         "extensions",
         "herdr-agent-state.ts",
-      ),
-    ),
-    false,
-  );
+      );
+      const regularReporter =
+        "// regular Pi reporter; this profile is outside Pipi ownership\n";
+      mkdirSync(dirname(legacyIntegrationPath), { recursive: true });
+      mkdirSync(dirname(regularReporterPath), { recursive: true });
+      createEntry(legacyIntegrationPath);
+      writeFileSync(regularReporterPath, regularReporter);
+
+      const result = install(fixture);
+      assert.notEqual(result.status, 0, name);
+      assert.match(result.stderr, /Unrecognized Herdr integration/, name);
+      assert.equal(assertEntry(lstatSync(legacyIntegrationPath)), true, name);
+      assert.equal(
+        readFileSync(regularReporterPath, "utf8"),
+        regularReporter,
+        name,
+      );
+      assert.equal(
+        existsSync(join(fixture.home, ".local", "bin", "pipi")),
+        false,
+        name,
+      );
+      assert.deepEqual(
+        readdirSync(fixture.home).filter((entry) =>
+          entry.startsWith(".pipi-install-stage-"),
+        ),
+        [],
+        name,
+      );
+    } finally {
+      await rm(fixture.home, { recursive: true, force: true });
+    }
+  }
 });
 
-test("install rejects a false-success Herdr integration result", async (t) => {
+test("installed-state check rejects a dangling legacy Herdr integration", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
-  addFakeHerdr(fixture, { writeIntegration: false });
 
-  const result = install(fixture);
+  const installed = install(fixture);
+  assert.equal(installed.status, 0, installed.stderr);
+  const legacyIntegrationPath = herdrLegacyIntegrationPath(fixture.home);
+  const missingTarget = join(fixture.home, "missing-herdr-target.ts");
+  mkdirSync(dirname(legacyIntegrationPath), { recursive: true });
+  symlinkSync(missingTarget, legacyIntegrationPath);
+
+  const result = spawnSync(process.execPath, [checkPipiInstallScript], {
+    cwd: repositoryRoot,
+    env: fixture.env,
+    encoding: "utf8",
+  });
   assert.notEqual(result.status, 0);
   assert.match(
     result.stderr,
-    /Herdr reported a successful Pi integration install but did not create/,
+    /Legacy Herdr reporter conflicts with Pipi's reporter/,
   );
+  assert.equal(lstatSync(legacyIntegrationPath).isSymbolicLink(), true);
+  assert.equal(readlinkSync(legacyIntegrationPath), missingTarget);
+  assert.equal(existsSync(missingTarget), false);
 });
 
 test("Pi package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
@@ -1860,7 +2027,6 @@ test("late installer failures restore the complete prior managed state", async (
   for (const step of steps) {
     const fixture = await createFixture();
     try {
-      addFakeHerdr(fixture);
       const agentDir = join(fixture.home, ".pipi", "agent");
       const sessionDir = join(fixture.home, ".pipi", "sessions");
       const launcher = join(fixture.home, ".local", "bin", "pipi");
@@ -1883,8 +2049,8 @@ test("late installer failures restore the complete prior managed state", async (
         mode: 0o600,
       });
       writeFileSync(
-        join(agentDir, "extensions", "herdr-agent-state.ts"),
-        "// prior integration\n",
+        herdrLegacyIntegrationPath(fixture.home),
+        managedHerdrIntegration,
         { mode: 0o640 },
       );
       writeFileSync(
@@ -1939,13 +2105,14 @@ test("late installer failures restore the complete prior managed state", async (
   }
 });
 
-test("a failing late Herdr command restores configs, removals, links, launcher, and modes", async (t) => {
+test("a failing Herdr migration restores the managed reporter and surrounding state", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
-  addFakeHerdr(fixture, { fail: true });
   const agentDir = join(fixture.home, ".pipi", "agent");
   const launcher = join(fixture.home, ".local", "bin", "pipi");
+  const legacyIntegrationPath = herdrLegacyIntegrationPath(fixture.home);
   mkdirSync(join(agentDir, "npm"), { recursive: true });
+  mkdirSync(dirname(legacyIntegrationPath), { recursive: true });
   mkdirSync(dirname(launcher), { recursive: true });
   writeFileSync(join(agentDir, "settings.json"), '{"prior":true}\n', {
     mode: 0o640,
@@ -1954,6 +2121,9 @@ test("a failing late Herdr command restores configs, removals, links, launcher, 
     mode: 0o620,
   });
   writeFileSync(join(agentDir, "npm", "prior"), "restore removal\n");
+  writeFileSync(legacyIntegrationPath, managedHerdrIntegration, {
+    mode: 0o640,
+  });
   writeFileSync(
     launcher,
     "#!/bin/sh\n# Managed by pipi-alias installer.\necho prior\n",
@@ -1961,13 +2131,27 @@ test("a failing late Herdr command restores configs, removals, links, launcher, 
   );
   const before = snapshotManagedState(fixture.home);
 
-  const result = install(fixture);
-  assert.notEqual(result.status, 0);
-  assert.match(
-    result.stderr,
-    /Failed to install the official Herdr Pi integration/,
+  const result = spawnSync(
+    process.execPath,
+    [
+      installScript,
+      "--skip-repository-dependencies",
+      "--codex-tools",
+      fixture.codexTools,
+    ],
+    {
+      cwd: repositoryRoot,
+      env: { ...fixture.env, PIPI_TEST_FAIL_AFTER_STEP: "herdr-integration" },
+      encoding: "utf8",
+    },
   );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /after herdr-integration/);
   assert.deepEqual(snapshotManagedState(fixture.home), before);
+  assert.equal(
+    readFileSync(legacyIntegrationPath, "utf8"),
+    managedHerdrIntegration,
+  );
 });
 
 test("fresh-state activation failures remove every created managed directory", async () => {

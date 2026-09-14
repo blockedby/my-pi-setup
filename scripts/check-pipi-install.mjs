@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveBunRuntime } from "../extensions/shared/executable-runtime.ts";
 import { getDeclaredPipiVersion, readJson } from "./pipi-version.mjs";
@@ -23,20 +23,6 @@ const installedPackage = readJson(
 const isolatedManifest = readJson(join(isolatedPrefix, "package.json"));
 const bunRuntime = resolveBunRuntime();
 const expectedTrustedDependencies = ["@google/genai", "protobufjs"];
-
-const findExecutable = (command) => {
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    if (!directory) continue;
-    const candidate = join(directory, command);
-    try {
-      accessSync(candidate, constants.X_OK);
-      return resolve(candidate);
-    } catch {
-      // Try the next PATH entry.
-    }
-  }
-  return undefined;
-};
 
 if (installedPackage.version !== expectedVersion) {
   throw new Error(
@@ -105,18 +91,29 @@ if (
   );
 }
 
-const herdrExecutable = findExecutable("herdr");
-const herdrIntegrationPath = join(
+const legacyHerdrIntegrationPath = join(
   home,
   ".pipi",
   "agent",
   "extensions",
   "herdr-agent-state.ts",
 );
-if (herdrExecutable && !existsSync(herdrIntegrationPath)) {
+const legacyHerdrIntegrationEntry = lstatSync(legacyHerdrIntegrationPath, {
+  throwIfNoEntry: false,
+});
+if (legacyHerdrIntegrationEntry) {
   throw new Error(
-    `Herdr is installed at ${herdrExecutable}, but its Pipi integration is missing: ${herdrIntegrationPath}`,
+    `Legacy Herdr reporter conflicts with Pipi's reporter: ${legacyHerdrIntegrationPath}`,
   );
+}
+const herdrIntegrationPath = join(
+  repositoryRoot,
+  "extensions",
+  "herdr-pipi",
+  "index.ts",
+);
+if (!existsSync(herdrIntegrationPath)) {
+  throw new Error(`Pipi Herdr integration is missing: ${herdrIntegrationPath}`);
 }
 
 const launcher = join(home, ".local", "bin", "pipi");
@@ -202,9 +199,8 @@ if (
   throw new Error(`Unexpected Pipi resume command: ${resumeCommand}`);
 }
 
-const herdrStatus = herdrExecutable
-  ? " The Herdr Pi integration is installed."
-  : " Herdr CLI was not detected.";
+const herdrStatus =
+  " The Pipi-owned Herdr reporter is available without a legacy reporter conflict.";
 console.log(
   `Installed Pipi ${expectedVersion}, branded launcher/resume command, MCP 2.15.0, install-script policy, and model overrides are verified.${herdrStatus}`,
 );

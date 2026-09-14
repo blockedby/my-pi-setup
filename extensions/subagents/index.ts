@@ -82,6 +82,7 @@ import {
   profileNames,
   type SubagentProfile,
 } from "./src/policy.ts";
+import { createActivityPublisher } from "../herdr-pipi/activity.ts";
 
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
 const WAIT_OUTPUT_MAX_BYTES = 48 * 1024;
@@ -181,9 +182,11 @@ export const SUBAGENT_SPAWN_PARAMETERS = Type.Object({
 export default function (pi: ExtensionAPI) {
   let runtime: SubagentRuntime | undefined;
   let managerPromise: Promise<SubagentManagerShape> | undefined;
+  let managerGeneration = 0;
   let sessionContext: ExtensionContext | undefined;
   let ui: ExtensionUIContext | undefined;
   let unsubStatus: (() => void) | undefined;
+  let activityPublisher: ReturnType<typeof createActivityPublisher> | undefined;
   const resultDelivery = createDeferredResultDelivery<SubagentSnapshot>();
   const delegationAdvisor = createDelegationAdvisor();
 
@@ -191,9 +194,15 @@ export default function (pi: ExtensionAPI) {
 
   /** Resolve the manager service once per runtime and wire the extension hooks. */
   const getManager = () => {
-    managerPromise ??= getRuntime()
+    if (managerPromise) return managerPromise;
+    const generation = ++managerGeneration;
+    managerPromise = getRuntime()
       .runPromise(SubagentManager)
       .then((manager) => {
+        // A pending initialization may resolve after session_shutdown has
+        // replaced the runtime. Do not reattach its listeners to the next
+        // session's UI or activity publisher.
+        if (generation !== managerGeneration) return manager;
         manager.view.setOnSettled(onSettled);
         unsubStatus?.();
         unsubStatus = manager.view.subscribe(() => updateStatus(manager));
@@ -204,8 +213,11 @@ export default function (pi: ExtensionAPI) {
   };
 
   const updateStatus = (manager: SubagentManagerShape) => {
-    if (!ui) return;
     const subs = manager.view.list();
+    activityPublisher?.update(
+      subs.filter((snap) => snap.status === "running").map((snap) => snap.id),
+    );
+    if (!ui) return;
     if (subs.length === 0) {
       ui.setStatus("subagents", undefined);
       return;
@@ -283,6 +295,12 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.on("session_start", (_event, ctx) => {
+    activityPublisher?.dispose();
+    activityPublisher =
+      ctx.mode === "tui"
+        ? createActivityPublisher(pi.events, "subagents")
+        : undefined;
+    if (activityPublisher) activityPublisher.update([]);
     sessionContext = ctx;
     if (ctx.hasUI) ui = ctx.ui;
     // Keep the upstream implementation, but hide its blocking tool from agents.
@@ -306,12 +324,15 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     delegationAdvisor.reset();
+    managerGeneration++;
     sessionContext = undefined;
     resultDelivery.clear();
     unsubStatus?.();
     unsubStatus = undefined;
     ui?.setStatus("subagents", undefined);
     ui = undefined;
+    activityPublisher?.dispose();
+    activityPublisher = undefined;
     const closing = runtime;
     runtime = undefined;
     managerPromise = undefined;

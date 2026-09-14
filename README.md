@@ -65,7 +65,7 @@ Pipi installs beside regular Pi and requires a stable supported Bun 1.4+ command
 
 The installer pins and validates the bundled review, backlog, and Codex-tool submodules. Pipeline roles receive only the tools needed for their job, with explicit commit permission for implementation pipelines.
 
-When the [official Herdr](https://github.com/herdrdev/herdr) CLI is available, Pipi installs its official Pi integration so Pipi panes appear correctly in Herdr's Agents view.
+In [Herdr](https://github.com/herdrdev/herdr), Pipi shows background subagent and pipeline activity and highlights when a question needs your answer. See [Herdr integration](docs/herdr-pipi-integration.md) for setup and current limitations.
 
 ## Setup
 

@@ -464,30 +464,57 @@ const installBrowserChromeAssets = (agentDir) => {
   return { browserSkillDir, transaction };
 };
 
-const installHerdrPiIntegration = (herdrExecutable, agentDir) => {
-  if (!herdrExecutable) return undefined;
+const unrecognizedHerdrIntegrationError = (path) =>
+  new Error(
+    `Unrecognized Herdr integration: ${path}; remove or migrate it manually.`,
+  );
 
-  const integrationPath = join(agentDir, "extensions", "herdr-agent-state.ts");
+const readRecognizedHerdrIntegration = (path) => {
+  const entry = lstatSync(path, { throwIfNoEntry: false });
+  if (!entry) return;
+  if (!entry.isFile()) throw unrecognizedHerdrIntegrationError(path);
+
+  let content;
   try {
-    execFileSync(herdrExecutable, ["integration", "install", "pi"], {
-      env: {
-        ...process.env,
-        PI_CODING_AGENT_DIR: agentDir,
-      },
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch (error) {
-    throw new Error(
-      `Failed to install the official Herdr Pi integration: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    content = readFileSync(path, "utf8");
+  } catch {
+    throw unrecognizedHerdrIntegrationError(path);
   }
-  if (!existsSync(integrationPath)) {
-    throw new Error(
-      `Herdr reported a successful Pi integration install but did not create ${integrationPath}`,
-    );
+  if (
+    !content.includes("// installed by herdr") ||
+    !content.includes("// HERDR_INTEGRATION_ID=pi")
+  ) {
+    throw unrecognizedHerdrIntegrationError(path);
   }
-  return integrationPath;
+  return entry;
+};
+
+const validateLegacyHerdrIntegration = (agentDir) =>
+  readRecognizedHerdrIntegration(
+    join(agentDir, "extensions", "herdr-agent-state.ts"),
+  );
+
+const installHerdrPiIntegration = (stagedAgentDir, agentDir) => {
+  const reporterPath = join(
+    repositoryRoot,
+    "extensions",
+    "herdr-pipi",
+    "index.ts",
+  );
+  if (!existsSync(reporterPath)) {
+    throw new Error(`Missing Pipi Herdr reporter: ${reporterPath}`);
+  }
+  // The repository package supplies the reporter. Never load the legacy
+  // standalone reporter alongside it: both would own the same Herdr pane.
+  const integrationPath = join(
+    stagedAgentDir,
+    "extensions",
+    "herdr-agent-state.ts",
+  );
+  validateLegacyHerdrIntegration(agentDir);
+  const stagedIntegration = validateLegacyHerdrIntegration(stagedAgentDir);
+  if (stagedIntegration) rmSync(integrationPath);
+  return reporterPath;
 };
 
 const installBrowserBunWrapper = ({
@@ -793,7 +820,6 @@ const install = () => {
   }
 
   const codexExecutable = findExecutable("codex");
-  const herdrExecutable = findExecutable("herdr");
   const agentDir = join(home, ".pipi", "agent");
   const sessionDir = join(home, ".pipi", "sessions");
   const binDir = options.binDir ?? join(home, ".local", "bin");
@@ -866,6 +892,7 @@ const install = () => {
       prepareRepositoryDependencies({ bunExecutable: bunRuntime.executable });
     }
 
+    validateLegacyHerdrIntegration(agentDir);
     transaction = createManagedInstallTransaction({
       home,
       token: lock.owner.token,
@@ -978,11 +1005,11 @@ const install = () => {
     chmodSync(stagedModelOverrides, 0o600);
     transaction.injectFailure("model-config");
 
-    transaction.activateAgent();
     const herdrIntegrationPath = installHerdrPiIntegration(
-      herdrExecutable,
+      stagedAgentDir,
       agentDir,
     );
+    transaction.activateAgent();
     transaction.injectFailure("herdr-integration");
 
     if (options.shareAuth && !existsSync(pipiAuthPath)) {
@@ -1007,13 +1034,7 @@ const install = () => {
     console.log(`Evidence-driven code-review skill: ${reviewerSkillDir}`);
     console.log(`Plan GitHub backlog skill: ${backlogSkillDir}`);
     console.log(`Browser Chrome MCP config: ${pipiMcpPath}`);
-    if (herdrIntegrationPath) {
-      console.log(
-        `Herdr Pi integration: ${join(agentDir, "extensions", "herdr-agent-state.ts")}`,
-      );
-    } else {
-      console.log("Herdr CLI not found; skipped the optional Pi integration.");
-    }
+    console.log(`Herdr Pipi integration: ${herdrIntegrationPath}`);
     if (codexExecutable) console.log(`Codex CLI: ${codexExecutable}`);
     else {
       console.warn(

@@ -2046,3 +2046,27 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Action: removed only `/home/kcnc/code/tools/pipi-alias/.worktrees/herdr-activity-bridge` from `packages` in `~/.pipi/agent/settings.json`; retained the canonical primary repository, MCP adapter and pi-codex package registrations. No worktree files, auth data or other settings were changed.
 - Verification: `pipi list` reports only the three intended packages; `bun run check:pipi-install` passed. Full startup in the user's next process remains to be confirmed.
 - Pending: fully restart Pipi to remove already-loaded duplicate extensions; the older worktree remains on disk.
+
+## Operation entry: implement Pipi-owned Herdr activity reporting
+
+- Request: report background subagent/pipeline work and interactive Questionary waits in Herdr; implement directly after feature-pipeline readiness failures. Defer Herdr source/resume changes.
+- Action: implement a single Pipi-owned reporter and root activity aggregation; migrate the legacy managed reporter transactionally rather than invoking the Herdr installer. Preserve regular Pi and headless child isolation.
+- Affected paths: `extensions/herdr-pipi/`, lifecycle wiring in `extensions/subagents/index.ts` and `extensions/pipelines/index.ts`, `scripts/{install,check-pipi-install}.mjs`, installer/extension tests, and `docs/herdr-pipi-integration.md`.
+- Verification: final `bun run test:deterministic` passed (614 extension tests, 22 file-search tests, 67 script tests including 44 installer tests); `check:submodules`, TypeScript, lint, formatting and `git diff --check` passed. Initial audit `herdr-bridge-source-audit-c5105f16` found ambiguous `.js` imports and dangling-symlink migration handling; remediation adds explicit `.ts` imports, real Pi loader verification and filesystem-entry migration checks. Closure audit `herdr-bridge-closure-audit-169c2e48` closed AUD-001 and AUD-002 with no remaining findings or conflicts; only explicitly deferred live checks remain unproven.
+- Pending: no host runtime installation or live Herdr state changes performed. The new installed-state check correctly rejects the still-installed legacy reporter until an authorized migration. Authorized installation/reload and visual checks remain separate, as does fixing Herdr's resume executable.
+
+## Operation entry: install Herdr bridge and run authorized live smoke
+
+- Request: commit, push, and run a smoke test; user explicitly selected live Herdr testing with a local Pipi installation and a separate pane.
+- Action: switch the managed Pipi repository package from the primary checkout to `.worktrees/herdr-activity-bridge` (not an additional duplicate package), preserve a settings backup at `~/.pipi/herdr-smoke-settings.backup.json`, run the feature installer, and create disposable Herdr tab `w7:t8` / pane `w7:p8` without focusing or restarting the current session.
+- Affected state: `~/.pipi/agent`, `~/.local/bin/pipi`, managed settings package paths, and the disposable Herdr pane. No authentication data was read or recorded; Herdr executable/server was not updated or restarted.
+- Verification: feature installation and `bun run check:pipi-install` passed for Pipi 0.85.1. Live Herdr 0.8.0 pane `w7:p8` reported the Pipi session identity, startup idle, publisher activity working, prompt blocked (also propagated to tab status), cancellation back to working while activity remained, and confirmation/completion back to done. Herdr displays completed idle reports as `done` in an unfocused pane; initial smoke assertions expecting only idle timed out, then reruns accepting Herdr's done state passed. A premature restart command sequence was cleared before rerunning; no model request was made. `/smoke-exit` returned to the shell and tab `w7:t8` was closed.
+- Scope: the `/tmp/pipi-herdr-live-smoke/driver.ts` fixture used deterministic activity publishers and a real generic confirmation UI through the installed TUI/reporter. Actual model-driven subagent/pipeline execution and the `ask_user` custom UI were not exercised live; their shared contracts remain covered by automated tests. No pixel-level color screenshot was captured.
+- Pending: keep the feature worktree while the installed package references it; settings backup remains outside Git. Reload/restart existing Pipi sessions to load the new reporter. Herdr resume-command changes remain deferred.
+
+## Operation entry: reconcile Herdr bridge with current main
+
+- Request: merge the verified Herdr integration and update the local setup.
+- Action: preserve both operation histories during rebase and update the real-loader regression to expect the current `pipelines:` command registrations introduced on main. No runtime registration was renamed by this fix.
+- Affected paths: `extensions/herdr-pipi/loader.test.ts` and this record.
+- Verification: the first reconciled run passed 640 extension tests and exposed the stale registration expectation; corrected-suite verification is pending. No host restart has occurred.
