@@ -2063,3 +2063,10 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Verification: feature installation and `bun run check:pipi-install` passed for Pipi 0.85.1. Live Herdr 0.8.0 pane `w7:p8` reported the Pipi session identity, startup idle, publisher activity working, prompt blocked (also propagated to tab status), cancellation back to working while activity remained, and confirmation/completion back to done. Herdr displays completed idle reports as `done` in an unfocused pane; initial smoke assertions expecting only idle timed out, then reruns accepting Herdr's done state passed. A premature restart command sequence was cleared before rerunning; no model request was made. `/smoke-exit` returned to the shell and tab `w7:t8` was closed.
 - Scope: the `/tmp/pipi-herdr-live-smoke/driver.ts` fixture used deterministic activity publishers and a real generic confirmation UI through the installed TUI/reporter. Actual model-driven subagent/pipeline execution and the `ask_user` custom UI were not exercised live; their shared contracts remain covered by automated tests. No pixel-level color screenshot was captured.
 - Pending: keep the feature worktree while the installed package references it; settings backup remains outside Git. Reload/restart existing Pipi sessions to load the new reporter. Herdr resume-command changes remain deferred.
+
+## Operation entry: reconcile Herdr bridge with current main
+
+- Request: merge the verified Herdr integration and update the local setup.
+- Action: preserve both operation histories during rebase and update the real-loader regression to expect the current `pipelines:` command registrations introduced on main. No runtime registration was renamed by this fix.
+- Affected paths: `extensions/herdr-pipi/loader.test.ts` and this record.
+- Verification: the first reconciled run passed 640 extension tests and exposed the stale registration expectation; corrected-suite verification is pending. No host restart has occurred.
