@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
+import { isAbsolute } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -47,7 +48,7 @@ function parseLegacyBlockedEvent(
 function snapshotSessionReference(ctx: ExtensionContext) {
   try {
     const sessionFile = ctx.sessionManager.getSessionFile();
-    if (typeof sessionFile === "string" && sessionFile.startsWith("/")) {
+    if (typeof sessionFile === "string" && isAbsolute(sessionFile)) {
       return { agent_session_path: sessionFile };
     }
   } catch {
@@ -66,7 +67,11 @@ function snapshotSessionReference(ctx: ExtensionContext) {
   return undefined;
 }
 
-function createRequestQueue(endpoint: string | undefined, enabled: boolean) {
+function createRequestQueue(
+  endpoint: string | undefined,
+  enabled: boolean,
+  onUnsupported: () => void,
+) {
   let disposed = false;
   let queuedState: QueuedRequest | undefined;
   const queuedSessions: QueuedRequest[] = [];
@@ -95,26 +100,92 @@ function createRequestQueue(endpoint: string | undefined, enabled: boolean) {
       const cancel = () => finish(false);
 
       cancelInFlight = cancel;
-      try {
-        socket = createConnection(endpoint);
-      } catch {
-        finish(false);
-        return;
-      }
-
-      socket.once("error", () => finish(false));
-      socket.once("connect", () => {
+      const probeId = `${HERDR_SOURCE}:capability:${randomUUID()}`;
+      let probing = true;
+      let reportId: unknown;
+      let input = "";
+      const onData = (chunk: string) => {
+        input += chunk;
+        if (input.length > 65_536) return finish(false);
+        for (;;) {
+          const newline = input.indexOf("\n");
+          if (newline < 0 || finished) return;
+          const responseLine = input.slice(0, newline);
+          input = input.slice(newline + 1);
+          try {
+            const response: unknown = JSON.parse(responseLine);
+            if (!isRecord(response)) return finish(false);
+            if (probing) {
+              if (
+                response.id !== probeId ||
+                !isRecord(response.result) ||
+                response.result.type !== "pong"
+              )
+                return finish(false);
+              const capabilities = response.result.capabilities;
+              const supported =
+                isRecord(capabilities) &&
+                capabilities.pipi_resume_launcher === true;
+              const request: unknown = JSON.parse(line);
+              if (!isRecord(request) || !isRecord(request.params))
+                return finish(false);
+              if (
+                supported &&
+                (request.params.agent_session_path ||
+                  request.params.agent_session_id)
+              ) {
+                request.params.resume_launcher = "pipi";
+              } else if (!supported) {
+                onUnsupported();
+              }
+              reportId = request.id;
+              probing = false;
+              // Herdr serves exactly one request per socket connection.
+              connect(`${JSON.stringify(request)}\n`);
+              return;
+            } else {
+              finish(
+                response.id === reportId &&
+                  isRecord(response.result) &&
+                  response.result.type === "ok",
+              );
+            }
+          } catch {
+            finish(false);
+          }
+        }
+      };
+      const connect = (payload: string) => {
+        if (finished) return;
+        socket?.removeAllListeners();
+        socket?.on("error", () => {});
+        socket?.destroy();
+        input = "";
         try {
-          socket?.write(line);
+          socket = createConnection(endpoint);
+          socket.setEncoding("utf8");
+          socket.once("error", () => finish(false));
+          socket.once("end", () => finish(false));
+          socket.once("close", () => finish(false));
+          socket.on("data", onData);
+          socket.once("connect", () => {
+            try {
+              socket?.write(payload);
+            } catch {
+              finish(false);
+            }
+          });
         } catch {
           finish(false);
         }
-      });
-      socket.once("data", () => finish(true));
-      socket.once("end", () => finish(false));
-      socket.once("close", () => finish(false));
+      };
+      // No cross-connection capability cache: reprobe before each report.
+      // Probe and report share a single bounded attempt timeout.
       timeout = setTimeout(() => finish(false), timeoutMs);
       timeout.unref?.();
+      connect(
+        `${JSON.stringify({ id: probeId, method: "ping", params: {} })}\n`,
+      );
     });
   };
 
@@ -271,7 +342,13 @@ export default function herdrPipi(pi: ExtensionAPI) {
     process.platform === "win32" && socketPath
       ? `\\\\.\\pipe\\${socketPath}`
       : socketPath;
-  const queue = createRequestQueue(socketEndpoint, enabled);
+  let warnUnsupported = () => {};
+  let warnedUnsupported = false;
+  const queue = createRequestQueue(socketEndpoint, enabled, () => {
+    if (warnedUnsupported) return;
+    warnedUnsupported = true;
+    warnUnsupported();
+  });
 
   let activityStore: ActivityStore | undefined;
   let sessionReference: SessionReference;
@@ -400,6 +477,11 @@ export default function herdrPipi(pi: ExtensionAPI) {
     if (!enabled || ctx.mode !== "tui" || !paneId) return;
 
     rootSession = true;
+    warnUnsupported = () =>
+      ctx.ui.notify(
+        "This Herdr server does not preserve the Pipi launcher when restoring sessions. Activity reporting remains enabled.",
+        "warning",
+      );
     // Establish identity and root activity before installing the replaying
     // consumer. Its queued replay can notify synchronously in a later turn.
     sessionReference = snapshotSessionReference(ctx);
