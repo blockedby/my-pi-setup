@@ -3955,8 +3955,21 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     runId,
     SMALL_FEATURE_IMPLEMENTER_ROLE,
   );
-  assert.equal(implementer.model, LUNA_MODEL);
+  assert.equal(implementer.model, ASTRA_MODEL);
   assert.equal(implementer.persistent, true);
+  const initialImplementerSession = run.sessions.find(
+    (session) => session.spec.role === SMALL_FEATURE_IMPLEMENTER_ROLE,
+  );
+  assert.ok(initialImplementerSession);
+  assert.equal(initialImplementerSession.spec.model, ASTRA_MODEL);
+  assert.equal(initialImplementerSession.spec.thinkingLevel, "low");
+  assert.equal(
+    pipelineThinkingLevel(
+      initialImplementerSession.spec.model,
+      initialImplementerSession.spec.thinkingLevel,
+    ),
+    "low",
+  );
   await assert.rejects(
     run.controller.spawnChild(runId, SMALL_FEATURE_IMPLEMENTER_ROLE),
     /already has its allowed child session/,
@@ -4010,7 +4023,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
   assert.equal(run.controller.get(runId)?.stage, "final-resolve");
   assert.throws(
     () => run.controller.setStage(runId, "complete"),
-    /requires one same-session Luna remediation pass/,
+    /requires one same-session Astra remediation pass/,
   );
 
   const remediationMessage = "Resolve all audit reports";
@@ -4019,6 +4032,9 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     (session) => session.spec.role === SMALL_FEATURE_IMPLEMENTER_ROLE,
   );
   assert.ok(implementerSession);
+  assert.equal(implementerSession, initialImplementerSession);
+  assert.equal(implementerSession.spec.model, ASTRA_MODEL);
+  assert.equal(implementerSession.spec.thinkingLevel, "low");
   assert.equal(implementerSession.sends.length, 1);
   assert.match(
     implementerSession.sends[0] ?? "",
@@ -4045,7 +4061,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     checks: ["focused tests passed"],
     assumptions: [],
     git: ["working tree inspected"],
-    reports: ["Luna implementation", "Four Luna audits", "Luna remediation"],
+    reports: ["Astra implementation", "Four Luna audits", "Astra remediation"],
     unresolvedItems: [],
     workingDir: implementationWorkingDir(),
   };

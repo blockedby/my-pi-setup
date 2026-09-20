@@ -497,7 +497,10 @@ export interface PipelineHandoff {
 
 export function modelForRole(role: PipelineChildRole) {
   if (role === FINAL_AUDIT_ROLE) return TERRA_MODEL;
-  if (FEATURE_PLAN_ROLES.some((candidate) => candidate === role)) {
+  if (
+    role === SMALL_FEATURE_IMPLEMENTER_ROLE ||
+    FEATURE_PLAN_ROLES.some((candidate) => candidate === role)
+  ) {
     return ASTRA_MODEL;
   }
   return LUNA_MODEL;

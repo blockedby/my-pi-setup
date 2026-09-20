@@ -4218,7 +4218,7 @@ export class PipelineController {
           ) !== 1
         ) {
           throw new Error(
-            "small-feature-pipeline completion requires one same-session Luna remediation pass.",
+            "small-feature-pipeline completion requires one same-session Astra remediation pass.",
           );
         }
         this.requireValidReports(
@@ -4439,7 +4439,11 @@ export class PipelineController {
       title: scopedSessionTitle(run.id, titleForRole(role)),
       model: modelForRole(role),
       thinkingLevel:
-        run.definition === PLAN_PIPELINE_ID ? ("medium" as const) : undefined,
+        role === SMALL_FEATURE_IMPLEMENTER_ROLE
+          ? ("low" as const)
+          : run.definition === PLAN_PIPELINE_ID
+            ? ("medium" as const)
+            : undefined,
       cwd: run.request.workingDir,
       prompt: buildPipelineChildPrompt(
         run.definition,
@@ -4580,18 +4584,18 @@ export class PipelineController {
       }
       if (run.stage !== "final-resolve") {
         throw new Error(
-          "small-feature-pipeline Luna remediation can only run during final-resolve.",
+          "small-feature-pipeline Astra remediation can only run during final-resolve.",
         );
       }
       this.requireValidReports(run, STATIC_LUNA_AUDIT_ROLES, run.stage);
       if (agent.status !== "idle") {
         throw new Error(
-          "small-feature-pipeline Luna must be idle before remediation.",
+          "small-feature-pipeline Astra must be idle before remediation.",
         );
       }
       if ((this.childContinuations.get(id) ?? 0) >= 1) {
         throw new Error(
-          "small-feature-pipeline Luna already completed its remediation pass.",
+          "small-feature-pipeline Astra already completed its remediation pass.",
         );
       }
     } else if (run.definition === PLAN_PIPELINE_ID) {
@@ -4737,7 +4741,7 @@ export class PipelineController {
     if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
       if (run.stage !== "complete") {
         throw new Error(
-          "small-feature-pipeline must finish same-session Luna remediation before completion.",
+          "small-feature-pipeline must finish same-session Astra remediation before completion.",
         );
       }
       this.requireValidReports(
@@ -4918,7 +4922,7 @@ export class PipelineController {
       defineTool({
         name: "pipeline_child_spawn",
         label: "Spawn Pipeline Child",
-        description: `Start one allowed agent-driven ${run.definition} Luna role.`,
+        description: `Start one allowed agent-driven ${run.definition} role.`,
         parameters: Type.Object({
           role: StringEnum(roles),
           context: Type.Optional(Type.String({ maxLength: 64 * 1024 })),

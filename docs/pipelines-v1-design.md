@@ -7,7 +7,7 @@ _Status: implemented runtime contract and evidence API record. Evidence mechanis
 `pipeline_run` accepts a self-contained `task`, caller-selected `working_dir`, and one of four hardcoded definitions:
 
 - `feature-pipeline`: five-track Luna discovery, two independent Astra/low candidate plans, one persistent Astra/low canonical planner and final reviewer, a controller-validated graph of fresh Luna/high implementation tasks, deterministic branch joins, and the existing independent audit/remediation flow;
-- `small-feature-pipeline`: read-only Luna/medium coordinator, one persistent Luna implementer, four parallel Luna auditors, and one same-session implementer remediation pass;
+- `small-feature-pipeline`: read-only Luna/medium coordinator, one persistent Astra/low implementer, four parallel Luna auditors, and one same-session implementer remediation pass;
 - `plan-pipeline`: controller-owned six-track Luna/medium evidence discovery, one Astra/low free-form synthesis session, and factual completion with optional caller-selected in-workspace output;
 - `audit-pipeline`: four isolated read-only Luna/medium static audit tracks, one trusted-workspace Luna/medium audit-executor contributor, and one persistent Luna/medium incremental synthesis root, with no Sol, Terra, remediation, readiness decision, or Git decision.
 
@@ -148,7 +148,7 @@ The source specification is decomposed into [implementation tasks](plans/feature
 
 ```text
 Read-only Luna/medium coordinator
-  → one persistent Luna/medium implementer
+  → one persistent Astra/low implementer
   → four parallel read-only Luna/medium auditors
   → same implementer receives all reports and remediates once
   → factual completion
