@@ -19,7 +19,7 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 | Pi subagent              | General delegated work                  |
 | `luna-explore`           | Read-only repository exploration        |
 | `luna-worker`            | Scoped implementation and testing       |
-| `terra-audit`            | Manual deep review and escalation       |
+| `sol-worker`            | Deeper implementation with Sol/medium   |
 | Claude or Codex subagent | Tasks that benefit from another backend |
 
 ### Pipelines

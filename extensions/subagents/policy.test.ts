@@ -20,11 +20,21 @@ test("profiles fix Pi models and reasoning", () => {
   const worker = applySubagentProfile("luna-worker", {});
   assert.equal(worker.model, "openai-codex/gpt-5.6-luna");
   assert.equal(worker.reasoningEffort, "max");
+  const sol = applySubagentProfile("sol-worker", {});
+  assert.equal(sol.harness, "pi");
+  assert.equal(sol.model, "openai-codex/gpt-5.6-sol");
+  assert.equal(sol.reasoningEffort, "medium");
   assert.equal(
-    applySubagentProfile("terra-audit", {}).model,
-    "openai-codex/gpt-5.6-terra",
+    quotaLimit(
+      canonicalPiModelKey({ provider: "openai-codex", id: "gpt-5.6-sol" }),
+    ),
+    4,
   );
-  for (const profile of ["luna-explore", "luna-worker"] as const) {
+  for (const profile of [
+    "luna-explore",
+    "luna-worker",
+    "sol-worker",
+  ] as const) {
     for (const conflicting of [
       { harness: "pi" as const },
       { model: "other" },
@@ -46,6 +56,23 @@ test("profiles fix Pi models and reasoning", () => {
       harness: "pi",
       model: "openai-codex/gpt-5.6-sol",
       reasoningEffort: "medium",
+      systemPrompt: undefined,
+    },
+  );
+  assert.deepEqual(applySubagentProfile(undefined, { harness: "pi" }), {
+    harness: "pi",
+    systemPrompt: undefined,
+  });
+  assert.deepEqual(
+    applySubagentProfile(undefined, {
+      harness: "pi",
+      model: "openai-codex/gpt-5.6-terra",
+      reasoningEffort: "high",
+    }),
+    {
+      harness: "pi",
+      model: "openai-codex/gpt-5.6-terra",
+      reasoningEffort: "high",
       systemPrompt: undefined,
     },
   );

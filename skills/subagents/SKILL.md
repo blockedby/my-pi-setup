@@ -1,6 +1,6 @@
 ---
 name: subagents
-description: invoke this skill when the user asks you to use subagents
+description: Use when the user asks to use subagents; choose a worker profile or task-specific model and delegate bounded work.
 ---
 
 # Subagents
@@ -35,14 +35,16 @@ Default routine, independent work to Luna before using Sol directly:
   - mechanical refactors
   - comparing candidate solutions
 
-It is safe to run up to eight genuinely independent Luna workers in parallel. Their results arrive as automatic follow-ups in a later parent turn. Route routine repository initial or closure audits through the hardcoded `audit-pipeline`, which runs four isolated Luna tracks and one incremental Luna synthesis session. Keep `terra-audit` available only for explicit manual escalation. Keep cross-cutting integration and final acceptance with the Sol/main agent.
+It is safe to run up to eight genuinely independent Luna workers in parallel. Their results arrive as automatic follow-ups in a later parent turn. Route routine repository initial or closure audits through the hardcoded `audit-pipeline`, which runs four isolated Luna tracks and one incremental Luna synthesis session. Use `sol-worker` for implementation tasks needing deeper reasoning than routine Luna work: it provides a ready-to-use Sol/medium worker without repeating model configuration. Keep cross-cutting integration and final acceptance with the main agent. The former `terra-audit` profile is removed; routine audits belong in `audit-pipeline`.
+
+Profiles are conveniences, not a restriction on model choice. Without a profile, the orchestrator can choose any available model and reasoning level suited to the task; supply an explicit `harness`. Omitting model or reasoning preserves the harness defaults (Pi inherits the parent values).
 
 Pi can use any model shown by `pi --list-models`. Prefer `provider/model-id`; a bare model id only works when unambiguous. Common picks in this environment:
 
 | Model                            | Recommended effort |
 | -------------------------------- | ------------------ |
 | inherited parent model (default) | inherited          |
-| `openai-codex/gpt-5.6-sol`       | `high`             |
+| `openai-codex/gpt-5.6-sol`       | `medium`           |
 | `openai-codex/gpt-5.6-terra`     | `high`             |
 | `openai-codex/gpt-5.6-luna`      | `max`             |
 | `opencode/claude-fable-5`        | `medium`           |
@@ -81,7 +83,7 @@ Requires the Codex CLI to be installed and authenticated.
 
 ## Spawn and Manage
 
-Call `subagent_spawn` with a complete `prompt`, short `name`, and either an explicit `harness` or a profile. A profile call supplies only `profile`, `prompt`, and `name` (plus optional `working_dir`); `luna-explore` fixes Pi/Luna/max reasoning and is read-only, `luna-worker` fixes Pi/Luna/max reasoning and may make scoped workspace changes, and `terra-audit` fixes Pi/Terra/high reasoning and is read-only. Profile children retain normal child tools, with only recursive orchestration and user-interaction tools excluded. Explicit profile conflicts are rejected. Direct Pi quotas are Sol=4, Terra=8, Luna=16; Claude and Codex share an aggregate cap of 4.
+Call `subagent_spawn` with a complete `prompt`, short `name`, and either an explicit `harness` or a profile. A profile call supplies only `profile`, `prompt`, and `name` (plus optional `working_dir`); `luna-explore` fixes Pi/Luna/max reasoning and is read-only, `luna-worker` fixes Pi/Luna/max reasoning and may make scoped workspace changes, and `sol-worker` fixes Pi/Sol/medium reasoning and may make scoped workspace changes. Workers may edit files and run tests, but must not commit, push, change credentials, or make unrelated or external-state changes. Profile children retain normal child tools, with only recursive orchestration and user-interaction tools excluded. Explicit profile conflicts are rejected. Direct Pi quotas are Sol=4, Terra=8, Luna=16; Claude and Codex share an aggregate cap of 4. `sol-worker` shares Sol's quota with profile-free Sol launches. These quotas apply only to direct subagents, never pipeline graphs.
 
 - `subagent_check({ id })`: inspect progress once when it is useful; never poll.
 - `subagent_list()`: inspect all runs once when their status is useful; never poll.
