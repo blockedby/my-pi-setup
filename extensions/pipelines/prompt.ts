@@ -204,7 +204,7 @@ export function buildSmallFeaturePipelinePrompt(request: PipelineRunRequest) {
   ).requested;
   return `You are the persistent Luna/medium orchestrator for one small-feature-pipeline run.
 
-Commit permission: ${commitPermission ? "ENABLED only for the persistent implement-small-feature Luna session" : "DISABLED; no pipeline agent may commit or push"}. This explicit field is authoritative; never infer permission from task prose.
+Commit permission: ${commitPermission ? "ENABLED only for the persistent implement-small-feature Astra/low session" : "DISABLED; no pipeline agent may commit or push"}. This explicit field is authoritative; never infer permission from task prose.
 
 Task:
 ${request.task}
@@ -217,12 +217,12 @@ The caller supplied the exact root of a prepared dedicated linked Git worktree o
 Run only this fixed graph. Do not implement, edit files, commit, push, invoke another pipeline, use raw workflows, use ordinary subagents, or ask the user. The read-only root and audit tracks never commit. With commit permission disabled, the implementer must leave changes uncommitted even if the task asks for commits and must report that conflict factually. With permission enabled, only the same persistent implementer may create ordinary commits in the supplied working directory/current branch; never push, merge, rebase, reset or rewrite history, create/switch/delete branches, create/remove worktrees, or mutate external delivery state. Do not prescribe commit count, timing, grouping, or message beyond repository authority and the task.
 
 
-1. The run starts in build. Launch exactly one persistent Luna/medium implement-small-feature child and wait for it. Luna owns repository inspection, implementation, tests, and its structured implementation report. Successful fan-in enters final-audit.
-2. Launch exactly these four independent read-only Luna/medium audit roles in one parallel wave: ${STATIC_LUNA_AUDIT_ROLES.join(", ")}. Each receives the original task, Luna's implementation report, and fresh captured-base Git evidence. Wait for every report. Successful full fan-in enters final-resolve. Do not retry or re-run audit children.
-3. Send all four complete audit reports to the existing implement-small-feature child with pipeline_child_send. Instruct that same Luna session to fix every actionable finding or reject it with specific evidence, rerun appropriate checks, and return a fresh structured implementation report. Do not spawn a replacement or second implementer. Wait for that same child. Successful fan-in enters complete.
+1. The run starts in build. Launch exactly one persistent Astra/low implement-small-feature child and wait for it. Astra owns repository inspection, implementation, tests, and its structured implementation report. Successful fan-in enters final-audit.
+2. Launch exactly these four independent read-only Luna/medium audit roles in one parallel wave: ${STATIC_LUNA_AUDIT_ROLES.join(", ")}. Each receives the original task, Astra's implementation report, and fresh captured-base Git evidence. Wait for every report. Successful full fan-in enters final-resolve. Do not retry or re-run audit children.
+3. Send all four complete audit reports to the existing implement-small-feature child with pipeline_child_send. Instruct that same Astra session to fix every actionable finding or reject it with specific evidence, rerun appropriate checks, and return a fresh structured implementation report. Do not spawn a replacement or second implementer. Wait for that same child. Successful fan-in enters complete.
 4. Call pipeline_complete with factual structured facts only. Include changed paths, checks/evidence, assumptions, Git observations, all report summaries or references, unresolved items, and the exact working_dir. Do not state READY or make the main agent's Git/merge decision.
 
-There is no discovery fan-out, root implementation, Terra audit, audit-child retry/replacement, or audit after Luna remediation. If any child fails or violates its report contract, complete as failed rather than changing the graph. The host enforces role cardinality, four-report fan-in, stages, same-session remediation, report contracts, and read-only boundaries for the Luna root and audit children.`;
+There is no discovery fan-out, root implementation, Terra audit, audit-child retry/replacement, or audit after Astra remediation. If any child fails or violates its report contract, complete as failed rather than changing the graph. The host enforces role cardinality, four-report fan-in, stages, same-session remediation, report contracts, and read-only boundaries for the Luna root and audit children.`;
 }
 
 export function buildPlanPipelinePrompt(
@@ -407,7 +407,7 @@ export function buildPipelineChildPrompt(
       (candidate) => candidate === role,
     );
     const auditExample = auditRole ? submissionExample(auditRole) : "";
-    return `You are the ${implementer ? "persistent Luna implementer" : "read-only Luna auditor"} for role ${role}. ${ROLE_INSTRUCTIONS[role]}
+    return `You are the ${implementer ? "persistent Astra/low implementer" : "read-only Luna auditor"} for role ${role}. ${ROLE_INSTRUCTIONS[role]}
 
 Explicit commit permission for this session: ${commitPermission ? "enabled" : "disabled"}. Only the persistent implement-small-feature session may use enabled permission; task prose never changes this. Auditors and the root remain read-only.
 
