@@ -88,6 +88,17 @@ const createFixture = async () => {
   const codexTools = join(home, "pi-codex");
   mkdirSync(fakeBin, { recursive: true });
   mkdirSync(codexTools, { recursive: true });
+  const sharedSkillsDir = join(home, ".agents", "skills");
+  mkdirSync(sharedSkillsDir, { recursive: true });
+  symlinkSync(browserSkillSource, join(sharedSkillsDir, "browser-chrome"));
+  for (const name of ["frontend-quality", "code-review"]) {
+    const skillDir = join(sharedSkillsDir, name);
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      `---\nname: ${name}\ndescription: fixture\n---\n`,
+    );
+  }
 
   const piPath = join(fakeBin, "pi");
   // Keep a Node shebang to prove the managed launcher ignores it and invokes Bun.
@@ -174,7 +185,7 @@ if (args[0] === "install") {
     mkdirSync(join(browserPackage, "build", "src", "bin"), { recursive: true });
     writeFileSync(join(piPackage, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: ${JSON.stringify(runtimePiVersion)}, piConfig: { configDir: ".pi" }, bin: { pi: "dist/bundle/cli.js" } }));
     writeFileSync(join(adapterPackage, "package.json"), JSON.stringify({ name: "pi-mcp-adapter", version: "2.15.0", bin: { "pi-mcp-adapter": "cli.js" } }));
-    writeFileSync(join(browserPackage, "package.json"), JSON.stringify({ name: "chrome-devtools-mcp", version: "1.8.0", bin: { "chrome-devtools-mcp": "build/src/bin/chrome-devtools-mcp.js" } }));
+    writeFileSync(join(browserPackage, "package.json"), JSON.stringify({ name: "chrome-devtools-mcp", version: "1.8.0", bin: { "chrome-devtools-mcp": "./build/src/bin/chrome-devtools-mcp.js" } }));
     cpSync(process.env.PIPI_TEST_PI_FIXTURE, piEntry);
     chmodSync(piEntry, 0o755);
     writeFileSync(adapterEntry, "process.exit(0);\\n");
@@ -360,7 +371,7 @@ const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 
 const expectedBrowserMcpServers = (home) => {
   const agentDir = join(home, ".pipi", "agent");
-  const skillDir = join(agentDir, "skills", "browser-chrome");
+  const skillDir = join(agentDir, "adapters", "browser-chrome");
   const browserBunWrapper = join(agentDir, "bin", "pipi-browser-bun");
   const bunRuntime = join(home, "fake-bin", "bun");
   const commonEnv = {
@@ -424,10 +435,7 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   const first = install(fixture);
   assert.equal(first.status, 0, first.stderr);
   assert.match(first.stdout, /Codex CLI:/);
-  assert.match(
-    first.stdout,
-    new RegExp(`Evidence-driven code-review skill: ${reviewerSubmodule}`),
-  );
+  assert.match(first.stdout, /Shared code-review skill:/);
   assert.match(
     first.stdout,
     new RegExp(`Plan GitHub backlog skill: ${backlogSubmodule}`),
@@ -472,11 +480,16 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   ]);
 
   const pipiAgentDir = join(fixture.home, ".pipi", "agent");
-  const installedBrowserSkill = join(pipiAgentDir, "skills", "browser-chrome");
+  const installedBrowserSkill = join(
+    pipiAgentDir,
+    "adapters",
+    "browser-chrome",
+  );
   const pipiMcpPath = join(pipiAgentDir, "mcp.json");
+  assert.equal(existsSync(join(installedBrowserSkill, "SKILL.md")), false);
   assert.equal(
-    readFileSync(join(installedBrowserSkill, "SKILL.md"), "utf8"),
-    readFileSync(join(browserSkillSource, "SKILL.md"), "utf8"),
+    existsSync(join(pipiAgentDir, "skills", "browser-chrome")),
+    false,
   );
   assert.equal(
     existsSync(join(pipiAgentDir, "skills", "aad-task-package")),
@@ -562,6 +575,125 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     readFileSync(join(regularAgentDir, "mcp.json"), "utf8"),
     regularMcp,
   );
+  const sharedBrowser = join(
+    fixture.home,
+    ".agents",
+    "skills",
+    "browser-chrome",
+  );
+  assert.equal(lstatSync(sharedBrowser).isSymbolicLink(), true);
+  assert.equal(readlinkSync(sharedBrowser), browserSkillSource);
+});
+
+for (const [fileName, dangling] of [
+  ["settings.json", false],
+  ["settings.json", true],
+  ["mcp.json", false],
+  ["mcp.json", true],
+]) {
+  test(`symlinked managed ${fileName} (${dangling ? "dangling" : "external target"}) fails before mutation`, async (t) => {
+    const fixture = await createFixture();
+    t.after(() => rm(fixture.home, { recursive: true, force: true }));
+
+    const agentDir = join(fixture.home, ".pipi", "agent");
+    const managedPath = join(agentDir, fileName);
+    const externalTarget = join(fixture.home, `${fileName}.external`);
+    const externalBytes =
+      fileName === "settings.json"
+        ? '{"preserved":true}\n'
+        : '{"mcpServers":{}}\n';
+    mkdirSync(agentDir, { recursive: true });
+    if (!dangling)
+      writeFileSync(externalTarget, externalBytes, { mode: 0o640 });
+    symlinkSync(externalTarget, managedPath);
+    rmSync(join(fixture.home, ".agents", "skills", "frontend-quality"), {
+      recursive: true,
+      force: true,
+    });
+
+    const beforeManagedState = snapshotManagedState(fixture.home);
+    const beforeLink = snapshotTree(managedPath);
+    const beforeExternalTarget = snapshotTree(externalTarget);
+    const result = install(fixture);
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      new RegExp(`Refusing to replace symlinked managed ${fileName}`),
+    );
+    assert.match(
+      result.stderr,
+      /remove the symlink or replace it with a regular file/,
+    );
+    assert.deepEqual(snapshotTree(managedPath), beforeLink);
+    assert.deepEqual(snapshotTree(externalTarget), beforeExternalTarget);
+    assert.deepEqual(snapshotManagedState(fixture.home), beforeManagedState);
+    assert.equal(existsSync(fixture.bunInstallLog), false);
+    assert.equal(existsSync(fixture.npmLog), false);
+  });
+}
+
+test("missing shared prerequisites fail before managed mutation", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  rmSync(join(fixture.home, ".agents", "skills", "frontend-quality"), {
+    recursive: true,
+    force: true,
+  });
+  const before = snapshotManagedState(fixture.home);
+  const result = install(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Required shared skill is missing/);
+  assert.deepEqual(snapshotManagedState(fixture.home), before);
+  assert.equal(existsSync(fixture.bunInstallLog), false);
+});
+
+test("custom runtime environment on a managed MCP command is preserved by refusal", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const agentDir = join(fixture.home, ".pipi", "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const mcpPath = join(agentDir, "mcp.json");
+  writeFileSync(
+    mcpPath,
+    JSON.stringify({
+      mcpServers: {
+        "browser-chrome-headed": {
+          command: join(
+            agentDir,
+            "skills",
+            "browser-chrome",
+            "scripts",
+            "mcp.sh",
+          ),
+          args: ["headed"],
+          env: { BROWSER_CHROME_MCP_PACKAGE: "custom-package" },
+        },
+      },
+    }),
+  );
+  const before = snapshotManagedState(fixture.home);
+  const result = install(fixture);
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(snapshotManagedState(fixture.home), before);
+  assert.equal(existsSync(fixture.bunInstallLog), false);
+});
+
+test("conflicting browser MCP ownership fails before mutation", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const agentDir = join(fixture.home, ".pipi", "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const mcpPath = join(agentDir, "mcp.json");
+  const source = `${JSON.stringify({ metadata: { keep: true }, mcpServers: { "browser-chrome-headed": { command: "/custom/browser", args: ["owned-by-user"] } } }, null, 2)}\n`;
+  writeFileSync(mcpPath, source);
+  const before = snapshotManagedState(fixture.home);
+  const result = install(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /conflicting MCP server browser-chrome-headed/);
+  assert.deepEqual(snapshotManagedState(fixture.home), before);
+  assert.equal(readFileSync(mcpPath, "utf8"), source);
+  assert.equal(existsSync(fixture.bunInstallLog), false);
 });
 
 test("launcher scopes the Pi process hint to Herdr panes", async (t) => {
@@ -873,10 +1005,8 @@ test("package loads canonical submodule resources", () => {
     false,
   );
   assert.equal(
-    manifest.pi.skills.filter(
-      (path) => path === "./vendor/gpt5.6-reviewer/skills",
-    ).length,
-    1,
+    manifest.pi.skills.includes("./vendor/gpt5.6-reviewer/skills"),
+    false,
   );
   assert.equal(reviewer.path, "vendor/gpt5.6-reviewer");
   assert.equal(
@@ -884,7 +1014,6 @@ test("package loads canonical submodule resources", () => {
     "https://github.com/blockedby/gpt5.6-reviewer.git",
   );
   assert.equal(reviewer.branch, "main");
-  assert.equal(reviewer.piSkillPath, "./vendor/gpt5.6-reviewer/skills");
 
   assert.equal(existsSync(backlogSkillSource), true);
   assert.match(
@@ -1372,7 +1501,53 @@ test("browser asset replacement preserves a pre-existing dangling backup until c
   assert.deepEqual(browserTransactionArtifacts(target), []);
 });
 
-test("normal and repository-skip reinstall replace a dangling browser skill", async () => {
+test("legacy managed browser copy is backed up during explicit upgrade", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const agentDir = join(fixture.home, ".pipi", "agent");
+  const legacySkill = join(agentDir, "skills", "browser-chrome");
+  mkdirSync(legacySkill, { recursive: true });
+  writeFileSync(
+    join(legacySkill, "README.md"),
+    "# Pipi-managed browser-chrome skill\n",
+  );
+  const legacyServers = JSON.parse(
+    JSON.stringify(expectedBrowserMcpServers(fixture.home)).replaceAll(
+      `${join(agentDir, "adapters", "browser-chrome")}/`,
+      `${legacySkill}/`,
+    ),
+  );
+  writeFileSync(
+    join(agentDir, "mcp.json"),
+    `${JSON.stringify({ metadata: { preserved: true }, mcpServers: legacyServers }, null, 2)}\n`,
+  );
+
+  const refused = install(fixture);
+  assert.notEqual(refused.status, 0);
+  assert.equal(existsSync(legacySkill), true);
+
+  const result = install(fixture, ["--adopt-shared-skills"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(legacySkill), false);
+  const mcp = readJson(join(agentDir, "mcp.json"));
+  assert.deepEqual(mcp.metadata, { preserved: true });
+  assert.deepEqual(mcp.mcpServers, expectedBrowserMcpServers(fixture.home));
+  assert.equal(
+    readFileSync(
+      join(
+        agentDir,
+        "backups",
+        "shared-skill-migration-v1",
+        "browser-chrome",
+        "README.md",
+      ),
+      "utf8",
+    ),
+    "# Pipi-managed browser-chrome skill\n",
+  );
+});
+
+test("differing legacy browser copies require explicit backup and adoption", async () => {
   for (const skipRepositoryDependencies of [false, true]) {
     const fixture = await createFixture();
     try {
@@ -1390,26 +1565,57 @@ test("normal and repository-skip reinstall replace a dangling browser skill", as
       );
       mkdirSync(dirname(browserTarget), { recursive: true });
       symlinkSync(externalTarget, browserTarget);
+      const frontendCopy = join(dirname(browserTarget), "frontend-quality");
+      mkdirSync(frontendCopy);
+      writeFileSync(join(frontendCopy, "notes.txt"), "custom frontend copy\n");
+      const codeReviewCopy = join(dirname(browserTarget), "code-review");
+      const externalCodeReview = join(fixture.home, "external-code-review");
+      symlinkSync(externalCodeReview, codeReviewCopy);
+
+      const args = [
+        installScript,
+        ...(skipRepositoryDependencies
+          ? ["--skip-repository-dependencies"]
+          : []),
+        "--codex-tools",
+        fixture.codexTools,
+      ];
+      const refused = spawnSync(process.execPath, args, {
+        cwd: repositoryRoot,
+        env: fixture.env,
+        encoding: "utf8",
+      });
+      assert.notEqual(refused.status, 0);
+      assert.match(refused.stderr, /--adopt-shared-skills/);
+      assert.equal(lstatSync(browserTarget).isSymbolicLink(), true);
 
       const result = spawnSync(
         process.execPath,
-        [
-          installScript,
-          ...(skipRepositoryDependencies
-            ? ["--skip-repository-dependencies"]
-            : []),
-          "--codex-tools",
-          fixture.codexTools,
-        ],
+        [...args, "--adopt-shared-skills"],
         { cwd: repositoryRoot, env: fixture.env, encoding: "utf8" },
       );
       assert.equal(result.status, 0, result.stderr);
-      assert.equal(lstatSync(browserTarget).isDirectory(), true);
-      assert.equal(lstatSync(browserTarget).isSymbolicLink(), false);
-      assert.equal(
-        existsSync(join(browserTarget, "scripts", "control-mcp.sh")),
-        true,
+      assert.equal(existsSync(browserTarget), false);
+      const backup = join(
+        fixture.home,
+        ".pipi",
+        "agent",
+        "backups",
+        "shared-skill-migration-v1",
+        "browser-chrome",
       );
+      assert.equal(lstatSync(backup).isSymbolicLink(), true);
+      assert.equal(readlinkSync(backup), externalTarget);
+      assert.equal(
+        readFileSync(
+          join(dirname(backup), "frontend-quality", "notes.txt"),
+          "utf8",
+        ),
+        "custom frontend copy\n",
+      );
+      const codeReviewBackup = join(dirname(backup), "code-review");
+      assert.equal(lstatSync(codeReviewBackup).isSymbolicLink(), true);
+      assert.equal(readlinkSync(codeReviewBackup), externalCodeReview);
       assert.equal(snapshotTree(externalTarget).type, "absent");
       assert.deepEqual(browserTransactionArtifacts(browserTarget), []);
       assert.deepEqual(snapshotManagedState(fixture.home).stages, []);
@@ -1451,6 +1657,7 @@ test("late managed failure restores a dangling browser skill exactly", async (t)
       "--skip-repository-dependencies",
       "--codex-tools",
       fixture.codexTools,
+      "--adopt-shared-skills",
     ],
     {
       cwd: repositoryRoot,
@@ -1612,7 +1819,7 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   const settingsPath = join(pipiAgentDir, "settings.json");
   writeFileSync(
     settingsPath,
-    `${JSON.stringify({ quietStartup: true, theme: "old-theme", compaction: { enabled: false, reserveTokens: 1, keepRecentTokens: 12_345 }, packages: ["existing-package", repositoryRoot, { source: legacyMcpAdapterPackage, extensions: ["index.ts"] }, { source: legacyPiSubagentsPackage, skills: [] }] }, null, 2)}\n`,
+    `${JSON.stringify({ quietStartup: true, theme: "old-theme", skills: ["skills/browser-chrome"], compaction: { enabled: false, reserveTokens: 1, keepRecentTokens: 12_345 }, packages: ["existing-package", repositoryRoot, { source: legacyMcpAdapterPackage, extensions: ["index.ts"] }, { source: legacyPiSubagentsPackage, skills: [] }] }, null, 2)}\n`,
   );
   writeFileSync(
     join(pipiAgentDir, "mcp.json"),
@@ -1643,10 +1850,12 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
     writeFileSync(path, "remove me\n");
   }
 
-  const result = install(fixture);
+  const result = install(fixture, ["--adopt-shared-skills"]);
   assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Stale explicit skill settings/);
   assert.deepEqual(readJson(settingsPath), {
     quietStartup: true,
+    skills: ["skills/browser-chrome"],
     theme: "github-dark-default",
     defaultProvider: "openai-codex",
     defaultModel: "gpt-6-astra",
@@ -2402,7 +2611,7 @@ test("SIGKILL-left installer ownership is recovered on retry", async (t) => {
   );
 });
 
-test("installed direct browser, install-local, and generated MCP paths stay on pinned Bun", async (t) => {
+test("installed browser adapter and generated MCP paths stay on pinned Bun", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
   const installed = install(fixture);
@@ -2411,7 +2620,7 @@ test("installed direct browser, install-local, and generated MCP paths stay on p
     fixture.home,
     ".pipi",
     "agent",
-    "skills",
+    "adapters",
     "browser-chrome",
   );
   const directEnv = {
@@ -2441,46 +2650,12 @@ test("installed direct browser, install-local, and generated MCP paths stay on p
     "argument with spaces",
   ]);
 
-  const localInstall = execFileSync(
-    join(skill, "scripts", "install-local.sh"),
-    [],
-    {
-      env: fixture.env,
-      encoding: "utf8",
-    },
-  );
-  assert.match(localInstall, /Installed Bun-safe browser-chrome MCP wiring/);
+  assert.equal(existsSync(join(skill, "SKILL.md")), false);
+  assert.equal(existsSync(join(skill, "scripts", "install-local.sh")), false);
   assert.deepEqual(
     readJson(join(fixture.home, ".pipi", "agent", "mcp.json")).mcpServers,
     expectedBrowserMcpServers(fixture.home),
   );
-
-  const alternateAgent = join(fixture.home, "alternate-agent");
-  const alternateSkill = join(alternateAgent, "skills", "browser-chrome");
-  const alternateMcp = join(alternateAgent, "mcp.json");
-  execFileSync(join(skill, "scripts", "install-local.sh"), [], {
-    env: {
-      ...fixture.env,
-      PI_AGENT_DIR: alternateAgent,
-      BROWSER_CHROME_SKILL_TARGET: alternateSkill,
-      BROWSER_CHROME_MCP_JSON: alternateMcp,
-    },
-  });
-  const alternateServers = readJson(alternateMcp).mcpServers;
-  assert.equal(
-    alternateServers["browser-chrome-headed"].command,
-    join(alternateSkill, "scripts", "mcp.sh"),
-  );
-  const alternateDirect = JSON.parse(
-    execFileSync(
-      join(alternateSkill, "scripts", "mcp.sh"),
-      ["headed", "alternate target argument"],
-      { env: directEnv, encoding: "utf8" },
-    ),
-  );
-  assert.equal(alternateDirect.bunVersion, process.versions.bun);
-  assert.equal(alternateDirect.noUpdateChecks, "1");
-  assert.equal(alternateDirect.args.at(-1), "alternate target argument");
 
   const invalid = spawnSync(join(skill, "scripts", "mcp.sh"), ["headed"], {
     env: { ...directEnv, PIPI_BUN_RUNTIME: join(fixture.home, "wrong-bun") },
@@ -2582,12 +2757,217 @@ appendFileSync(process.env.PIPI_TEST_CONTROL_LOG, JSON.stringify({ args: process
   const installedText = [
     readFileSync(join(skill, "scripts", "control-mcp.sh"), "utf8"),
     readFileSync(join(skill, "scripts", "mcp.sh"), "utf8"),
-    readFileSync(join(skill, "scripts", "install-local.sh"), "utf8"),
     readFileSync(join(skill, "README.md"), "utf8"),
     readFileSync(join(skill, "references", "mcp-config.md"), "utf8"),
   ].join("\n");
   assert.doesNotMatch(installedText, /chrome-devtools-mcp@latest/);
   assert.doesNotMatch(installedText, /(?:^|\s)npx(?:\s|$)/m);
+  assert.doesNotMatch(installedText, /install-local\.sh/);
+});
+
+test("generated browser launcher validates pins before opening and supports connect-only headed mode", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const installed = install(fixture);
+  assert.equal(installed.status, 0, installed.stderr);
+
+  const agentDir = join(fixture.home, ".pipi", "agent");
+  const skill = join(agentDir, "adapters", "browser-chrome");
+  const launcher = join(skill, "scripts", "mcp.sh");
+  const wrapper = join(agentDir, "bin", "pipi-browser-bun");
+  const entrypoint = join(
+    agentDir,
+    "runtime",
+    "node_modules",
+    ".bin",
+    "chrome-devtools-mcp",
+  );
+  const manifest = join(
+    agentDir,
+    "runtime",
+    "node_modules",
+    "chrome-devtools-mcp",
+    "package.json",
+  );
+  const openMarker = join(fixture.home, "headed-opened");
+  writeFileSync(
+    join(skill, "scripts", "open-headed.sh"),
+    `#!/bin/sh\nprintf opened > ${JSON.stringify(openMarker)}\nexit 88\n`,
+    { mode: 0o700 },
+  );
+  const env = {
+    ...fixture.env,
+    BROWSER_CHROME_HEADED_URL: "http://127.0.0.1:9233",
+  };
+  delete env.PIPI_BUN_RUNTIME;
+  delete env.BROWSER_CHROME_NODE;
+  delete env.BROWSER_CHROME_NPX;
+  delete env.BROWSER_CHROME_MCP_PACKAGE;
+
+  const connected = spawnSync(launcher, ["headed-connect"], {
+    env,
+    encoding: "utf8",
+  });
+  assert.equal(connected.status, 0, connected.stderr);
+  assert.equal(existsSync(openMarker), false);
+  assert.equal(
+    JSON.parse(connected.stdout).args.includes(
+      "--browser-url=http://127.0.0.1:9233",
+    ),
+    true,
+  );
+
+  const opened = spawnSync(launcher, ["headed"], { env, encoding: "utf8" });
+  assert.equal(opened.status, 88);
+  assert.equal(existsSync(openMarker), true);
+  rmSync(openMarker);
+
+  const assertRejectedBeforeOpen = (overrideEnv, expected) => {
+    const rejected = spawnSync(launcher, ["headed"], {
+      env: { ...env, ...overrideEnv },
+      encoding: "utf8",
+    });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, expected);
+    assert.equal(existsSync(openMarker), false);
+  };
+  assertRejectedBeforeOpen(
+    { BROWSER_CHROME_NODE: join(fixture.home, "other-bun") },
+    /BROWSER_CHROME_NODE must match/,
+  );
+  assertRejectedBeforeOpen(
+    { BROWSER_CHROME_MCP_PACKAGE: "chrome-devtools-mcp@latest" },
+    /BROWSER_CHROME_MCP_PACKAGE must be/,
+  );
+
+  const wrapperMode = lstatSync(wrapper).mode & 0o777;
+  chmodSync(wrapper, 0o600);
+  assertRejectedBeforeOpen({}, /wrapper is not executable/);
+  chmodSync(wrapper, wrapperMode);
+
+  const savedEntrypoint = `${entrypoint}.saved`;
+  renameSync(entrypoint, savedEntrypoint);
+  assertRejectedBeforeOpen({}, /entrypoint is missing/);
+  renameSync(savedEntrypoint, entrypoint);
+
+  const manifestBytes = readFileSync(manifest);
+  writeFileSync(
+    manifest,
+    JSON.stringify({
+      name: "chrome-devtools-mcp",
+      version: "9.9.9",
+      bin: { "chrome-devtools-mcp": "build/src/bin/chrome-devtools-mcp.js" },
+    }),
+  );
+  assertRejectedBeforeOpen({}, /package metadata is invalid/);
+  writeFileSync(manifest, manifestBytes);
+
+  const bunBytes = readFileSync(fixture.fakeBunPath);
+  const bunMode = lstatSync(fixture.fakeBunPath).mode & 0o777;
+  writeFileSync(
+    fixture.fakeBunPath,
+    "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then printf '0.0.0\\n'; fi\n",
+    { mode: bunMode },
+  );
+  assertRejectedBeforeOpen({}, /must remain stable version/);
+  writeFileSync(fixture.fakeBunPath, bunBytes, { mode: bunMode });
+
+  const savedBun = `${fixture.fakeBunPath}.launcher-saved`;
+  renameSync(fixture.fakeBunPath, savedBun);
+  assertRejectedBeforeOpen({}, /not executable/);
+  renameSync(savedBun, fixture.fakeBunPath);
+
+  const remoteMarker = join(fixture.home, "remote-opened");
+  const unsafeRemote = spawnSync(launcher, ["headless"], {
+    env: {
+      ...env,
+      BROWSER_CHROME_HEADLESS_START_COMMAND: `printf opened > ${JSON.stringify(remoteMarker)}; printf 'id=remote url=http://127.0.0.1:9444\\n'`,
+    },
+    encoding: "utf8",
+  });
+  assert.equal(unsafeRemote.status, 2);
+  assert.match(unsafeRemote.stderr, /remote-start-requires-close-command/);
+  assert.equal(existsSync(remoteMarker), false);
+});
+
+test("generated headless launcher preserves status and reaps its MCP child before cleanup", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const installed = install(fixture);
+  assert.equal(installed.status, 0, installed.stderr);
+
+  const agentDir = join(fixture.home, ".pipi", "agent");
+  const skill = join(agentDir, "adapters", "browser-chrome");
+  const launcher = join(skill, "scripts", "mcp.sh");
+  const browserEntry = join(
+    agentDir,
+    "runtime",
+    "node_modules",
+    "chrome-devtools-mcp",
+    "build",
+    "src",
+    "bin",
+    "chrome-devtools-mcp.js",
+  );
+  const bunMode = lstatSync(fixture.fakeBunPath).mode & 0o777;
+  writeFileSync(
+    fixture.fakeBunPath,
+    `#!/bin/sh\nif [ "\${1:-}" = --version ]; then printf '1.4.0\\n'; exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+    { mode: bunMode },
+  );
+
+  const browserHome = join(fixture.home, "browser-state");
+  const closeMarker = join(fixture.home, "headless-closed");
+  const remoteEnv = {
+    ...fixture.env,
+    BROWSER_CHROME_NODE: fixture.fakeBunPath,
+    BROWSER_CHROME_NPX: join(agentDir, "bin", "pipi-browser-bun"),
+    BROWSER_CHROME_MCP_PACKAGE: "chrome-devtools-mcp@1.8.0",
+    BROWSER_CHROME_HOME: browserHome,
+    BROWSER_CHROME_HEADLESS_START_COMMAND:
+      "printf 'id=fixture url=http://127.0.0.1:9444\\n'",
+    BROWSER_CHROME_HEADLESS_CLOSE_COMMAND: `printf closed > ${JSON.stringify(closeMarker)}`,
+  };
+
+  writeFileSync(browserEntry, "process.exit(37);\n", { mode: 0o755 });
+  const exited = spawnSync(launcher, ["headless"], {
+    env: remoteEnv,
+    encoding: "utf8",
+  });
+  assert.equal(exited.status, 37, exited.stderr);
+  assert.equal(existsSync(closeMarker), true);
+  assert.equal(existsSync(join(browserHome, "headless", "fixture.env")), false);
+  rmSync(closeMarker);
+
+  const childPidMarker = join(fixture.home, "headless-child-pid");
+  const childSignalMarker = join(fixture.home, "headless-child-terminated");
+  writeFileSync(
+    browserEntry,
+    `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(childPidMarker)}, String(process.pid));\nprocess.on("SIGTERM", () => { writeFileSync(${JSON.stringify(childSignalMarker)}, "terminated\\n"); process.exit(0); });\nsetInterval(() => {}, 1000);\n`,
+    { mode: 0o755 },
+  );
+  const running = spawn(launcher, ["headless"], {
+    env: remoteEnv,
+    stdio: "ignore",
+  });
+  for (
+    let attempt = 0;
+    attempt < 500 && !existsSync(childPidMarker);
+    attempt += 1
+  ) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  }
+  assert.equal(existsSync(childPidMarker), true);
+  const browserPid = Number(readFileSync(childPidMarker, "utf8"));
+  running.kill("SIGTERM");
+  const termination = await new Promise((resolveExit) =>
+    running.once("exit", (code, signal) => resolveExit({ code, signal })),
+  );
+  assert.deepEqual(termination, { code: 143, signal: null });
+  assert.equal(existsSync(childSignalMarker), true);
+  assert.equal(existsSync(closeMarker), true);
+  assert.throws(() => process.kill(browserPid, 0), /ESRCH/);
+  assert.equal(existsSync(join(browserHome, "headless", "fixture.env")), false);
 });
 
 test("removed Bun bootstrap surfaces are absent from the active package, API, and docs", () => {

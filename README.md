@@ -48,7 +48,9 @@ Implementation agents work in dedicated Git worktrees, keeping feature changes i
 - ask-user, copy-all, session summaries, and Git/model status UI
 - GitHub Dark Default theme
 
-### Built-in skills
+### Skills
+
+Pipi uses your shared browser, frontend-quality, and code-review skills without installing competing copies. See [shared skill setup](docs/shared-skills.md).
 
 | Skill                  | Purpose                                         |
 | ---------------------- | ----------------------------------------------- |
