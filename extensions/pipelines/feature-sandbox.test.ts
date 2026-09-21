@@ -18,6 +18,205 @@ import {
   runFeatureSandboxCommand,
 } from "./feature-sandbox.ts";
 
+test("ordinary tools and preparation share a credential-free filesystem and environment", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-prepare-boundary-"));
+  const workspace = path.join(root, "workspace");
+  const secretRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pipi-host-secret-"),
+  );
+  const homeSecret = fs.mkdtempSync(
+    path.join(os.homedir(), ".pipi-sandbox-sentinel-"),
+  );
+  fs.writeFileSync(path.join(homeSecret, "token"), "home-secret");
+  const sibling = path.join(root, "sibling");
+  const fixture = path.join(root, "fixture");
+  for (const directory of [
+    workspace,
+    sibling,
+    secretRoot,
+    path.join(fixture, "package"),
+    path.join(workspace, "nested", ".git"),
+  ])
+    fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(secretRoot, "auth.json"), "host-secret");
+  fs.writeFileSync(path.join(sibling, "secret"), "sibling-secret");
+  fs.writeFileSync(path.join(workspace, ".git"), `gitdir: ${secretRoot}\n`);
+  fs.writeFileSync(
+    path.join(workspace, "nested", ".git", "config"),
+    "git-secret",
+  );
+  fs.symlinkSync(secretRoot, path.join(workspace, "escape"));
+  fs.writeFileSync(
+    path.join(fixture, "package", "package.json"),
+    JSON.stringify({
+      name: "sandbox-fixture",
+      version: "1.0.0",
+      main: "index.js",
+    }),
+  );
+  fs.writeFileSync(
+    path.join(fixture, "package", "index.js"),
+    "module.exports = 42;",
+  );
+  const tarball = execFileSync("tar", ["-czf", "-", "-C", fixture, "package"]);
+  let requests = 0;
+  const server = createServer((_request, response) => {
+    requests++;
+    response.end(tarball);
+  });
+  const inherited = {
+    SSH_AUTH_SOCK: path.join(secretRoot, "agent.sock"),
+    SSH_AGENT_PID: "12345",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.sshCommand",
+    GIT_CONFIG_VALUE_0: "host-secret",
+    GIT_DIR: secretRoot,
+    GIT_SSH_COMMAND: "host-secret",
+    NPM_TOKEN: "host-secret",
+    OPENAI_API_KEY: "host-secret",
+    ANTHROPIC_API_KEY: "host-secret",
+    NODE_OPTIONS: "--trace-warnings",
+    BASH_ENV: path.join(secretRoot, "startup"),
+    npm_config_userconfig: path.join(secretRoot, "auth.json"),
+    HTTPS_PROXY: "http://127.0.0.1:1",
+  };
+  const previous = Object.fromEntries(
+    Object.keys(inherited).map((key) => [key, process.env[key]]),
+  );
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    Object.assign(process.env, inherited);
+    fs.writeFileSync(
+      path.join(workspace, "verify.cjs"),
+      `
+      const assert = require('node:assert/strict');
+      const fs = require('node:fs');
+      for (const key of ${JSON.stringify(Object.keys(inherited))}) assert.equal(process.env[key], undefined, key);
+      for (const file of ${JSON.stringify([path.join(secretRoot, "auth.json"), path.join(homeSecret, "token"), path.join(sibling, "secret"), path.join(workspace, "escape", "auth.json"), path.join(workspace, "nested", ".git", "config")])}) assert.throws(() => fs.readFileSync(file));
+      let pointer = '';
+      try { pointer = fs.readFileSync('.git', 'utf8'); } catch (error) { assert.equal(error.code, 'EACCES'); }
+      assert.equal(pointer, '');
+      assert.throws(() => fs.writeFileSync('.git', 'bad'));
+      assert.throws(() => fs.writeFileSync('nested/.git/config', 'bad'));
+      assert.throws(() => fs.writeFileSync(${JSON.stringify(path.join(sibling, "leak"))}, 'bad'));
+      fs.writeFileSync(process.env.HOME + '/home-probe', 'isolated');
+    `,
+    );
+    const boundary = createFeatureToolBoundary({
+      cwd: workspace,
+      mode: "candidate",
+    });
+    for (const denied of [
+      path.join(homeSecret, "token"),
+      path.join(sibling, "secret"),
+      path.join(workspace, "escape", "auth.json"),
+      path.join(workspace, "nested", ".git", "config"),
+    ]) {
+      await assert.rejects(execute(tool(boundary, "read"), { path: denied }));
+    }
+    assert.equal(boundary.availableToolNames.includes("fd"), false);
+    assert.equal(boundary.availableToolNames.includes("rg"), false);
+    await execute(tool(boundary, "read"), {
+      path: path.join(workspace, "verify.cjs"),
+    });
+    // Exercise the actual model bash wrapper as well as controller checks.
+    await execute(tool(boundary, "bash"), {
+      command:
+        "node verify.cjs && test -x /usr/bin/git && cat verify.cjs >/dev/null",
+    });
+    const ordinary = await runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      command: "node verify.cjs",
+    });
+    assert.equal(ordinary.exitCode, 0, ordinary.stderr);
+    const result = await runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      preparation: true,
+      command: `node verify.cjs && npm install --allow-remote=all --ignore-scripts --no-audit --no-fund --update-notifier=false --package-lock=false http://127.0.0.1:${address.port}/fixture.tgz && node -e "require('node:fs').writeFileSync('built.txt', String(require('sandbox-fixture')))"`,
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.ok(requests > 0);
+    assert.equal(
+      fs.readFileSync(path.join(workspace, "built.txt"), "utf8"),
+      "42",
+    );
+    assert.equal(
+      fs.readFileSync(path.join(workspace, "nested", ".git", "config"), "utf8"),
+      "git-secret",
+    );
+    assert.equal(
+      fs.readFileSync(path.join(workspace, ".git"), "utf8"),
+      `gitdir: ${secretRoot}\n`,
+    );
+    assert.equal(fs.existsSync(path.join(sibling, "leak")), false);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(secretRoot, { recursive: true, force: true });
+    fs.rmSync(homeSecret, { recursive: true, force: true });
+  }
+});
+
+test("preparation cancellation terminates background descendants without cancelling another invocation", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-prepare-cancel-"));
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace);
+  const controller = new AbortController();
+  try {
+    const running = runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      preparation: true,
+      signal: controller.signal,
+      command:
+        "(trap '' TERM; while true; do echo tick >> heartbeat; sleep 0.05; done) & wait",
+    });
+    const deadline = Date.now() + 5000;
+    while (
+      !fs.existsSync(path.join(workspace, "heartbeat")) &&
+      Date.now() < deadline
+    )
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(fs.existsSync(path.join(workspace, "heartbeat")));
+    const other = runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      preparation: true,
+      command: "sleep 0.2; printf independent",
+      signal: AbortSignal.timeout(5000),
+    });
+    controller.abort();
+    const result = await running;
+    const survivor = await other;
+    assert.equal(survivor.exitCode, 0, survivor.stderr);
+    assert.equal(survivor.stdout, "independent");
+    assert.notEqual(result.exitCode, 0);
+    const size = fs.statSync(path.join(workspace, "heartbeat")).size;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(fs.statSync(path.join(workspace, "heartbeat")).size, size);
+    const next = await runFeatureSandboxCommand({
+      workspaceRoot: workspace,
+      cwd: ".",
+      command: "printf alive",
+    });
+    assert.equal(next.stdout, "alive");
+  } finally {
+    controller.abort();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 const context = { cwd: "/" } as unknown as ExtensionContext;
 
 function cleanupEvidence() {
@@ -311,13 +510,16 @@ test("deep worktrees support Unix sockets in sandbox temporary directories", asy
   `,
   );
   try {
-    const result = await runFeatureSandboxCommand({
-      workspaceRoot: workspace,
-      cwd: ".",
-      command: "node socket.cjs",
-      signal: AbortSignal.timeout(5000),
-    });
-    assert.equal(result.exitCode, 0, result.stderr);
+    for (const preparation of [false, true]) {
+      const result = await runFeatureSandboxCommand({
+        workspaceRoot: workspace,
+        cwd: ".",
+        command: "node socket.cjs",
+        preparation,
+        signal: AbortSignal.timeout(5000),
+      });
+      assert.equal(result.exitCode, 0, result.stderr);
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -775,6 +977,8 @@ test("loaded skill packages support symlinks, resources and executable scripts w
   fs.mkdirSync(cwd, { recursive: true });
   fs.mkdirSync(path.join(packageRoot, "scripts"), { recursive: true });
   fs.mkdirSync(path.join(packageRoot, "assets"));
+  fs.mkdirSync(path.join(packageRoot, ".git"));
+  fs.writeFileSync(path.join(packageRoot, ".git", "config"), "live-git-secret");
   fs.mkdirSync(path.dirname(alias), { recursive: true });
   fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "fixture skill");
   fs.writeFileSync(
@@ -820,6 +1024,7 @@ test("loaded skill packages support symlinks, resources and executable scripts w
       for (const denied of [
         secret,
         path.join(alias, "escape"),
+        path.join(alias, ".git", "config"),
         path.join(sibling, "SKILL.md"),
       ]) {
         await assert.rejects(
@@ -855,7 +1060,7 @@ test("loaded skill packages support symlinks, resources and executable scripts w
         "fixture resource",
       );
       await execute(tool(boundary, "bash"), {
-        command: `! touch '${alias}/new.txt' && ! touch '${packageRoot}/new.txt'`,
+        command: `! touch '${alias}/new.txt' && ! touch '${packageRoot}/new.txt' && ! cat '${alias}/.git/config' && ! cat '${packageRoot}/.git/config' && ! cat '${alias}/escape' && ! cat '${secret}'`,
       });
       assert.equal(fs.existsSync(path.join(packageRoot, "new.txt")), false);
     }

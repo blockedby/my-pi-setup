@@ -1,0 +1,1187 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Feature pipeline — меньше хрупкости, больше полномочий</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #faf9f6;
+        --ink: #151515;
+        --muted: #60605b;
+        --line: #cecdc6;
+        --soft: #eeede7;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font:
+          17px/1.65 system-ui,
+          sans-serif;
+      }
+      main,
+      header,
+      footer {
+        max-width: 1160px;
+        margin: auto;
+        padding: 40px 28px;
+      }
+      header {
+        padding-top: 72px;
+        border-bottom: 3px solid;
+      }
+      h1 {
+        font-size: clamp(40px, 6.4vw, 78px);
+        line-height: 1.04;
+        letter-spacing: -0.055em;
+        margin: 24px 0;
+      }
+      h2 {
+        font-size: clamp(28px, 4vw, 42px);
+        line-height: 1.18;
+        letter-spacing: -0.035em;
+        margin: 12px 0 24px;
+      }
+      h3 {
+        font-size: 23px;
+        line-height: 1.25;
+        margin: 0 0 16px;
+      }
+      p {
+        margin: 10px 0;
+      }
+      .eyebrow,
+      .label,
+      .num,
+      code {
+        font-family: ui-monospace, monospace;
+      }
+      .eyebrow,
+      .label {
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .lead {
+        font-size: 23px;
+        max-width: 900px;
+      }
+      .banner {
+        background: var(--ink);
+        color: var(--paper);
+        padding: 26px;
+        margin: 28px 0;
+      }
+      .banner p {
+        max-width: 950px;
+      }
+      a {
+        color: inherit;
+        text-underline-offset: 4px;
+      }
+      a:focus-visible {
+        outline: 3px solid;
+        outline-offset: 4px;
+      }
+      nav {
+        display: flex;
+        gap: 12px 24px;
+        flex-wrap: wrap;
+        font-size: 14px;
+        margin-top: 26px;
+      }
+      section {
+        padding: 32px 0 48px;
+        border-bottom: 1px solid var(--line);
+        scroll-margin-top: 20px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .box {
+        border: 1px solid;
+        padding: 22px;
+      }
+      .box h3 {
+        font-size: 20px;
+      }
+      .strip {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .pill {
+        border: 1px solid;
+        padding: 6px 12px;
+        font-size: 14px;
+      }
+      .flow {
+        list-style: none;
+        padding: 0;
+        display: grid;
+        gap: 18px;
+        margin: 24px 0;
+      }
+      .flow > li {
+        border: 1px solid var(--ink);
+        padding: 20px 24px;
+        position: relative;
+      }
+      .flow > li + li:before {
+        content: "↓";
+        position: absolute;
+        top: -25px;
+        left: 24px;
+        background: var(--paper);
+        padding: 0 8px;
+        font-weight: bold;
+      }
+      .flow h3 {
+        font-size: 20px;
+        margin-bottom: 8px;
+      }
+      .branch {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .branch > div {
+        padding: 20px;
+        border: 1px dashed;
+      }
+      .branch strong {
+        display: block;
+      }
+      .loop {
+        border: 2px solid;
+        padding: 20px;
+        margin-top: 16px;
+      }
+      .point {
+        margin: 24px 0;
+        border: 1px solid var(--line);
+        break-inside: avoid;
+      }
+      .point-head {
+        display: flex;
+        gap: 20px;
+        padding: 22px 24px;
+        border-bottom: 1px solid var(--line);
+        align-items: baseline;
+      }
+      .point-head h3 {
+        margin: 0;
+      }
+      .num {
+        font-size: 27px;
+        flex-shrink: 0;
+      }
+      .compare {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+      }
+      .compare > div {
+        padding: 22px 24px;
+      }
+      .compare > div + div {
+        border-left: 1px solid var(--line);
+        background: var(--soft);
+      }
+      .compare p {
+        margin: 10px 0 0;
+      }
+      .guard {
+        padding: 16px 24px;
+        border-top: 1px solid var(--line);
+        font-size: 15px;
+      }
+      .guard strong {
+        margin-right: 6px;
+      }
+      code {
+        font-size: 0.85em;
+        overflow-wrap: anywhere;
+      }
+      .source {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 8px;
+        overflow-wrap: anywhere;
+      }
+      .priority {
+        counter-reset: prio;
+        list-style: none;
+        padding: 0;
+      }
+      .priority li {
+        counter-increment: prio;
+        display: flex;
+        gap: 18px;
+        padding: 18px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .priority li:before {
+        content: counter(prio, decimal-leading-zero);
+        font:
+          24px ui-monospace,
+          monospace;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        table-layout: fixed;
+        font-size: 15px;
+      }
+      th,
+      td {
+        padding: 15px;
+        text-align: left;
+        vertical-align: top;
+        border-bottom: 1px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+      th {
+        background: var(--ink);
+        color: var(--paper);
+      }
+      ul {
+        padding-left: 22px;
+      }
+      footer {
+        font-size: 14px;
+      }
+      .sources {
+        columns: 2;
+        font-size: 14px;
+      }
+      .sources li {
+        break-inside: avoid;
+        margin-bottom: 10px;
+      }
+      @media (max-width: 720px) {
+        header,
+        main,
+        footer {
+          padding: 28px 18px;
+        }
+        .grid,
+        .compare,
+        .branch {
+          grid-template-columns: 1fr;
+        }
+        .compare > div + div {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+        .point-head {
+          padding: 18px;
+          gap: 13px;
+        }
+        .compare > div,
+        .guard {
+          padding: 18px;
+        }
+        .sources {
+          columns: 1;
+        }
+        table,
+        tbody,
+        tr,
+        td {
+          display: block;
+        }
+        thead {
+          display: none;
+        }
+        tr {
+          border: 1px solid var(--line);
+          margin: 14px 0;
+        }
+        td:before {
+          content: attr(data-label);
+          display: block;
+          font:
+            11px ui-monospace,
+            monospace;
+          color: var(--muted);
+          margin-bottom: 8px;
+        }
+        .lead {
+          font-size: 20px;
+        }
+      }
+      @media print {
+        body {
+          background: white;
+          font-size: 10pt;
+        }
+        header,
+        main,
+        footer {
+          max-width: none;
+          padding: 18px 0;
+        }
+        h1 {
+          font-size: 36pt;
+        }
+        h2 {
+          font-size: 24pt;
+        }
+        nav {
+          display: none;
+        }
+        .banner,
+        th {
+          background: #eee;
+          color: #111;
+        }
+        .box,
+        .flow > li,
+        tr {
+          break-inside: avoid;
+        }
+        a {
+          text-decoration: none;
+        }
+        .point {
+          break-inside: avoid;
+        }
+        .sources {
+          columns: 1;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="eyebrow">
+        Pipi / обсуждение рефакторинга / 12 точек упрощения
+      </div>
+      <h1>Граф оставляем.<br />Хрупкость убираем.</h1>
+      <p class="lead">
+        Astra доводит задачу до результата. Harness управляет рабочими
+        областями, зависимостями и границами полномочий — не превращает каждую
+        рабочую ошибку в провал pipeline.
+      </p>
+      <div class="strip">
+        <span class="pill">Не отключение feature</span
+        ><span class="pill">Без отказа от fork / join</span
+        ><span class="pill">Без субагентов в этой сессии</span>
+      </div>
+      <p class="muted">
+        Предложения по результатам предыдущего разбора исходников. В исходниках
+        реализована только маршрутизация пишущих feature-ролей на Astra/low;
+        runtime не установлен, живой провайдер не проверялся. Остальной
+        harness/recovery-рефакторинг не реализован. «Сейчас» описывает
+        разобранные механизмы, а не утверждает, что каждый отказ инструмента
+        немедленно завершает весь запуск.
+      </p>
+      <nav aria-label="Разделы">
+        <a href="#direction">Ответственность</a
+        ><a href="#recovery">Цикл восстановления</a
+        ><a href="#points">12 изменений</a
+        ><a href="#policy">Какие ошибки останавливают</a
+        ><a href="#api">Параметры и модели</a><a href="#order">Приоритеты</a>
+      </nav>
+    </header>
+    <main>
+      <section id="direction">
+        <div class="eyebrow">01 / основная идея</div>
+        <h2>Не отменять ошибки.<br />Дать исполнителю их исправлять.</h2>
+        <div class="grid">
+          <div class="box">
+            <h3>Astra — исполнитель</h3>
+            <p>
+              Подготовка окружения, реализация, генерация, проверки, локальные
+              коммиты и исправления. Обычные неудачи возвращаются в ту же
+              сессию.
+            </p>
+          </div>
+          <div class="box">
+            <h3>Harness — диспетчер</h3>
+            <p>
+              Выделяет рабочие области, запускает готовые задачи, объединяет
+              ветви и записывает фактические результаты. Блокирует опасную
+              операцию, а не любую неожиданность.
+            </p>
+          </div>
+          <div class="box">
+            <h3>Luna — исследователь и аудитор</h3>
+            <p>
+              Собирает контекст и независимо проверяет результат. Пишущие роли
+              большого feature переведены на Astra/low только в исходниках.
+            </p>
+          </div>
+        </div>
+        <div class="banner">
+          <strong
+            >Нормальная рабочая ситуация ≠ ошибка реализации ≠ нарушение
+            границ.</strong
+          >
+          <p>
+            Генерация изменила файл — разобраться. Тест упал — исправить.
+            Потеряно владение рабочей областью — приостановить опасные операции
+            и передать вопрос наверх.
+          </p>
+        </div>
+      </section>
+      <section id="recovery">
+        <div class="eyebrow">02 / целевой процесс</div>
+        <h2>Ошибка возвращает к работе, а не к старту.</h2>
+        <p class="muted">
+          Стрелки ниже обозначают передачу результата следующему участнику.
+          Рамка «возврат» — продолжение той же Astra-сессии, а не создание
+          нового агента.
+        </p>
+        <ol class="flow">
+          <li>
+            <h3>Harness выделяет задачу и workspace</h3>
+            <p>
+              Есть цель, база Git, зависимости и критерии. Идеально
+              подготовленное окружение больше не обязательное условие старта
+              модели.
+            </p>
+          </li>
+          <li>
+            <h3>Astra готовит среду и реализует задачу</h3>
+            <p>
+              Может устанавливать зависимости, генерировать файлы, собирать,
+              проверять и сохранять небольшие локальные коммиты в своей области.
+            </p>
+          </li>
+          <li>
+            <h3>Проверки возвращают факты</h3>
+            <p>
+              Отдельно: exit code, вывод, проверенный вход и изменения файлов.
+              Успешная команда не становится «упавшей» только из-за генерации.
+            </p>
+            <div class="branch">
+              <div>
+                <strong>Есть исправимая проблема</strong>Та же Astra получает
+                диагностику и продолжает. Потомки задачи ждут; независимые ветви
+                могут работать.
+              </div>
+              <div>
+                <strong>Критерии выполнены</strong>Astra завершает коммиты и
+                разбирает остатки. Harness принимает диапазон коммитов и
+                результаты проверок.
+              </div>
+            </div>
+            <div class="loop">
+              <strong>↶ Возврат к работе:</strong> исправление → нужные
+              повторные проверки → принятие результата. Не бесконечно:
+              отсутствие прогресса, лимит или отмена приводят к остановке с
+              сохранением сделанного.
+            </div>
+          </li>
+          <li>
+            <h3>Join → review → независимый audit</h3>
+            <p>
+              Конфликты и дефекты интеграции исправляет Astra. Успешный коммит
+              сам по себе не доказывает качество и не разрешает push или
+              deployment.
+            </p>
+          </li>
+        </ol>
+      </section>
+      <section id="points">
+        <div class="eyebrow">03 / по ходу выполнения</div>
+        <h2>Двенадцать мест, где можно упростить жизнь.</h2>
+        <article class="point" id="p1">
+          <div class="point-head">
+            <span class="num">01</span>
+            <h3>Подготовка: модель должна получить шанс</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Ошибка worktree_prepare останавливает новые старты до запуска
+                исполнителя. Неуспешный baseline или изменение tracked-файлов на
+                этом шаге тоже блокирует граф.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Запускать Astra с диагностикой. Пусть изучит инструкции,
+                установит зависимости, соберёт workspace-пакеты и поправит
+                рецепт подготовки. Удачный рецепт повторять в дочерних копиях,
+                разрешая его корректировать.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Граница:</strong> подготовка внутри своей рабочей области,
+            не произвольная перенастройка системы или production.<a
+              class="source"
+              href="../extensions/pipelines/feature-graph-executor.ts"
+              >feature-graph-executor.ts · prepareBranch / executeRuntime</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p2">
+          <div class="point-head">
+            <span class="num">02</span>
+            <h3>Изменённые сборкой файлы — не failed check</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Условие passed требует одновременно exitCode = 0 и отсутствия
+                changedPaths. Успешная команда с изменениями записывается как
+                failed. В задаче возможны повторы; на стартовом baseline модель
+                ещё не запущена.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Разделить исход команды и побочные изменения. Отдать Astra diff:
+                принять generated-файлы, удалить временный вывод или исправить
+                генерацию. Повторять проверки, которые затронуты последующими
+                правками.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Не попасть в цикл:</strong> сборка с новым номером версии
+            при каждом запуске не обязана когда-либо дать нулевой diff. Нужно
+            записывать проверенный вход и полученные артефакты, а не требовать
+            неподвижности файлов.<a
+              class="source"
+              href="../extensions/pipelines/feature-task-runtime.ts"
+              >feature-task-runtime.ts · статус FeatureCheckResult</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p3">
+          <div class="point-head">
+            <span class="num">03</span>
+            <h3>Readiness: диагностика вместо раннего тупика</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Readiness-команда может завершить run ещё на discovery. Источник
+                команды проверяется по точному excerpt; baseline-команды связаны
+                с успешными readiness-записями.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Discovery сообщает факты. Неисправная среда становится работой
+                Astra. Источник команды остаётся объяснением, но точное
+                совпадение текста не должно запрещать исправление команды по
+                реальному проекту.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Сохранить:</strong> исходный baseline нужен, чтобы отличать
+            старые падения от новых регрессий. Не превращать «проверка не
+            запустилась» в «всё прошло».<a
+              class="source"
+              href="../extensions/pipelines/controller.ts"
+              >controller.ts · planning readiness</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p4">
+          <div class="point-head">
+            <span class="num">04</span>
+            <h3>Коммиты: небольшие точки сохранения</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Один provisional commit задачи и его amendments. HEAD должен
+                совпадать с ожидаемым контроллером; другое значение считается
+                выходом за его владение.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Разрешить несколько локальных коммитов. Результат задачи —
+                диапазон от базы до принятого HEAD. Допустимое продолжение
+                собственной ветки не считать аварией; join переносит диапазон.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Решение ещё нужно:</strong> обычный Git или scoped
+            Git-инструмент. Нельзя открыть push и операции над общими refs
+            просто как побочный эффект разрешения commit.<a
+              class="source"
+              href="../extensions/pipelines/feature-task-runtime.ts"
+              >feature-task-runtime.ts · assertActive / finalize</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p5">
+          <div class="point-head">
+            <span class="num">05</span>
+            <h3>Один staging вместо трёх систем выбора</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Git index, точные commitPaths и отдельные preparation
+                commit/discard selections дублируют выбор файлов. Неучтённый
+                staged-путь или preparation-файл блокирует финализацию.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                В полностью принадлежащем задаче workspace Astra управляет
+                обычным diff/index и коммитами. Финализация принимает результат,
+                а не требует повторно описывать staging через ещё один контракт.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Не означает:</strong> автоматически добавить все файлы через
+            git add -A. Исполнитель должен проверять состав коммита, исключать
+            секреты и постороннее.<a
+              class="source"
+              href="../extensions/pipelines/feature-task-worktrees.ts"
+              >feature-task-worktrees.ts · selection validation /
+              finalization</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p6">
+          <div class="point-head">
+            <span class="num">06</span>
+            <h3>Не наследовать бухгалтерию грязных остатков</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Остатки после cleanup переносятся дальше. Tracked residuals
+                получают fingerprints; изменение такого остатка вызывает отказ
+                «вне владения контроллера».
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Dirty-файлы нормальны во время работы. Перед передачей задачи
+                Astra завершает коммиты и разбирает остатки. Если принадлежащий
+                run workspace нельзя очистить — сохранить принятый результат и
+                пересоздать область.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Сохранить:</strong> ignored зависимости и кеши в живом
+            workspace; не удалять чужие файлы. «В коммите» означает сохранено, а
+            не автоматически проверено.<a
+              class="source"
+              href="../extensions/pipelines/feature-task-worktrees.ts"
+              >feature-task-worktrees.ts · cleanupAfterCommit / residual
+              fingerprints</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p7">
+          <div class="point-head">
+            <span class="num">07</span>
+            <h3>Проверяем поведение, а не верность угаданной команде</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Task-check вызывается по заранее объявленному checkId.
+                Неизвестная проверка отвергается этим инструментом, даже если
+                исходный план не предусмотрел нужную команду.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                План задаёт, что требуется доказать, и рекомендует команды.
+                Astra может добавлять проверки и исправлять команды; контроллер
+                сохраняет фактически выполненное и основания изменения.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Граница:</strong> заменить несуществующий script настоящим —
+            нормально. Заменить упавший тест на echo ok — не выполнение
+            критерия.<a
+              class="source"
+              href="../extensions/pipelines/feature-task-runtime.ts"
+              >feature-task-runtime.ts · checksById / host.check</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p8">
+          <div class="point-head">
+            <span class="num">08</span>
+            <h3>Одна Astra-сессия на задачу</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                До четырёх попыток, каждая — новая Astra/low. Ветка, dirty-файлы
+                и provisional commit сохраняются, но контекст исполнителя
+                собирается заново.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Постоянная Astra-сессия. Отказы инструментов и тестов
+                возвращаются ей как рабочая диагностика. Новая сессия — при
+                технической потере старой или исчерпании контекста, а не после
+                каждой неудачи.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Без бесконечности:</strong> нужны понятные пределы ресурсов
+            и реакция на отсутствие прогресса. Конкретные бюджеты ещё не
+            выбраны; wallclock_limit сохраняется.<a
+              class="source"
+              href="../extensions/pipelines/feature-graph-executor.ts"
+              >feature-graph-executor.ts · MAX_TASK_ATTEMPTS / runSession</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p9">
+          <div class="point-head">
+            <span class="num">09</span>
+            <h3>Проблемная ветка не должна замораживать независимые</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Терминальная ошибка устанавливает общий launchingStopped.
+                Выполняющийся сосед ещё может закончить, но новые задачи больше
+                не запускаются.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Блокировать потомков проблемной задачи, продолжать независимые
+                ветви. Сначала локальный ремонт Astra, затем вопрос планировщику
+                о корректировке оставшегося графа.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Глобальная остановка:</strong> отмена, общий лимит или
+            реальная общая проблема. Один неподготовленный пакет сам по себе не
+            общая авария.<a
+              class="source"
+              href="../extensions/pipelines/feature-graph-executor.ts"
+              >feature-graph-executor.ts · launchingStopped / terminalError</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p10">
+          <div class="point-head">
+            <span class="num">10</span>
+            <h3>Join: сохранить механизм, усилить ремонт</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Есть отдельный conflict resolver и join-repair при семантической
+                ошибке интеграции. Это полезная часть графа, но её исполнители и
+                операции ограничены старым task-контрактом.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Astra разрешает конфликты и исправляет интеграцию с обычными
+                возможностями подготовки, проверок и нескольких коммитов. Ошибки
+                среды отделяются от дефектов объединённого кода.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Дополнительно:</strong> разрешить планировщику поправить ещё
+            не запущенные задачи, если декомпозиция оказалась неверной. Не
+            переписывать произвольно уже выполняющиеся ветви.<a
+              class="source"
+              href="../extensions/pipelines/feature-graph-executor.ts"
+              >feature-graph-executor.ts · joins и repair</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p11">
+          <div class="point-head">
+            <span class="num">11</span>
+            <h3>Шире полномочия внутри, яснее границы снаружи</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Подготовка и обычное выполнение имеют разные сетевые права.
+                Feature sandbox закрывает живую Git-метаинформацию; часть
+                нормальной работы приходится выражать специальными
+                инструментами.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Дать исполнителю установку зависимостей, генерацию,
+                форматирование, сборки, нужные проверки и локальные коммиты. Для
+                сети и процессов сделать понятные полномочия, достаточные для
+                этой работы.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Остаётся закрытым:</strong> чужие workspaces, произвольные
+            credentials, push и deployment без отдельного разрешения. Отказ
+            должен объяснять границу, а не заставлять модель угадывать обход.<a
+              class="source"
+              href="../extensions/pipelines/feature-sandbox.ts"
+              >feature-sandbox.ts · filesystem / Git / network boundaries</a
+            >
+          </div>
+        </article>
+        <article class="point" id="p12">
+          <div class="point-head">
+            <span class="num">12</span>
+            <h3>Контракт управления — строгий. Описание — проще.</h3>
+          </div>
+          <div class="compare">
+            <div>
+              <span class="label">Сейчас</span>
+              <p>
+                Структурированные отчёты имеют бюджеты коррекций. Их исчерпание
+                может закончить run. Размеры и служебные требования создают
+                дополнительные причины отказа.
+              </p>
+            </div>
+            <div>
+              <span class="label">Предлагаем</span>
+              <p>
+                Оставить строгими IDs, зависимости, статусы и ссылки на
+                результат. Сократить требования к описательным полям. Безопасно
+                нормализовать порядок и дубли; большие материалы выдавать
+                частями.
+              </p>
+            </div>
+          </div>
+          <div class="guard">
+            <strong>Различать:</strong> ошибка оформления, ошибка сохранения
+            диагностики и дефект кода — разные события. Потеря критичного
+            состояния контроллера всё же требует остановки опасных операций.<a
+              class="source"
+              href="../extensions/pipelines/controller.ts"
+              >controller.ts · submission corrections / evidence persistence</a
+            >
+          </div>
+        </article>
+      </section>
+      <section id="policy">
+        <div class="eyebrow">04 / не всякая ошибка — конец запуска</div>
+        <h2>Кому возвращается проблема?</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Событие</th>
+              <th>Реакция</th>
+              <th>Что продолжается</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="Событие">Неверный аргумент инструмента</td>
+              <td data-label="Реакция">
+                Диагностика в ту же Astra-сессию; исправление вызова.
+              </td>
+              <td data-label="Продолжение">Текущая задача.</td>
+            </tr>
+            <tr>
+              <td data-label="Событие">Сборка изменила файлы</td>
+              <td data-label="Реакция">
+                Показать diff; выбрать нужные изменения и проверки.
+              </td>
+              <td data-label="Продолжение">
+                Текущая задача; это не автоматический failed check.
+              </td>
+            </tr>
+            <tr>
+              <td data-label="Событие">
+                Нет зависимостей / тест упал / конфликт
+              </td>
+              <td data-label="Реакция">Подготовка или ремонт исполнителем.</td>
+              <td data-label="Продолжение">
+                Независимые ветви; потомки ждут принятого результата.
+              </td>
+            </tr>
+            <tr>
+              <td data-label="Событие">Нет прогресса в задаче</td>
+              <td data-label="Реакция">
+                Зафиксировать блокировку и передать вопрос планировщику или
+                главному агенту.
+              </td>
+              <td data-label="Продолжение">
+                Независимые ветви в пределах общего бюджета.
+              </td>
+            </tr>
+            <tr>
+              <td data-label="Событие">Потеря владения Git / чужой путь</td>
+              <td data-label="Реакция">
+                Приостановить опасную операцию, сохранить диагностику, передать
+                наверх.
+              </td>
+              <td data-label="Продолжение">
+                Только доказуемо незатронутая работа.
+              </td>
+            </tr>
+            <tr>
+              <td data-label="Событие">Отмена / исчерпанный лимит</td>
+              <td data-label="Реакция">
+                Остановиться, сохранить принятые и промежуточные результаты.
+              </td>
+              <td data-label="Продолжение">
+                Не запускать новые работы вопреки отмене или лимиту.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted">
+          Это предлагаемая политика, не перечень уже существующих статусов API.
+          Возобновление после завершения процесса — отдельная задача, здесь оно
+          не обещается.
+        </p>
+      </section>
+      <section id="api">
+        <div class="eyebrow">05 / договорённости и открытые решения</div>
+        <h2>Не тратить рефакторинг на косметику.</h2>
+        <div class="grid">
+          <div class="box">
+            <h3>Оставляем</h3>
+            <ul>
+              <li>Граф, fork / join.</li>
+              <li>pipeline_name как есть.</li>
+              <li>Явный task / working_dir.</li>
+              <li>Обязательный plan_path.</li>
+              <li>wallclock_limit.</li>
+              <li>Независимый аудит.</li>
+            </ul>
+          </div>
+          <div class="box">
+            <h3>Меняем по сути</h3>
+            <ul>
+              <li>Подготовка — работа модели.</li>
+              <li>Больше локальных коммитов.</li>
+              <li>Ошибки — сначала исполнителю.</li>
+              <li>Astra вместо Luna в пишущих feature-ролях.</li>
+              <li>Меньше дублирующих контрактов.</li>
+            </ul>
+          </div>
+          <div class="box">
+            <h3>Ещё обсуждаем</h3>
+            <ul>
+              <li>Явный выбор pipeline без неявного default.</li>
+              <li>
+                Перенос сложного audit-входа в task при структурированном
+                выходе.
+              </li>
+              <li>
+                Как скрыть размещение и подготовку worktrees за управлением
+                workspace.
+              </li>
+              <li>Точные права Git, сети и бюджеты восстановления.</li>
+            </ul>
+          </div>
+        </div>
+        <p>
+          <strong>Поправка к первой странице:</strong> feature не депрекейтим.
+          Поэтому worktree_root и подготовка дочерних worktrees не исчезают
+          автоматически: графу всё ещё нужны изолированные рабочие копии.
+          Упростить нужно их обслуживание и публичный интерфейс, а не саму
+          изоляцию.
+        </p>
+        <h3>Распределение моделей: статус исходников</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Роль</th>
+              <th>Модель</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="Роль">
+                Discovery, статический audit, executor и synthesis
+              </td>
+              <td data-label="Модель">Luna / medium</td>
+              <td data-label="Статус">
+                Сохраняем исследование и независимую проверку.
+              </td>
+            </tr>
+            <tr>
+              <td data-label="Роль">Feature planning и final review</td>
+              <td data-label="Модель">Astra / low</td>
+              <td data-label="Статус">
+                Уже описано в текущем feature-контракте.
+              </td>
+            </tr>
+            <tr>
+              <td data-label="Роль">
+                Feature tasks, conflict resolver, join-repair, remediation
+              </td>
+              <td data-label="Модель">Astra / low</td>
+              <td data-label="Статус">
+                Реализовано в исходниках с явным low, включая post-review
+                audit/remediation root и его same-session final remediation.
+                Lifecycle не изменён; runtime не установлен, live-проверки нет.
+              </td>
+            </tr>
+            <tr>
+              <td data-label="Роль">Small-feature implementer</td>
+              <td data-label="Модель">Astra / low</td>
+              <td data-label="Статус">
+                По переданному итогу соседней ветки уже изменён и установлен.
+                Координатор и четыре аудитора — Luna/medium. Здесь повторно не
+                проверялось.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+      <section id="order">
+        <div class="eyebrow">06 / порядок работ для обсуждения</div>
+        <h2>Сначала исправить самые дорогие отказы.</h2>
+        <ol class="priority">
+          <li>
+            <div>
+              <strong>Astra во всех пишущих feature-ролях.</strong><br />Не
+              перепутать исполнителей с исследователями и аудиторами.
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Разделить исход проверки и изменения файлов.</strong
+              ><br />Устранить конкретную проблему генерации и версий сборки.
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Передавать preparation / baseline ошибки модели.</strong
+              ><br />Дать подготовить и починить среду до терминального решения.
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Постоянная сессия и несколько коммитов.</strong
+              ><br />Изменить контракт задачи и перенос её результата через
+              join.
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong
+                >Упростить финализацию и убрать residual-бухгалтерию.</strong
+              ><br />Ясная граница принятого результата вместо множества
+              исключений.
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Локализовать сбои по ветвям.</strong><br />Независимая
+              работа не должна останавливаться из-за одного исправимого узла.
+            </div>
+          </li>
+        </ol>
+        <div class="banner">
+          <strong>Цель — не pipeline, который всегда зелёный.</strong>
+          <p>
+            Цель — pipeline, который позволяет умной модели решить обычные
+            проблемы, сохраняет сделанное и останавливается только по
+            содержательной причине.
+          </p>
+        </div>
+        <p class="muted">
+          Это объяснение направления, а не готовый проверенный план миграции.
+          При реализации понадобятся отдельные контракты и тесты переходов
+          состояния; ни sandbox, ни проверки результата здесь фактически не
+          ослаблялись.
+        </p>
+      </section>
+      <section>
+        <h2>Исходники для следующего разбора</h2>
+        <ul class="sources">
+          <li>
+            <a href="../extensions/pipelines/feature-task-runtime.ts"
+              >feature-task-runtime.ts</a
+            >
+            — checks, attempt, finalize, HEAD.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/feature-task-worktrees.ts"
+              >feature-task-worktrees.ts</a
+            >
+            — paths, staging, cleanup и residuals.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/feature-graph-executor.ts"
+              >feature-graph-executor.ts</a
+            >
+            — preparation, retries, ветви, joins.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/controller.ts">controller.ts</a> —
+            readiness, отчёты, этапы и результаты.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/feature-sandbox.ts"
+              >feature-sandbox.ts</a
+            >
+            — границы полномочий.
+          </li>
+          <li>
+            <a href="pipelines-and-subagents-map.ru.html"
+              >Первая архитектурная раскладка</a
+            >
+            — исторический снимок до уточнения цели; её предложения об
+            отключении feature и модель small-feature уже не отражают новое
+            направление.
+          </li>
+        </ul>
+      </section>
+    </main>
+    <footer>
+      Самостоятельная HTML-страница на простом русском. Inline CSS, без
+      JavaScript, сетевых шрифтов и внешних ресурсов. Ссылки на исходники
+      относительные и рассчитаны на просмотр из репозитория.
+    </footer>
+  </body>
+</html>

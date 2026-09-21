@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -81,6 +82,33 @@ test("content digest distinguishes dirty tracked and untracked inputs", () => {
   }
 });
 
+test("same bytes survive timestamps, Git categories, and HEAD changes", () => {
+  const repo = fixture();
+  try {
+    const file = path.join(repo.root, "input.txt");
+    fs.writeFileSync(file, "same bytes");
+    const before = captureCheckInputRevision({
+      workspaceRoot: repo.root,
+      head: "before",
+      evidence: evidence({ tracked: ["input.txt"] }),
+    });
+    fs.writeFileSync(file, "same bytes");
+    fs.utimesSync(file, new Date(0), new Date(0));
+    const after = captureCheckInputRevision({
+      workspaceRoot: repo.root,
+      head: "after",
+      evidence: {
+        ...evidence({ baseToHead: ["input.txt"] }),
+        fingerprint: "changed-index",
+      },
+    });
+    assert.equal(after.fingerprint, before.fingerprint);
+    assert.deepEqual(after.contentByPath, before.contentByPath);
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("revision proof fails closed for unsafe, symlinked, unreadable, and oversized inputs", () => {
   const repo = fixture();
   try {
@@ -145,20 +173,20 @@ test("revision proof fails closed for unsafe, symlinked, unreadable, and oversiz
 test("Git metadata and node_modules are excluded from the bounded input digest", () => {
   const repo = fixture();
   try {
-    fs.mkdirSync(path.join(repo.root, ".git"));
+    execFileSync("git", ["init", "-q", repo.root]);
     fs.mkdirSync(path.join(repo.root, "node_modules"));
-    fs.writeFileSync(path.join(repo.root, ".git", "index"), "metadata-a");
+    fs.writeFileSync(path.join(repo.root, ".git", "marker"), "metadata-a");
     fs.writeFileSync(
       path.join(repo.root, "node_modules", "large-package.js"),
       "dependency-a",
     );
-    const paths = [".git/index", "node_modules/large-package.js"];
+    const paths = [".git/marker", "node_modules/large-package.js"];
     const first = captureCheckInputRevision({
       workspaceRoot: repo.root,
       head: "head-a",
       evidence: evidence({ tracked: paths }),
     });
-    fs.writeFileSync(path.join(repo.root, ".git", "index"), "metadata-b");
+    fs.writeFileSync(path.join(repo.root, ".git", "marker"), "metadata-b");
     fs.writeFileSync(
       path.join(repo.root, "node_modules", "large-package.js"),
       "dependency-b",

@@ -79,6 +79,88 @@ export type PlanningReadinessVerifiedCheck = Static<
   typeof PlanningReadinessVerifiedCheckSchema
 >;
 
+export const PlanningReadinessDiagnosticCheckSchema = Type.Object(
+  {
+    ...PlanningReadinessCheckSchema.properties,
+    source: Type.Object(
+      {
+        path: relativePathSchema,
+        excerpt: Type.Optional(
+          Type.String({ maxLength: PLANNING_READINESS_MAX_EXCERPT_BYTES }),
+        ),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+export type PlanningReadinessDiagnosticCheck = Static<
+  typeof PlanningReadinessDiagnosticCheckSchema
+>;
+
+export interface PlanningReadinessProvenance {
+  readonly status: "confirmed" | "uncertain";
+  readonly sourceHash?: string;
+  readonly diagnostic?: string;
+}
+
+/** Diagnostic only: neither a command result nor an execution permission. */
+export function diagnosePlanningReadinessSource(
+  workspaceRoot: string,
+  check: unknown,
+) {
+  if (!Value.Check(PlanningReadinessDiagnosticCheckSchema, check)) {
+    throw new Error(
+      "Planning readiness diagnostic check does not match its strict TypeBox schema.",
+    );
+  }
+  assertRepositoryRelativePath(check.cwd, "Planning readiness cwd", true);
+  assertRepositoryRelativePath(
+    check.source.path,
+    "Planning readiness source path",
+    false,
+  );
+  // A missing excerpt is diagnostic uncertainty, but does not bypass text bounds.
+  assertTextByteBounds({
+    ...check,
+    source: {
+      ...check.source,
+      excerpt: check.source.excerpt?.trim()
+        ? check.source.excerpt
+        : "(not supplied)",
+    },
+  });
+  if (
+    byteLength(check.source.excerpt ?? "") >
+    PLANNING_READINESS_MAX_EXCERPT_BYTES
+  ) {
+    throw new Error("source excerpt exceeds its bounded UTF-8 size.");
+  }
+  const root = canonicalWorkspaceRoot(workspaceRoot);
+  const cwd = resolveContainedPath(root, check.cwd, "cwd");
+  if (!fs.statSync(cwd).isDirectory())
+    throw new Error("Planning readiness cwd must resolve to a directory.");
+  let provenance: PlanningReadinessProvenance;
+  try {
+    if (!check.source.excerpt?.trim()) {
+      throw new Error("Planning readiness source excerpt was not supplied.");
+    }
+    const verified = verifyPlanningReadinessSource(workspaceRoot, check);
+    provenance = { status: "confirmed", sourceHash: verified.sourceHash };
+  } catch (error) {
+    provenance = { status: "uncertain", diagnostic: errorDetail(error) };
+  }
+  return {
+    check: structuredClone(check),
+    workspaceRoot: root,
+    resolvedCwd: cwd,
+    provenance,
+    executionPolicy: "not-evaluated" as const,
+    execution: "not-run" as const,
+  };
+}
+
 function byteLength(value: string) {
   return Buffer.byteLength(value, "utf8");
 }

@@ -5,6 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import type { ExecutionTree } from "./feature-graph.ts";
+import { createFeatureReviewRuntime } from "./feature-task-runtime.ts";
+import { FeatureSubtreeOperationError } from "./feature-execution-contract.ts";
 import type { CleanupEvidence } from "./cleanup-evidence.ts";
 import {
   executeFeatureGraph,
@@ -227,8 +229,8 @@ test("fork branches prepare once, run without a quota queue, and join in determi
         return passingCheck();
       },
       async runSession(input) {
-        assert.equal(input.model, "openai-codex/gpt-5.6-luna");
-        assert.equal(input.thinkingLevel, "high");
+        assert.equal(input.model, "openai-codex/gpt-6-astra");
+        assert.equal(input.thinkingLevel, "low");
         const filePath = `${input.task!.id}.txt`;
         fs.writeFileSync(path.join(input.cwd, filePath), `${input.task!.id}\n`);
         const finalized = await input.tools.finalize({
@@ -466,7 +468,7 @@ test("a failed provisional check is repaired by amending the same logical task c
   }
 });
 
-test("child preparation failure stops before spending agent attempts", async () => {
+test("child preparation failure reaches bounded persistent recovery", async () => {
   const repo = fixture();
   try {
     const task = graphTask("prepared-task");
@@ -505,9 +507,8 @@ test("child preparation failure stops before spending agent attempts", async () 
     assert.equal(result.status, "failed");
     assert.equal(result.tasks[0]!.status, "failed");
     assert.equal(preparationAttempts, 1);
-    assert.equal(sessionAttempts, 0);
-    assert.deepEqual(result.tasks[0]!.attempts, []);
-    assert.match(result.error!, /preparation unavailable/);
+    assert.equal(sessionAttempts, 3);
+    assert.equal(result.tasks[0]!.attempts.length, 3);
     assert.equal(result.branches[1]!.preparation.attempts, 1);
     assert.equal(result.branches[1]!.preparation.complete, false);
     assert.deepEqual(result.branches[1]!.preparation.commands, [
@@ -586,7 +587,7 @@ test("preparation retains ordered command history when a later command fails", a
       "Preparation command exited 7: second stderr",
     );
     assert.equal(branch.preparation.complete, false);
-    assert.equal(result.tasks[0]!.attempt, 0);
+    assert.equal(result.tasks[0]!.attempt, 3);
   } finally {
     repo.cleanup();
   }
@@ -811,7 +812,7 @@ test("omitted tracked preparation output stays pending until explicitly discarde
   }
 });
 
-test("baseline failure is reported before any task session or commit", async () => {
+test("baseline failure reaches recovery without granting acceptance", async () => {
   const repo = fixture();
   try {
     const task = graphTask("blocked-task");
@@ -839,13 +840,950 @@ test("baseline failure is reported before any task session or commit", async () 
       },
     });
     assert.equal(result.status, "failed");
-    assert.equal(sessions, 0);
+    assert.equal(sessions, 3);
     assert.equal(checks, 1);
-    assert.equal(result.tasks[0]!.attempt, 0);
-    assert.deepEqual(result.tasks[0]!.attempts, []);
+    assert.equal(result.tasks[0]!.attempt, 3);
+    assert.equal(result.tasks[0]!.attempts.length, 3);
     assert.equal(result.tasks[0]!.checks[0]!.exitCode, 1);
-    assert.match(result.error!, /dependency unavailable in sandbox/);
+    assert.ok(result.error);
     assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), head);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("local failure blocks its subtree while a sibling starts its next task", async () => {
+  const repo = fixture();
+  const siblingStarted = barrier();
+  const failureSettled = barrier();
+  const a = graphTask("a-fails");
+  const blocked = graphTask("a-blocked");
+  const b = graphTask("b-first");
+  const next = graphTask("b-next");
+  const launched: string[] = [];
+  try {
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([a, blocked, b, next]),
+      tree: {
+        kind: "fork",
+        branches: [
+          {
+            kind: "sequence",
+            steps: [
+              { kind: "task", taskId: a.id },
+              { kind: "task", taskId: blocked.id },
+            ],
+          },
+          {
+            kind: "sequence",
+            steps: [
+              { kind: "task", taskId: b.id },
+              { kind: "task", taskId: next.id },
+            ],
+          },
+        ],
+      },
+      runCheck: async () => passingCheck(),
+      onSnapshot(snapshot) {
+        if (
+          snapshot.tasks.some(
+            (task) => task.id === a.id && task.status === "failed",
+          )
+        )
+          failureSettled.resolve();
+      },
+      async runSession(input) {
+        const id = input.task!.id;
+        launched.push(id);
+        if (id === a.id) {
+          await siblingStarted.promise;
+          return { status: "failed", error: "local failure" };
+        }
+        if (id === b.id) {
+          siblingStarted.resolve();
+          await failureSettled.promise;
+        }
+        fs.writeFileSync(path.join(input.cwd, `${id}.txt`), id);
+        await input.tools.finalize({ commitPaths: [`${id}.txt`], summary: id });
+        return { status: "settled" };
+      },
+    });
+    assert.equal(result.status, "failed");
+    assert.ok(launched.includes(next.id));
+    assert.ok(!launched.includes(blocked.id));
+    assert.ok(result.blockedTasks?.some(({ taskId }) => taskId === blocked.id));
+    assert.equal(result.joins[0]!.status, "failed");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+for (const cancel of [false, true]) {
+  test(`AUD-001 nested lifecycle throw ${cancel ? "still honors global cancellation" : "does not stop a later independent task"}`, async () => {
+    const repo = fixture();
+    const siblingStarted = barrier();
+    const failureSettled = barrier();
+    const controller = new AbortController();
+    const start = graphTask("a-start");
+    const left = graphTask("a-left", [start.id]);
+    const right = graphTask("a-right", [start.id]);
+    const blocked = graphTask("a-after", [left.id, right.id]);
+    const first = graphTask("b-first");
+    const next = graphTask("b-next", [first.id]);
+    const launched: string[] = [];
+    try {
+      const result = await executeFeatureGraph({
+        runId: repo.runId,
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+        canonicalPlan,
+        graph: graph([start, left, right, blocked, first, next]),
+        tree: {
+          kind: "fork",
+          branches: [
+            {
+              kind: "sequence",
+              steps: [
+                { kind: "task", taskId: start.id },
+                {
+                  kind: "fork",
+                  branches: [
+                    { kind: "task", taskId: left.id },
+                    { kind: "task", taskId: right.id },
+                  ],
+                },
+                { kind: "task", taskId: blocked.id },
+              ],
+            },
+            {
+              kind: "sequence",
+              steps: [
+                { kind: "task", taskId: first.id },
+                { kind: "task", taskId: next.id },
+              ],
+            },
+          ],
+        },
+        signal: controller.signal,
+        runCheck: async () => passingCheck(),
+        onSnapshot(snapshot) {
+          if (
+            snapshot.branches.some(
+              (branch) =>
+                branch.firstTaskId === start.id && branch.status === "failed",
+            )
+          ) {
+            if (cancel) controller.abort();
+            failureSettled.resolve();
+          }
+        },
+        async runSession(input) {
+          const id = input.task!.id;
+          launched.push(id);
+          if (id === first.id) {
+            siblingStarted.resolve();
+            await failureSettled.promise;
+            if (input.signal.aborted) return { status: "cancelled" };
+          }
+          fs.writeFileSync(path.join(input.cwd, `${id}.txt`), id);
+          await input.tools.finalize({
+            commitPaths: [`${id}.txt`],
+            summary: id,
+          });
+          if (id === start.id) {
+            await siblingStarted.promise;
+            // Existing worktrees remain writable; only creation of another
+            // nested worktree fails with a real local filesystem error.
+            fs.chmodSync(path.join(repo.worktreeRoot, repo.runId), 0o555);
+          }
+          return { status: "settled" };
+        },
+      });
+      assert.equal(result.status, cancel ? "cancelled" : "failed");
+      assert.match(result.error!, /Permission denied/);
+      assert.ok(!launched.includes(left.id));
+      assert.ok(!launched.includes(right.id));
+      assert.ok(!launched.includes(blocked.id));
+      assert.ok(
+        result.blockedTasks?.some(({ taskId }) => taskId === blocked.id),
+      );
+      assert.equal(result.joins[0]!.status, cancel ? "cancelled" : "failed");
+      assert.equal(
+        result.tasks.find(({ id }) => id === first.id)!.status,
+        cancel ? "cancelled" : "validated",
+      );
+      assert.equal(launched.includes(next.id), !cancel);
+      if (!cancel)
+        assert.equal(
+          result.tasks.find(({ id }) => id === next.id)!.status,
+          "validated",
+        );
+    } finally {
+      fs.chmodSync(path.join(repo.worktreeRoot, repo.runId), 0o755);
+      repo.cleanup();
+    }
+  });
+}
+
+for (const mode of [
+  "typed-local",
+  "unknown",
+  "ownership",
+  "persistence",
+] as const) {
+  test(`AUD-001 nested ${mode} boundary drains active siblings and scopes launches`, async () => {
+    const repo = fixture();
+    const siblingStarted = barrier();
+    const failureObserved = barrier();
+    const start = graphTask("a-start");
+    const left = graphTask("a-left", [start.id]);
+    const right = graphTask("a-right", [start.id]);
+    const blocked = graphTask("a-after", [left.id, right.id]);
+    const first = graphTask("b-first");
+    const next = graphTask("b-next", [first.id]);
+    const launched: string[] = [];
+    let injected = false;
+    let siblingSettled = false;
+    let persistenceFailed = false;
+    let snapshots = 0;
+    const message = `${mode}: worktree allocation permission denied`;
+    try {
+      const result = await executeFeatureGraph({
+        runId: repo.runId,
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+        canonicalPlan,
+        graph: graph([start, left, right, blocked, first, next]),
+        tree: {
+          kind: "fork",
+          branches: [
+            {
+              kind: "sequence",
+              steps: [
+                { kind: "task", taskId: start.id },
+                {
+                  kind: "fork",
+                  branches: [
+                    { kind: "task", taskId: left.id },
+                    { kind: "task", taskId: right.id },
+                  ],
+                },
+                { kind: "task", taskId: blocked.id },
+              ],
+            },
+            {
+              kind: "sequence",
+              steps: [
+                { kind: "task", taskId: first.id },
+                { kind: "task", taskId: next.id },
+              ],
+            },
+          ],
+        },
+        runCheck: async () => passingCheck(),
+        onSnapshot(snapshot) {
+          snapshots++;
+          if (
+            mode !== "ownership" &&
+            !injected &&
+            snapshot.branches.some((branch) => branch.firstTaskId === left.id)
+          ) {
+            injected = true;
+            if (mode === "typed-local" || mode === "persistence")
+              throw new FeatureSubtreeOperationError(
+                message,
+                "worktree-allocation",
+              );
+            // Neither matching text nor a serialized-looking tag grants local authority.
+            throw Object.assign(new Error(message), {
+              name: "FeatureSubtreeOperationError",
+              operation: "worktree-allocation",
+            });
+          }
+          if (
+            snapshot.branches.some(
+              (branch) =>
+                branch.firstTaskId === start.id && branch.status === "failed",
+            )
+          ) {
+            failureObserved.resolve();
+            if (mode === "persistence" && !persistenceFailed) {
+              // Fail the settlement observer itself, outside executeNode's catch.
+              persistenceFailed = true;
+              throw new Error(message);
+            }
+          }
+        },
+        async runSession(input) {
+          const id = input.task!.id;
+          launched.push(id);
+          if (id === first.id) {
+            siblingStarted.resolve();
+            await failureObserved.promise;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          fs.writeFileSync(path.join(input.cwd, `${id}.txt`), id);
+          await input.tools.finalize({
+            commitPaths: [`${id}.txt`],
+            summary: id,
+          });
+          if (id === start.id) {
+            await siblingStarted.promise;
+            if (mode === "ownership")
+              git(input.cwd, ["checkout", "-b", "unauthorized-branch"]);
+          }
+          if (id === first.id) siblingSettled = true;
+          return { status: "settled" };
+        },
+      });
+      assert.equal(result.status, "failed");
+      if (mode === "ownership") assert.match(result.error!, /branch drift/);
+      else assert.equal(result.error, message);
+      assert.equal(siblingSettled, true);
+      assert.equal(launched.includes(next.id), mode === "typed-local");
+      assert.ok(!launched.includes(left.id));
+      assert.ok(!launched.includes(right.id));
+      assert.ok(!launched.includes(blocked.id));
+      assert.ok(
+        result.blockedTasks?.some(({ taskId }) => taskId === blocked.id),
+      );
+      assert.equal(
+        result.tasks.find(({ id }) => id === first.id)!.status,
+        "validated",
+      );
+      assert.equal(result.joins[0]!.status, "failed");
+      const settledSnapshots = snapshots;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(snapshots, settledSnapshots);
+    } finally {
+      repo.cleanup();
+    }
+  });
+}
+
+test("accepted checkpoint ranges survive nested joins", async () => {
+  const repo = fixture();
+  const tasks = [
+    graphTask("range-a"),
+    graphTask("range-b"),
+    graphTask("range-c"),
+  ];
+  try {
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph(tasks),
+      tree: {
+        kind: "fork",
+        branches: [
+          {
+            kind: "fork",
+            branches: tasks
+              .slice(0, 2)
+              .map(({ id }) => ({ kind: "task", taskId: id })),
+          },
+          { kind: "task", taskId: tasks[2]!.id },
+        ],
+      },
+      runCheck: async () => passingCheck(),
+      async runSession(input) {
+        assert.ok(input.tools.stage);
+        assert.ok(input.tools.checkpoint);
+        const id = input.task!.id;
+        for (let i = 0; i < 2; i++) {
+          const file = `${id}-${i}.txt`;
+          fs.writeFileSync(path.join(input.cwd, file), `${i}`);
+          await input.tools.stage({ paths: [file], action: "stage" });
+          await input.tools.checkpoint({ message: `${id} checkpoint ${i}` });
+        }
+        for (const check of [baselineCheck, ...input.task!.checks])
+          await input.tools.check({ checkId: check.id });
+        const finalized = await input.tools.finalize({ summary: id });
+        assert.equal(
+          finalized.validated,
+          true,
+          finalized.error ?? "acceptance failed",
+        );
+        return { status: "settled" };
+      },
+    });
+    assert.equal(result.status, "completed", result.error ?? "graph failed");
+    assert.deepEqual(
+      result.tasks.map((task) => task.commitRange?.commits.length),
+      [2, 2, 2],
+    );
+    assert.equal(
+      result.joins.find(({ id }) => id === "join-1")!.commits.length,
+      6,
+    );
+    for (const task of tasks)
+      for (let i = 0; i < 2; i++) {
+        assert.equal(
+          fs.readFileSync(
+            path.join(repo.workingDir, `${task.id}-${i}.txt`),
+            "utf8",
+          ),
+          `${i}`,
+        );
+      }
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preparation failure and generated baseline output can be repaired by the first session", async () => {
+  const repo = fixture();
+  const task = graphTask("repair-preparation");
+  let generated = false;
+  let sessions = 0;
+  try {
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([task]),
+      worktreePrepare: ["broken bootstrap"],
+      tree: { kind: "fork", branches: [{ kind: "task", taskId: task.id }] },
+      async runCheck(input) {
+        if (input.command === "broken bootstrap")
+          return {
+            exitCode: 1,
+            stdout: "bootstrap evidence",
+            stderr: "unavailable",
+          };
+        if (input.command === baselineCheck.command && !generated) {
+          generated = true;
+          fs.writeFileSync(
+            path.join(input.workspaceRoot, "generated.txt"),
+            "generated\n",
+          );
+        }
+        return passingCheck();
+      },
+      async runSession(input) {
+        sessions++;
+        assert.ok(input.tools.prepare);
+        assert.ok(input.tools.stage);
+        assert.ok(input.tools.checkpoint);
+        assert.ok(input.capsule.graphContext.previousFailure);
+        assert.equal(input.attempt, 1);
+        const preparation = await input.tools.prepare({
+          command: "repair bootstrap",
+          cwd: ".",
+          purpose: "Repair environment",
+        });
+        assert.equal(preparation.status, "passed");
+        await input.tools.stage({ paths: ["generated.txt"], action: "stage" });
+        await input.tools.checkpoint({ message: "Keep generated baseline" });
+        for (const check of [baselineCheck, ...task.checks])
+          await input.tools.check({ checkId: check.id });
+        const finalized = await input.tools.finalize({
+          summary: "Repaired preparation",
+        });
+        assert.equal(
+          finalized.validated,
+          true,
+          finalized.error ?? "acceptance failed",
+        );
+        return { status: "settled" };
+      },
+    });
+    assert.equal(result.status, "completed", result.error ?? "graph failed");
+    assert.equal(sessions, 1);
+    assert.equal(
+      result.branches[1]!.preparation.commands![0]!.stdout,
+      "bootstrap evidence",
+    );
+    assert.equal(
+      fs.readFileSync(path.join(repo.workingDir, "generated.txt"), "utf8"),
+      "generated\n",
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+for (const repairPasses of [false, true]) {
+  test(`root preparation replacement is inherited only when successful (${repairPasses})`, async () => {
+    const repo = fixture();
+    const rootTask = graphTask("repair-root");
+    const children = [
+      graphTask("child-a", [rootTask.id]),
+      graphTask("child-b", [rootTask.id]),
+    ];
+    const original = "broken bootstrap";
+    const corrected = "corrected bootstrap";
+    const recipe = ["prepare before", original, "prepare after"];
+    const callerRecipe = [...recipe];
+    const calls = new Map<string, string[]>();
+    try {
+      const result = await executeFeatureGraph({
+        runId: repo.runId,
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+        worktreePrepare: recipe,
+        canonicalPlan,
+        graph: graph([rootTask, ...children]),
+        tree: {
+          kind: "sequence",
+          steps: [
+            { kind: "task", taskId: rootTask.id },
+            {
+              kind: "fork",
+              branches: children.map((task) => ({
+                kind: "task",
+                taskId: task.id,
+              })),
+            },
+          ],
+        },
+        async runCheck(input) {
+          if (input.kind === "prepare") {
+            const commands = calls.get(input.workspaceRoot) ?? [];
+            commands.push(input.command);
+            calls.set(input.workspaceRoot, commands);
+            if (
+              input.command === original ||
+              (input.command === corrected && !repairPasses)
+            )
+              return {
+                exitCode: 1,
+                stdout: "",
+                stderr: "bootstrap unavailable",
+              };
+          }
+          return passingCheck();
+        },
+        async runSession(input) {
+          if (input.task!.id === rootTask.id) {
+            // The caller root is already prepared: an explicit repair needs no prior attempt.
+            assert.equal(calls.has(input.cwd), false);
+            assert.ok(input.tools.prepare);
+            const repair = await input.tools.prepare({
+              command: corrected,
+              cwd: ".",
+              purpose: "Repair bootstrap",
+              replacesCommand: original,
+            });
+            assert.equal(repair.status, repairPasses ? "passed" : "failed");
+            assert.equal(repair.exitCode, repairPasses ? 0 : 1);
+            assert.equal(repair.replacesCommand, original);
+          }
+          const file = `${input.task!.id}.txt`;
+          fs.writeFileSync(path.join(input.cwd, file), "done\n");
+          const accepted = await input.tools.finalize({
+            commitPaths: [file],
+            summary: "Accept task",
+          });
+          assert.equal(
+            accepted.validated,
+            true,
+            accepted.error ?? "acceptance failed",
+          );
+          return { status: "settled" };
+        },
+      });
+      assert.equal(result.status, "completed", result.error ?? "graph failed");
+      assert.deepEqual(recipe, callerRecipe);
+      assert.deepEqual(calls.get(repo.workingDir), [corrected]);
+      const childCalls = [...calls].filter(([cwd]) => cwd !== repo.workingDir);
+      assert.equal(childCalls.length, 2);
+      for (const [, commands] of childCalls)
+        assert.deepEqual(
+          commands,
+          repairPasses
+            ? [recipe[0], corrected, recipe[2]]
+            : [recipe[0], original],
+        );
+      const preparation = result.tasks.find(
+        ({ id }) => id === rootTask.id,
+      )!.preparations!;
+      assert.equal(preparation.length, 1);
+      assert.equal(preparation[0]!.status, repairPasses ? "passed" : "failed");
+      assert.equal(preparation[0]!.replacesCommand, original);
+    } finally {
+      repo.cleanup();
+    }
+  });
+}
+
+for (const acceptedRepair of [false, true]) {
+  test(`branch-local preparation replacement does not rewrite independent siblings (${acceptedRepair})`, async () => {
+    const repo = fixture();
+    const repairTask = graphTask("local-repair");
+    const descendant = graphTask("local-child", [repairTask.id]);
+    const sibling = graphTask("independent-root");
+    const siblingChild = graphTask("independent-child", [sibling.id]);
+    const repairSettled = barrier();
+    const original = "original bootstrap";
+    const corrected = "local corrected bootstrap";
+    const recipe = ["prepare before", original, "prepare after"];
+    const calls = new Map<string, string[]>();
+    const taskCwds = new Map<string, string>();
+    try {
+      const result = await executeFeatureGraph({
+        runId: repo.runId,
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+        worktreePrepare: recipe,
+        canonicalPlan,
+        graph: graph([repairTask, descendant, sibling, siblingChild]),
+        tree: {
+          kind: "fork",
+          branches: [
+            {
+              kind: "sequence",
+              steps: [
+                { kind: "task", taskId: repairTask.id },
+                {
+                  kind: "fork",
+                  branches: [{ kind: "task", taskId: descendant.id }],
+                },
+              ],
+            },
+            {
+              kind: "sequence",
+              steps: [
+                { kind: "task", taskId: sibling.id },
+                {
+                  kind: "fork",
+                  branches: [{ kind: "task", taskId: siblingChild.id }],
+                },
+              ],
+            },
+          ],
+        },
+        async runCheck(input) {
+          if (input.kind === "prepare") {
+            const commands = calls.get(input.workspaceRoot) ?? [];
+            commands.push(input.command);
+            calls.set(input.workspaceRoot, commands);
+          }
+          return passingCheck();
+        },
+        async runSession(input) {
+          const id = input.task!.id;
+          taskCwds.set(id, input.cwd);
+          if (id === sibling.id) await repairSettled.promise;
+          if (id === repairTask.id) {
+            if (input.attempt === 1) {
+              assert.ok(input.tools.prepare);
+              const repair = await input.tools.prepare({
+                command: corrected,
+                cwd: ".",
+                purpose: "Repair local bootstrap",
+                replacesCommand: original,
+              });
+              assert.equal(repair.status, "passed");
+            }
+            if (!acceptedRepair) {
+              repairSettled.resolve();
+              return { status: "settled" };
+            }
+          }
+          const file = `${id}.txt`;
+          fs.writeFileSync(path.join(input.cwd, file), "done\n");
+          const accepted = await input.tools.finalize({
+            commitPaths: [file],
+            summary: "Accept branch task",
+          });
+          assert.equal(
+            accepted.validated,
+            true,
+            accepted.error ?? "acceptance failed",
+          );
+          if (id === repairTask.id) repairSettled.resolve();
+          return { status: "settled" };
+        },
+      });
+      assert.equal(
+        result.status,
+        acceptedRepair ? "completed" : "failed",
+        result.error ?? "graph failed",
+      );
+      assert.deepEqual(recipe, ["prepare before", original, "prepare after"]);
+      assert.deepEqual(calls.get(taskCwds.get(sibling.id)!), recipe);
+      assert.deepEqual(calls.get(taskCwds.get(siblingChild.id)!), recipe);
+      const repaired = result.tasks.find(({ id }) => id === repairTask.id)!;
+      assert.equal(repaired.preparations![0]!.status, "passed");
+      if (acceptedRepair) {
+        assert.deepEqual(calls.get(taskCwds.get(descendant.id)!), [
+          recipe[0],
+          corrected,
+          recipe[2],
+        ]);
+      } else {
+        assert.equal(taskCwds.has(descendant.id), false);
+        assert.equal(repaired.status, "failed");
+        assert.equal(
+          [...calls.values()].flat().filter((command) => command === corrected)
+            .length,
+          1,
+        );
+      }
+    } finally {
+      repairSettled.resolve();
+      repo.cleanup();
+    }
+  });
+}
+
+for (const mode of [
+  "retry",
+  "blocked",
+  "malformed",
+  "cancel",
+  "absent",
+  "cap",
+  "success",
+] as const) {
+  test(`planner recovery is bounded and preserves runtime: ${mode}`, async () => {
+    const repo = fixture();
+    const task = graphTask("planner-recovery");
+    const abort = new AbortController();
+    const hosts = new Set<unknown>();
+    const worktrees = new Set<string>();
+    let calls = 0;
+    let consultations = 0;
+    try {
+      const result = await executeFeatureGraph({
+        runId: repo.runId,
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+        canonicalPlan,
+        graph: graph([task]),
+        tree: { kind: "task", taskId: task.id },
+        signal: abort.signal,
+        runCheck: async () => passingCheck(),
+        requestPlannerRecovery:
+          mode === "absent"
+            ? undefined
+            : async (request, signal) => {
+                consultations++;
+                assert.equal(request.taskId, task.id);
+                assert.equal(request.attempt, calls);
+                assert.equal(request.remainingAttempts, 24 - calls);
+                assert.equal(
+                  request.currentHead,
+                  git(repo.workingDir, ["rev-parse", "HEAD"]),
+                );
+                assert.equal(signal.aborted, false);
+                if (mode === "cancel") abort.abort();
+                return {
+                  schemaVersion: 1,
+                  taskId: mode === "malformed" ? "wrong-task" : task.id,
+                  attempt: request.attempt,
+                  action: mode === "blocked" ? "blocked" : "retry",
+                  message: "Inspect the missing acceptance evidence",
+                };
+              },
+        async runSession(input) {
+          calls++;
+          assert.equal(input.attempt, calls);
+          hosts.add(input.tools);
+          worktrees.add(input.cwd);
+          if (mode === "success" && consultations) {
+            assert.ok(input.capsule.graphContext.previousFailure);
+            fs.writeFileSync(path.join(input.cwd, "recovered.txt"), "done\n");
+            const finalized = await input.tools.finalize({
+              commitPaths: ["recovered.txt"],
+              summary: "Recovered with verified evidence",
+            });
+            assert.equal(finalized.validated, true);
+          }
+          if (mode === "cap" && consultations) {
+            fs.writeFileSync(
+              path.join(input.cwd, "shared.txt"),
+              `progress ${calls}\n`,
+            );
+          }
+          return { status: "settled", sessionId: "same-session" };
+        },
+      });
+      assert.equal(
+        result.status,
+        mode === "cancel"
+          ? "cancelled"
+          : mode === "success"
+            ? "completed"
+            : "failed",
+      );
+      assert.equal(consultations, mode === "absent" ? 0 : 1);
+      assert.equal(
+        calls,
+        mode === "cap" ? 24 : mode === "retry" ? 6 : mode === "success" ? 4 : 3,
+      );
+      assert.equal(hosts.size, 1);
+      assert.equal(worktrees.size, 1);
+      assert.equal(result.tasks[0]!.attempts.length, calls);
+    } finally {
+      repo.cleanup();
+    }
+  });
+}
+
+test("planner blocked keeps dependents blocked while independent branches complete", async () => {
+  const repo = fixture();
+  const failing = graphTask("planner-blocked");
+  const dependent = graphTask("dependent", [failing.id]);
+  const independent = graphTask("independent");
+  const started: string[] = [];
+  try {
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([failing, dependent, independent]),
+      tree: {
+        kind: "fork",
+        branches: [
+          {
+            kind: "sequence",
+            steps: [
+              { kind: "task", taskId: failing.id },
+              { kind: "task", taskId: dependent.id },
+            ],
+          },
+          { kind: "task", taskId: independent.id },
+        ],
+      },
+      runCheck: passingCheck,
+      async requestPlannerRecovery(request) {
+        return {
+          schemaVersion: 1,
+          taskId: request.taskId,
+          attempt: request.attempt,
+          action: "blocked",
+          message: "Needs user input",
+        };
+      },
+      async runSession(input) {
+        started.push(input.task!.id);
+        if (input.task!.id === independent.id) {
+          fs.writeFileSync(path.join(input.cwd, "independent.txt"), "done\n");
+          await input.tools.finalize({
+            commitPaths: ["independent.txt"],
+            summary: "Independent work",
+          });
+        }
+        return { status: "settled" };
+      },
+    });
+    assert.equal(result.status, "failed");
+    assert.equal(started.includes(dependent.id), false);
+    assert.equal(
+      result.tasks.find((task) => task.id === independent.id)?.status,
+      "validated",
+    );
+    assert.equal(
+      result.tasks.find((task) => task.id === failing.id)?.attempts.length,
+      3,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("persistent recovery has a total ceiling even with continuous factual changes", async () => {
+  const repo = fixture();
+  const task = graphTask("bounded-progress");
+  const hosts = new Set<unknown>();
+  const roles = new Set<string>();
+  let calls = 0;
+  try {
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([task]),
+      tree: { kind: "task", taskId: task.id },
+      now: () => 0,
+      runCheck: async () => passingCheck(),
+      async runSession(input) {
+        calls++;
+        hosts.add(input.tools);
+        roles.add(input.role);
+        fs.writeFileSync(
+          path.join(input.cwd, "shared.txt"),
+          `progress ${calls}\n`,
+        );
+        return { status: "settled", sessionId: "persistent-session" };
+      },
+    });
+    assert.equal(result.status, "failed");
+    assert.equal(calls, 24);
+    assert.equal(hosts.size, 1);
+    assert.equal(roles.size, 1);
+    assert.equal(result.tasks[0]!.attempts.length, 24);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("environment-only join repair accepts an empty range", async () => {
+  const repo = fixture();
+  const task = graphTask("environment-child");
+  let repaired = false;
+  try {
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph([task]),
+      tree: { kind: "fork", branches: [{ kind: "task", taskId: task.id }] },
+      async runCheck(input) {
+        if (input.command === "repair environment") repaired = true;
+        if (input.workspaceRoot === repo.workingDir && !repaired)
+          return { exitCode: 1, stdout: "", stderr: "environment unavailable" };
+        return passingCheck();
+      },
+      async runSession(input) {
+        if (input.kind === "task") {
+          fs.writeFileSync(
+            path.join(input.cwd, "environment-child.txt"),
+            "child",
+          );
+          await input.tools.finalize({
+            commitPaths: ["environment-child.txt"],
+            summary: "Child",
+          });
+        } else {
+          assert.ok(input.tools.prepare);
+          await input.tools.prepare({
+            command: "repair environment",
+            cwd: ".",
+            purpose: "Repair environment",
+          });
+          await input.tools.check({ checkId: baselineCheck.id });
+          const finalized = await input.tools.finalize({
+            summary: "Environment repaired",
+          });
+          assert.equal(
+            finalized.validated,
+            true,
+            finalized.error ?? "acceptance failed",
+          );
+        }
+        return { status: "settled" };
+      },
+    });
+    assert.equal(result.status, "completed", result.error ?? "graph failed");
+    assert.deepEqual(
+      result.tasks.find(({ kind }) => kind === "join-repair")!.commitRange!
+        .commits,
+      [],
+    );
+    assert.equal(result.joins[0]!.status, "completed");
   } finally {
     repo.cleanup();
   }
@@ -913,6 +1851,8 @@ for (const validates of [false, true]) {
           return passingCheck();
         },
         async runSession(input) {
+          if (input.task!.id === blocked.id)
+            return { status: "failed", error: "blocked baseline" };
           assert.equal(input.task!.id, active.id);
           sessions++;
           started.resolve();
@@ -932,20 +1872,12 @@ for (const validates of [false, true]) {
       });
       assert.equal(result.status, "failed");
       assert.match(result.error!, /blocked baseline/);
-      assert.equal(sessions, 1);
+      assert.equal(sessions, validates ? 1 : 4);
       const task = result.tasks.find(({ id }) => id === active.id)!;
       assert.equal(task.status, validates ? "validated" : "failed");
-      assert.equal(task.attempt, 1);
-      assert.deepEqual(
-        task.attempts.map(({ status }) => status),
-        ["completed"],
-      );
+      assert.equal(task.attempt, validates ? 1 : 4);
       assert.ok(task.provisionalCommit);
-      if (!validates)
-        assert.equal(
-          task.error,
-          `Required check ${active.checks[0]!.id} failed.`,
-        );
+      if (!validates) assert.ok(task.error);
       assert.ok(lateCheck);
       await assert.rejects(lateCheck(), /authority is closed/);
     } finally {
@@ -1112,7 +2044,7 @@ test("join verification cancellation records a terminal join without mutating ca
   }
 });
 
-test("a fourth failed attempt lets an active sibling settle and retains diagnostic branches", async () => {
+test("bounded no-progress recovery lets an active sibling settle and retains diagnostic branches", async () => {
   const repo = fixture();
   try {
     const failing = graphTask("failing-branch");
@@ -1162,7 +2094,7 @@ test("a fourth failed attempt lets an active sibling settle and retains diagnost
     assert.equal(result.status, "failed");
     assert.equal(
       result.tasks.find(({ id }) => id === failing.id)?.attempts.length,
-      4,
+      3,
     );
     assert.equal(
       result.tasks.find(({ id }) => id === independent.id)?.status,
@@ -1237,6 +2169,305 @@ test("cleanup residual warnings remain observable without invalidating a verifie
     assert.equal(
       result.residualPaths.some((filePath) => filePath.startsWith("retained/")),
       true,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+for (const mutation of [
+  "none",
+  "changed",
+  "staged",
+  "arbitrary",
+  "arbitrary-prebegin",
+] as const) {
+  test(`AUD-003 graph residual handoff to final review: ${mutation}`, async () => {
+    const repo = fixture();
+    const output = path.join(repo.workingDir, "retained.txt");
+    try {
+      const task = graphTask("residual-source");
+      const executionGraph = graph([task]);
+      const result = await executeFeatureGraph({
+        runId: repo.runId,
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+        canonicalPlan,
+        graph: executionGraph,
+        tree: { kind: "task", taskId: task.id },
+        runCheck: passingCheck,
+        async runSession(input) {
+          assert.equal(input.cwd, repo.workingDir);
+          fs.writeFileSync(path.join(input.cwd, `${task.id}.txt`), "done\n");
+          fs.writeFileSync(output, "retained\n");
+          // Prevent only deletion in this disposable directory during commit
+          // cleanup; Git metadata remains writable in the linked worktree.
+          fs.chmodSync(input.cwd, 0o500);
+          try {
+            const finalized = await input.tools.finalize({
+              commitPaths: [`${task.id}.txt`],
+              summary: "Commit selected output while retaining failed cleanup.",
+            });
+            assert.equal(finalized.validated, true);
+            assert.ok(finalized.residualPaths.includes("retained.txt"));
+          } finally {
+            fs.chmodSync(input.cwd, 0o700);
+          }
+          return { status: "settled", sessionId: task.id };
+        },
+      });
+      assert.equal(result.status, "completed", result.error ?? "graph failed");
+      assert.equal(result.tasks[0]!.status, "validated");
+      assert.ok(result.rootResidualPaths?.includes("retained.txt"));
+      assert.deepEqual(
+        result.rootUntrackedResiduals?.map((record) => record.path),
+        ["retained.txt"],
+      );
+      assert.equal(fs.readFileSync(output, "utf8"), "retained\n");
+      const head = git(repo.workingDir, ["rev-parse", "HEAD"]);
+      const review = createFeatureReviewRuntime({
+        runId: repo.runId,
+        workingDir: repo.workingDir,
+        checks: executionGraph.reviewChecks,
+        runCheck: passingCheck,
+        knownResidualPaths: result.rootResidualPaths,
+        knownTrackedResiduals: result.rootTrackedResiduals,
+        knownUntrackedResiduals: result.rootUntrackedResiduals,
+      });
+      if (mutation === "arbitrary-prebegin")
+        fs.writeFileSync(path.join(repo.workingDir, "dirt.txt"), "dirt\n");
+      review.begin(head);
+      if (mutation === "changed") fs.appendFileSync(output, "changed\n");
+      if (mutation === "staged") git(repo.workingDir, ["add", "retained.txt"]);
+      if (mutation === "arbitrary")
+        fs.writeFileSync(path.join(repo.workingDir, "dirt.txt"), "dirt\n");
+      await review.host.check({ checkId: baselineCheck.id });
+      if (mutation === "changed" || mutation === "staged") {
+        await assert.rejects(
+          review.host.finalize({ summary: "Final review" }),
+          /residual changed/i,
+        );
+      } else {
+        const acceptance = await review.host.finalize({
+          summary: "Final review",
+        });
+        assert.equal(acceptance.validated, mutation === "none");
+        if (mutation === "arbitrary-prebegin") {
+          assert.match(acceptance.error ?? "", /dirt\.txt/);
+          assert.equal(
+            fs.readFileSync(path.join(repo.workingDir, "dirt.txt"), "utf8"),
+            "dirt\n",
+          );
+        }
+      }
+      assert.equal(git(repo.workingDir, ["rev-parse", "HEAD"]), head);
+      assert.equal(
+        fs.readFileSync(output, "utf8"),
+        mutation === "changed" ? "retained\nchanged\n" : "retained\n",
+      );
+    } finally {
+      fs.chmodSync(repo.workingDir, 0o700);
+      repo.cleanup();
+    }
+  });
+}
+
+test("owned fork handoff recreates a clean prepared checkout and retains dirty diagnostics", async () => {
+  const repo = fixture();
+  try {
+    const first = graphTask("handoff-source");
+    const next = graphTask("handoff-next", [first.id]);
+    const independent = graphTask("independent");
+    const prepareCalls: string[] = [];
+    const baselineCalls: string[] = [];
+    const commits = new Map<string, string>();
+    let originalPath = "";
+    let originalBranch = "";
+    let retainedPath = "";
+    let nextObserved = false;
+    let baselineBeforeHandoff = 0;
+    // Ignore the cache repository-wide so both the old and replacement worktrees
+    // share the rule without adding an unrelated accepted commit.
+    fs.writeFileSync(
+      path.join(repo.primary, ".git", "info", "exclude"),
+      ".cache/\n",
+    );
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      worktreePrepare: ["prepare fixture"],
+      canonicalPlan,
+      graph: graph([first, next, independent]),
+      tree: {
+        kind: "fork",
+        branches: [
+          {
+            kind: "sequence",
+            steps: [
+              { kind: "task", taskId: first.id },
+              { kind: "task", taskId: next.id },
+            ],
+          },
+          { kind: "task", taskId: independent.id },
+        ],
+      },
+      async runCheck(input) {
+        if (input.kind === "prepare") prepareCalls.push(input.workspaceRoot);
+        if (input.command === baselineCheck.command)
+          baselineCalls.push(input.workspaceRoot);
+        return passingCheck();
+      },
+      async runSession(input) {
+        const taskId = input.task!.id;
+        if (taskId === first.id) {
+          originalPath = input.cwd;
+          originalBranch = git(input.cwd, ["symbolic-ref", "HEAD"]);
+          fs.mkdirSync(path.join(input.cwd, ".cache"));
+          fs.writeFileSync(
+            path.join(input.cwd, ".cache", "diagnostic"),
+            "ignored cache\n",
+          );
+          fs.writeFileSync(
+            path.join(input.cwd, "shared.txt"),
+            "dirty diagnostic\n",
+          );
+        }
+        if (taskId === next.id) {
+          assert.equal(input.cwd, originalPath);
+          assert.equal(
+            git(input.cwd, ["symbolic-ref", "HEAD"]),
+            originalBranch,
+          );
+          assert.equal(
+            git(input.cwd, ["rev-parse", "HEAD"]),
+            commits.get(first.id),
+          );
+          assert.equal(git(input.cwd, ["status", "--porcelain"]), "");
+          assert.equal(
+            fs.readFileSync(path.join(input.cwd, `${first.id}.txt`), "utf8"),
+            `${first.id}\n`,
+          );
+          assert.equal(
+            fs.readFileSync(path.join(input.cwd, "shared.txt"), "utf8"),
+            "base\n",
+          );
+          assert.equal(fs.existsSync(path.join(input.cwd, ".cache")), false);
+          assert.deepEqual((await input.tools.diff()).knownResidualPaths, []);
+          assert.equal(
+            prepareCalls.filter((cwd) => cwd === input.cwd).length,
+            2,
+          );
+          assert.equal(
+            baselineCalls.filter((cwd) => cwd === input.cwd).length,
+            baselineBeforeHandoff + 1,
+          );
+          const retained = git(repo.primary, [
+            "worktree",
+            "list",
+            "--porcelain",
+          ])
+            .split("\n\n")
+            .find(
+              (entry) =>
+                entry.includes(`HEAD ${commits.get(first.id)}\n`) &&
+                entry.includes("\ndetached"),
+            );
+          assert.ok(
+            retained,
+            "dirty diagnostic worktree must remain registered and detached",
+          );
+          retainedPath = retained.split("\n")[0]!.slice("worktree ".length);
+          assert.notEqual(retainedPath, originalPath);
+          assert.equal(
+            fs.readFileSync(path.join(retainedPath, "shared.txt"), "utf8"),
+            "dirty diagnostic\n",
+          );
+          assert.equal(
+            fs.readFileSync(
+              path.join(retainedPath, ".cache", "diagnostic"),
+              "utf8",
+            ),
+            "ignored cache\n",
+          );
+          assert.equal(
+            git(retainedPath, ["status", "--porcelain"]),
+            "M shared.txt",
+          );
+          nextObserved = true;
+        }
+        fs.writeFileSync(path.join(input.cwd, `${taskId}.txt`), `${taskId}\n`);
+        if (taskId === first.id) {
+          // Existing cleanup-failure fixture: commit metadata remains writable,
+          // but restoring the tracked diagnostic is deliberately denied.
+          fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o400);
+          fs.chmodSync(input.cwd, 0o500);
+        }
+        try {
+          const finalized = await input.tools.finalize({
+            commitPaths: [`${taskId}.txt`],
+            summary: `Accepted ${taskId}.`,
+          });
+          assert.equal(finalized.validated, true);
+          if (taskId === first.id)
+            assert.ok(finalized.residualPaths.includes("shared.txt"));
+          commits.set(taskId, git(input.cwd, ["rev-parse", "HEAD"]));
+          if (taskId === first.id)
+            baselineBeforeHandoff = baselineCalls.filter(
+              (cwd) => cwd === input.cwd,
+            ).length;
+        } finally {
+          if (taskId === first.id) {
+            fs.chmodSync(input.cwd, 0o700);
+            fs.chmodSync(path.join(input.cwd, "shared.txt"), 0o600);
+          }
+        }
+        return { status: "settled", sessionId: taskId };
+      },
+    });
+    assert.equal(result.status, "completed", result.error ?? "graph failed");
+    assert.equal(nextObserved, true);
+    assert.equal(prepareCalls.length, 3);
+    assert.equal(commits.size, 3);
+    assert.deepEqual(
+      result.joins[0]!.commits.map(({ taskId }) => taskId),
+      [first.id, next.id, independent.id],
+    );
+    for (const integrated of result.joins[0]!.commits) {
+      assert.equal(integrated.sourceCommit, commits.get(integrated.taskId));
+      assert.equal(
+        git(repo.workingDir, [
+          "show",
+          `${integrated.integratedCommit}:${integrated.taskId}.txt`,
+        ]),
+        integrated.taskId,
+      );
+      git(repo.workingDir, [
+        "merge-base",
+        "--is-ancestor",
+        integrated.integratedCommit,
+        "HEAD",
+      ]);
+    }
+    for (const task of [first, next, independent]) {
+      assert.equal(
+        fs.readFileSync(path.join(repo.workingDir, `${task.id}.txt`), "utf8"),
+        `${task.id}\n`,
+      );
+    }
+    assert.equal(
+      git(repo.workingDir, ["rev-list", "--count", "HEAD~3..HEAD"]),
+      "3",
+    );
+    assert.equal(git(repo.workingDir, ["status", "--porcelain"]), "");
+    assert.deepEqual(result.rootResidualPaths, []);
+    assert.equal(
+      fs.readFileSync(path.join(retainedPath, "shared.txt"), "utf8"),
+      "dirty diagnostic\n",
+    );
+    assert.equal(
+      fs.readFileSync(path.join(retainedPath, ".cache", "diagnostic"), "utf8"),
+      "ignored cache\n",
     );
   } finally {
     repo.cleanup();
@@ -1526,6 +2757,8 @@ test("join conflicts continue the active cherry-pick and preserve source to inte
       runCheck: passingCheck,
       async runSession(input) {
         if (input.kind === "conflict-resolution") {
+          assert.equal(input.model, "openai-codex/gpt-6-astra");
+          assert.equal(input.thinkingLevel, "low");
           fs.writeFileSync(path.join(input.cwd, "shared.txt"), "left+right\n");
           const finalized = await input.tools.finalize({
             commitPaths: ["shared.txt"],
@@ -1560,6 +2793,86 @@ test("join conflicts continue the active cherry-pick and preserve source to inte
           kind === "conflict-resolution" && status === "validated",
       ),
       true,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("nested conflict repair retains remaining range and extra checkpoints exactly once", async () => {
+  const repo = fixture();
+  const tasks = [graphTask("range-left"), graphTask("range-right")];
+  try {
+    const result = await executeFeatureGraph({
+      runId: repo.runId,
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+      canonicalPlan,
+      graph: graph(tasks),
+      tree: {
+        kind: "fork",
+        branches: [
+          {
+            kind: "fork",
+            branches: tasks.map(({ id }) => ({ kind: "task", taskId: id })),
+          },
+        ],
+      },
+      runCheck: async () => passingCheck(),
+      async runSession(input) {
+        assert.ok(input.tools.stage);
+        assert.ok(input.tools.checkpoint);
+        if (input.kind === "conflict-resolution") {
+          fs.writeFileSync(path.join(input.cwd, "shared.txt"), "resolved\n");
+          await input.tools.stage({ paths: ["shared.txt"], action: "stage" });
+          await input.tools.checkpoint({ message: "Resolve source" });
+          fs.writeFileSync(path.join(input.cwd, "repair-extra.txt"), "extra\n");
+          await input.tools.stage({
+            paths: ["repair-extra.txt"],
+            action: "stage",
+          });
+          await input.tools.checkpoint({ message: "Extra repair" });
+        } else {
+          fs.writeFileSync(
+            path.join(input.cwd, "shared.txt"),
+            `${input.task!.id}\n`,
+          );
+          await input.tools.stage({ paths: ["shared.txt"], action: "stage" });
+          await input.tools.checkpoint({ message: `${input.task!.id} first` });
+          const file = `${input.task!.id}.txt`;
+          fs.writeFileSync(path.join(input.cwd, file), "remaining\n");
+          await input.tools.stage({ paths: [file], action: "stage" });
+          await input.tools.checkpoint({
+            message: `${input.task!.id} remaining`,
+          });
+        }
+        for (const check of [baselineCheck, ...input.task!.checks])
+          await input.tools.check({ checkId: check.id });
+        const accepted = await input.tools.finalize({
+          summary: "Range accepted",
+        });
+        assert.equal(
+          accepted.validated,
+          true,
+          accepted.error ?? "acceptance failed",
+        );
+        return { status: "settled" };
+      },
+    });
+    assert.equal(result.status, "completed", result.error ?? "graph failed");
+    assert.equal(git(repo.workingDir, ["rev-list", "--count", "HEAD"]), "6");
+    assert.equal(
+      result.joins.find(({ id }) => id === "join-1")!.commits.length,
+      5,
+    );
+    for (const task of tasks)
+      assert.equal(
+        fs.readFileSync(path.join(repo.workingDir, `${task.id}.txt`), "utf8"),
+        "remaining\n",
+      );
+    assert.equal(
+      fs.readFileSync(path.join(repo.workingDir, "repair-extra.txt"), "utf8"),
+      "extra\n",
     );
   } finally {
     repo.cleanup();
@@ -1662,6 +2975,8 @@ test("post-join semantic failure creates one continuing join-repair task", async
       },
       async runSession(input) {
         if (input.kind === "join-repair") {
+          assert.equal(input.model, "openai-codex/gpt-6-astra");
+          assert.equal(input.thinkingLevel, "low");
           fs.writeFileSync(path.join(input.cwd, "repair.txt"), "compatible\n");
           await input.tools.finalize({
             commitPaths: ["repair.txt"],

@@ -5,11 +5,179 @@ import {
   FEATURE_CANDIDATE_PLAN_SCHEMA,
   FEATURE_CANONICAL_PLAN_SCHEMA,
   FEATURE_EXECUTION_GRAPH_SCHEMA,
+  FEATURE_EXECUTION_GRAPH_MAX_BYTES,
+  parseFeatureExecutionGraphText,
   parseFeatureCandidatePlanText,
+  parseFeatureCandidatePlan,
+  parseFeatureExecutionGraph,
+  defaultFeaturePlanningNarrative,
+  validateFeatureExecutionCheckReferences,
+  type FeatureExecutionCheck,
   validateFeatureCandidatePlanForRole,
   validateFeatureCandidatePlan,
   validateFeatureCanonicalPlan,
 } from "./feature-planning.ts";
+
+test("defaults omitted presentation fields without relaxing control data or versions", () => {
+  const { summary: _summary, ...input } = candidatePlan();
+  const result = parseFeatureCandidatePlan(input);
+  assert.equal(typeof result.summary, "string");
+  assert.deepEqual(result.changes, input.changes);
+  assert.equal("summary" in input, false);
+  assert.deepEqual(parseFeatureCandidatePlan(candidatePlan()), candidatePlan());
+  assert.throws(() =>
+    parseFeatureCandidatePlan({
+      ...input,
+      reportType: "feature-plan-candidate-v2",
+    }),
+  );
+  assert.throws(() => parseFeatureCandidatePlan({ ...input, summary: null }));
+  assert.ok(validateFeatureCandidatePlanForRole("Robust", input).length > 0);
+  const invalid = candidatePlan();
+  invalid.changes[0]!.acceptanceRefs = ["AC-missing"];
+  assert.throws(() => parseFeatureCandidatePlan(invalid));
+  assert.throws(() => parseFeatureCandidatePlan({ ...input, decisions: [] }));
+  assert.deepEqual(defaultFeaturePlanningNarrative({ reportType: "other" }), {
+    reportType: "other",
+  });
+});
+
+test("normalizes only unordered context facts through parsed submissions", () => {
+  const input = executionGraph();
+  input.tasks.push(executionTask("another-task", ["implement-feature"]));
+  for (const task of input.tasks) {
+    task.context.repositoryConventions = ["z", "a", "z", "A"];
+    task.context.relevantDiscovery = ["second", "first", "second"];
+    task.instructions = ["second step", "first step", "second step"];
+    task.context.invariants = ["z", "a", "z"];
+  }
+  const original = structuredClone(input);
+  const expected = structuredClone(input);
+  for (const task of expected.tasks) {
+    task.context.repositoryConventions = ["A", "a", "z"];
+    task.context.relevantDiscovery = ["first", "second"];
+  }
+  const parsed = parseFeatureExecutionGraph(input);
+  assert.deepEqual(parsed, expected);
+  assert.deepEqual(parseFeatureExecutionGraph(parsed), expected);
+  assert.deepEqual(defaultFeaturePlanningNarrative(parsed), expected);
+  assert.deepEqual(
+    parseFeatureExecutionGraphText(JSON.stringify(input)),
+    expected,
+  );
+  assert.deepEqual(input, original);
+  const reordered = structuredClone(input);
+  for (const task of reordered.tasks) {
+    task.context.repositoryConventions.reverse();
+    task.context.relevantDiscovery.reverse();
+  }
+  assert.deepEqual(parseFeatureExecutionGraph(reordered), expected);
+  reordered.tasks[0]!.instructions = ["first step", "second step"];
+  assert.deepEqual(
+    parseFeatureExecutionGraph(reordered).tasks[0]!.instructions,
+    reordered.tasks[0]!.instructions,
+  );
+});
+
+test("normalization preserves malformed collections and original size violations", () => {
+  for (const field of ["repositoryConventions", "relevantDiscovery"] as const) {
+    for (const items of [
+      [],
+      ["valid", 42, "valid"],
+      ["", "valid", ""],
+      "not an array",
+      Array.from({ length: 513 }, () => "duplicate"),
+      ["x".repeat(32 * 1024 + 1), "x".repeat(32 * 1024 + 1)],
+      Array.from({ length: 20 }, () => "é".repeat(32 * 1024)),
+    ]) {
+      const input = executionGraph();
+      Object.assign(input.tasks[0]!.context, { [field]: items });
+      const original = structuredClone(input);
+      assert.deepEqual(defaultFeaturePlanningNarrative(input), original);
+      assert.throws(() => parseFeatureExecutionGraph(input));
+      assert.throws(() =>
+        parseFeatureExecutionGraphText(JSON.stringify(input)),
+      );
+      assert.deepEqual(input, original);
+    }
+  }
+  const oversized = executionGraph();
+  oversized.tasks[0]!.context.relevantDiscovery = Array.from(
+    { length: 20 },
+    () => "x".repeat(32 * 1024),
+  );
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(oversized)) >
+      FEATURE_EXECUTION_GRAPH_MAX_BYTES,
+  );
+  assert.throws(() =>
+    parseFeatureExecutionGraph(defaultFeaturePlanningNarrative(oversized)),
+  );
+});
+
+test("normalization does not repair control IDs or unknown references", () => {
+  const plan = candidatePlan();
+  plan.decisions.push(structuredClone(plan.decisions[0]!));
+  assert.deepEqual(defaultFeaturePlanningNarrative(plan), plan);
+  assert.throws(() => parseFeatureCandidatePlan(plan));
+  const graph = executionGraph();
+  graph.tasks[0]!.context.relevantDiscovery = ["z", "a", "z"];
+  Object.assign(graph.tasks[0]!.checks[0]!, { acceptanceRefs: ["AC-unknown"] });
+  const normalized = defaultFeaturePlanningNarrative(graph);
+  assert.throws(() => parseFeatureExecutionGraph(normalized));
+  assert.deepEqual(
+    (normalized as typeof graph).tasks[0]!.checks,
+    graph.tasks[0]!.checks,
+  );
+});
+
+test("execution checks support optional structured acceptance references and preserve exact commands", () => {
+  const graph = executionGraph();
+  const legacy = parseFeatureExecutionGraph(graph);
+  assert.equal(legacy.reviewChecks[0]?.acceptanceRefs, undefined);
+  const readonlyRefs: readonly string[] = ["AC-1"];
+  const typedCheck: FeatureExecutionCheck = {
+    ...graph.reviewChecks[0]!,
+    acceptanceRefs: readonlyRefs,
+  };
+  assert.deepEqual(
+    validateFeatureExecutionCheckReferences([typedCheck], ["AC-1"]),
+    [],
+  );
+  assert.equal(
+    validateFeatureExecutionCheckReferences([typedCheck], ["AC-other"]).length,
+    1,
+  );
+  const brokenTask = structuredClone(graph);
+  Object.assign(brokenTask.tasks[0]!.checks[0]!, {
+    acceptanceRefs: ["AC-other"],
+  });
+  assert.throws(() => parseFeatureExecutionGraph(brokenTask));
+  const input = {
+    ...graph,
+    reviewChecks: graph.reviewChecks.map((check) => ({
+      ...check,
+      acceptanceRefs: ["AC-1"],
+    })),
+  };
+  const result = parseFeatureExecutionGraph(input);
+  assert.deepEqual(result.reviewChecks[0]?.acceptanceRefs, ["AC-1"]);
+  assert.equal(result.reviewChecks[0]?.command, graph.reviewChecks[0]?.command);
+  for (const acceptanceRefs of [[], ["free form"], ["AC-1", "AC-1"]]) {
+    assert.throws(() =>
+      parseFeatureExecutionGraph({
+        ...input,
+        reviewChecks: [{ ...input.reviewChecks[0], acceptanceRefs }],
+      }),
+    );
+  }
+  assert.throws(() =>
+    parseFeatureExecutionGraph({
+      ...input,
+      reviewChecks: [{ ...input.reviewChecks[0], required: undefined }],
+    }),
+  );
+});
 
 export function candidatePlan() {
   return {

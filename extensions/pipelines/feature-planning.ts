@@ -201,6 +201,15 @@ const executionCheckSchema = Type.Object(
     }),
     purpose: prose(),
     required: Type.Boolean(),
+    acceptanceRefs: Type.Optional(
+      Type.Readonly(
+        Type.Array(identifier("AC"), {
+          minItems: 1,
+          maxItems: MAX_PLAN_ITEMS,
+          uniqueItems: true,
+        }),
+      ),
+    ),
   },
   { additionalProperties: false },
 );
@@ -279,12 +288,24 @@ export const FEATURE_EXECUTION_GRAPH_SCHEMA = Type.Object(
 
 export type FeatureCandidatePlan = Static<typeof FEATURE_CANDIDATE_PLAN_SCHEMA>;
 export type FeatureCanonicalPlan = Static<typeof FEATURE_CANONICAL_PLAN_SCHEMA>;
-export type FeatureExecutionGraph = Static<
-  typeof FEATURE_EXECUTION_GRAPH_SCHEMA
->;
-export type FeatureExecutionTask = FeatureExecutionGraph["tasks"][number];
-export type FeatureExecutionCheck =
-  FeatureExecutionGraph["baselineChecks"][number];
+export type FeatureExecutionCheck = Omit<
+  Static<typeof executionCheckSchema>,
+  "acceptanceRefs"
+> & {
+  readonly acceptanceRefs?: readonly string[];
+};
+export type FeatureExecutionTask = Omit<
+  Static<typeof executionTaskSchema>,
+  "checks"
+> & { checks: FeatureExecutionCheck[] };
+export type FeatureExecutionGraph = Omit<
+  Static<typeof FEATURE_EXECUTION_GRAPH_SCHEMA>,
+  "baselineChecks" | "reviewChecks" | "tasks"
+> & {
+  baselineChecks: FeatureExecutionCheck[];
+  reviewChecks: FeatureExecutionCheck[];
+  tasks: FeatureExecutionTask[];
+};
 
 export const FEATURE_CANDIDATE_PLAN_SUBMISSION = {
   name: "pipeline_feature_plan_candidate_submit",
@@ -303,6 +324,87 @@ export const FEATURE_EXECUTION_GRAPH_SUBMISSION = {
   description: "Submit the small-task execution DAG for the canonical plan.",
   parameters: FEATURE_EXECUTION_GRAPH_SCHEMA,
 } as const;
+
+/** Normalize only presentation data; never synthesize IDs, obligations or results. */
+export function defaultFeaturePlanningNarrative(value: unknown) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return value;
+  let report: Record<string, unknown>;
+  try {
+    report = structuredClone(value) as Record<string, unknown>;
+  } catch {
+    return value;
+  }
+  if (
+    ![
+      FEATURE_CANDIDATE_PLAN_TYPE,
+      FEATURE_CANONICAL_PLAN_TYPE,
+      FEATURE_EXECUTION_GRAPH_TYPE,
+    ].some((type) => report.reportType === type)
+  )
+    return value;
+  if (report.summary === undefined) report.summary = "No summary supplied.";
+  if (
+    report.reportType === FEATURE_CANONICAL_PLAN_TYPE &&
+    report.finalRationale === undefined
+  )
+    report.finalRationale = "No rationale supplied.";
+  const defaultPurposes = (checks: unknown) => {
+    if (!Array.isArray(checks)) return;
+    for (const check of checks) {
+      if (
+        typeof check === "object" &&
+        check !== null &&
+        check.purpose === undefined
+      )
+        check.purpose = "No purpose supplied.";
+    }
+  };
+  defaultPurposes(report.verification);
+  defaultPurposes(report.baselineChecks);
+  defaultPurposes(report.reviewChecks);
+  if (Array.isArray(report.tasks)) {
+    for (const task of report.tasks) {
+      if (typeof task !== "object" || task === null) continue;
+      if (task.branchGoal === undefined)
+        task.branchGoal = "No branch goal supplied.";
+      if (task.implementationSketch === undefined)
+        task.implementationSketch = "No implementation sketch supplied.";
+      defaultPurposes(task.checks);
+    }
+  }
+  // Only these two context collections describe unordered background facts.
+  // In particular, invariants, instructions, references and task order are not
+  // narrative sets. Validate before reducing so invalid input cannot be repaired
+  // by deduplication. Check after defaults too, since they can add bytes.
+  if (
+    report.reportType === FEATURE_EXECUTION_GRAPH_TYPE &&
+    serializedBytes(value) <= FEATURE_EXECUTION_GRAPH_MAX_BYTES &&
+    serializedBytes(report) <= FEATURE_EXECUTION_GRAPH_MAX_BYTES &&
+    Array.isArray(report.tasks)
+  ) {
+    for (const task of report.tasks) {
+      if (typeof task !== "object" || task === null) continue;
+      const context = task.context;
+      if (
+        typeof context !== "object" ||
+        context === null ||
+        Array.isArray(context)
+      )
+        continue;
+      for (const field of [
+        "repositoryConventions",
+        "relevantDiscovery",
+      ] as const) {
+        const items: unknown = context[field];
+        if (Value.Check(taskContextSchema.properties[field], items)) {
+          context[field] = [...new Set(items)].sort();
+        }
+      }
+    }
+  }
+  return report;
+}
 
 function serializedBytes(value: unknown) {
   try {
@@ -439,6 +541,7 @@ function validatePlan<T extends FeatureCandidatePlan | FeatureCanonicalPlan>(
   maximumBytes: number,
   value: unknown,
 ) {
+  value = defaultFeaturePlanningNarrative(value);
   const issues: string[] = [];
   if (serializedBytes(value) > maximumBytes) {
     issues.push(`Plan exceeds ${maximumBytes} UTF-8 bytes.`);
@@ -463,6 +566,7 @@ export function validateFeatureCandidatePlanForRole(
   role: FeaturePlanCandidateRole,
   value: unknown,
 ) {
+  value = defaultFeaturePlanningNarrative(value);
   const issues = validateFeatureCandidatePlan(value);
   if (
     Value.Check(FEATURE_CANDIDATE_PLAN_SCHEMA, value) &&
@@ -487,6 +591,7 @@ function parsePlan<T>(
   value: unknown,
   validate: (candidate: unknown) => ReadonlyArray<string>,
 ) {
+  value = defaultFeaturePlanningNarrative(value);
   const issues = validate(value);
   if (issues.length > 0) throw new Error(issues.join(" "));
   return value as T;
@@ -509,7 +614,24 @@ export function parseFeatureCanonicalPlan(value: unknown) {
   return parsePlan<FeatureCanonicalPlan>(value, validateFeatureCanonicalPlan);
 }
 
+/** The graph owner must also validate root check references against the canonical plan. */
+export function validateFeatureExecutionCheckReferences(
+  checks: readonly FeatureExecutionCheck[],
+  acceptanceRefs: readonly string[],
+) {
+  const allowed = new Set(acceptanceRefs);
+  return checks.flatMap((check) =>
+    (check.acceptanceRefs ?? [])
+      .filter((reference) => !allowed.has(reference))
+      .map(
+        (reference) =>
+          `${check.id} references unknown acceptance criterion ${reference}.`,
+      ),
+  );
+}
+
 export function validateFeatureExecutionGraphSchema(value: unknown) {
+  value = defaultFeaturePlanningNarrative(value);
   const issues: string[] = [];
   if (serializedBytes(value) > FEATURE_EXECUTION_GRAPH_MAX_BYTES) {
     issues.push(
@@ -518,11 +640,21 @@ export function validateFeatureExecutionGraphSchema(value: unknown) {
   }
   if (!Value.Check(FEATURE_EXECUTION_GRAPH_SCHEMA, value)) {
     issues.push("Execution graph does not match its strict TypeBox schema.");
+  } else {
+    for (const task of value.tasks) {
+      issues.push(
+        ...validateFeatureExecutionCheckReferences(
+          task.checks,
+          task.acceptanceRefs,
+        ),
+      );
+    }
   }
   return issues;
 }
 
 export function parseFeatureExecutionGraph(value: unknown) {
+  value = defaultFeaturePlanningNarrative(value);
   const issues = validateFeatureExecutionGraphSchema(value);
   if (issues.length > 0) throw new Error(issues.join(" "));
   return value as FeatureExecutionGraph;

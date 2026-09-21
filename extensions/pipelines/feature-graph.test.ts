@@ -23,6 +23,29 @@ function taskIdsIn(
   return children.flatMap(taskIdsIn);
 }
 
+test("root check references must belong to canonical acceptance obligations", () => {
+  const plan = canonicalPlan();
+  for (const key of ["baselineChecks", "reviewChecks"] as const) {
+    const graph = executionGraph();
+    const invalid = {
+      ...graph,
+      [key]: graph[key].map((check) => ({
+        ...check,
+        acceptanceRefs: ["missing-criterion"],
+      })),
+    };
+    assert.ok(validateFeatureExecutionGraph(plan, invalid).length > 0);
+    const valid = {
+      ...graph,
+      [key]: graph[key].map((check) => ({
+        ...check,
+        acceptanceRefs: [plan.acceptance[0]!.id],
+      })),
+    };
+    assert.deepEqual(validateFeatureExecutionGraph(plan, valid), []);
+  }
+});
+
 test("compiler preserves a linear task chain", () => {
   const tree = compileFeatureExecutionGraph(
     canonicalPlan(),

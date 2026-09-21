@@ -49,7 +49,11 @@ class FakeSession implements AgentTreeSession {
   readonly sessionFile: string;
   isStreaming = false;
   interrupted = 0;
-  disposed = 0;
+  disposeCount = 0;
+
+  get disposed() {
+    return this.disposeCount > 0;
+  }
   readonly spec: AgentNodeSpec;
 
   constructor(spec: AgentNodeSpec, tools: ReadonlyArray<ToolDefinition> = []) {
@@ -88,7 +92,7 @@ class FakeSession implements AgentTreeSession {
   }
 
   dispose() {
-    this.disposed++;
+    this.disposeCount++;
   }
 }
 

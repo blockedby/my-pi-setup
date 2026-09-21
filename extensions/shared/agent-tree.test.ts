@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentTreeController } from "./agent-tree/control.ts";
+import { AgentSessionUnavailableError } from "./agent-tree/domain.ts";
 import type {
   AgentNodeSpec,
   AgentTreeSession,
@@ -16,7 +17,11 @@ class FakeSession implements AgentTreeSession {
   readonly sends: string[] = [];
   isStreaming = false;
   interrupted = 0;
-  disposed = 0;
+  disposeCount = 0;
+
+  get disposed() {
+    return this.disposeCount > 0;
+  }
   interruptError: Error | undefined;
 
   subscribe(listener: (event: AgentTreeSessionEvent) => void) {
@@ -50,7 +55,7 @@ class FakeSession implements AgentTreeSession {
   }
 
   dispose() {
-    this.disposed++;
+    this.disposeCount++;
   }
 }
 
@@ -131,12 +136,15 @@ test("agent tree preserves parent, role, attempt, controls, and bounded transcri
   await tree.cancel(child.id);
   assert.equal(tree.view.get(child.id)?.status, "cancelled");
   assert.equal(childSession.interrupted, 1);
-  await assert.rejects(tree.send("missing", "x"), /Unknown agent id/);
+  await assert.rejects(
+    tree.send("missing", "x"),
+    new AgentSessionUnavailableError("missing", "missing"),
+  );
   await assert.rejects(tree.wait(["missing"]), /Unknown agent id/);
 
   await tree.dispose();
-  assert.equal(fake.created[0]!.session.disposed, 1);
-  assert.equal(fake.created[1]!.session.disposed, 1);
+  assert.equal(fake.created[0]!.session.disposeCount, 1);
+  assert.equal(fake.created[1]!.session.disposeCount, 1);
 });
 
 test("view mutations can be disabled while controller cancellation remains available", async () => {
@@ -227,10 +235,10 @@ test("persistent roots become idle and accept additional remediation turns", asy
   await tree.cancel(root.id);
   assert.equal(tree.view.get(root.id)?.status, "cancelled");
   assert.equal(session.interrupted, 0);
-  assert.equal(session.disposed, 1);
+  assert.equal(session.disposeCount, 1);
 
   await tree.dispose();
-  assert.equal(session.disposed, 1);
+  assert.equal(session.disposeCount, 1);
 });
 
 test("concurrent rejecting cancellation disposes and settles one session once", async () => {
@@ -258,8 +266,8 @@ test("concurrent rejecting cancellation disposes and settles one session once", 
     ["rejected", "rejected"],
   );
   assert.equal(session.interrupted, 1);
-  assert.equal(session.disposed, 1);
+  assert.equal(session.disposeCount, 1);
   assert.equal(tree.view.get(root.id)?.status, "cancelled");
   await tree.dispose();
-  assert.equal(session.disposed, 1);
+  assert.equal(session.disposeCount, 1);
 });

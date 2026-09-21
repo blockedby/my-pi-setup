@@ -126,6 +126,7 @@ function runtimeFor(
   signal = new AbortController().signal,
   onSnapshot?: (snapshot: FeatureTaskSnapshot) => void,
   target = repo.target,
+  preparationCommands?: ReadonlyArray<string>,
 ) {
   const task = executionTask("implement-feature");
   return createFeatureTaskRuntime({
@@ -139,8 +140,766 @@ function runtimeFor(
     runCheck,
     signal,
     onSnapshot,
+    preparationCommands,
   });
 }
+
+test("preparation replacements retain immutable inherited targets and ordered evidence", async () => {
+  const repo = fixture("preparation-replacements-abcdef12");
+  const inherited = ["original"];
+  const calls: string[] = [];
+  try {
+    const runtime = runtimeFor(
+      repo,
+      async ({ command }) => {
+        calls.push(command);
+        return {
+          exitCode: command === "broken" ? 1 : 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+      undefined,
+      undefined,
+      repo.target,
+      inherited,
+    );
+    const capsule = runtime.beginAttempt(1);
+    assert.deepEqual(capsule.graphContext.preparationCommands, ["original"]);
+    inherited.push("later");
+    for (const command of ["fixed", "broken", "corrected"]) {
+      const result = await runtime.host.prepare!({
+        command,
+        cwd: ".",
+        purpose: "repair",
+        replacesCommand: "original",
+      });
+      assert.equal(result.replacesCommand, "original");
+      assert.equal(result.status, command === "broken" ? "failed" : "passed");
+    }
+    assert.deepEqual(calls, ["fixed", "broken", "corrected"]);
+    assert.deepEqual(
+      runtime
+        .snapshot()
+        .preparations?.map(({ command, status, replacesCommand }) => ({
+          command,
+          status,
+          replacesCommand,
+        })),
+      [
+        { command: "fixed", status: "passed", replacesCommand: "original" },
+        { command: "broken", status: "failed", replacesCommand: "original" },
+        { command: "corrected", status: "passed", replacesCommand: "original" },
+      ],
+    );
+    assert.deepEqual(inherited, ["original", "later"]);
+    assert.deepEqual(capsule.graphContext.preparationCommands, ["original"]);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("invalid preparation proposals reject atomically before running", async () => {
+  const repo = fixture("preparation-invalid-abcdef12");
+  try {
+    let calls = 0;
+    const runtime = runtimeFor(
+      repo,
+      async () => {
+        calls++;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      undefined,
+      undefined,
+      repo.target,
+      ["original", "duplicate", "duplicate"],
+    );
+    const before = runtime.snapshot();
+    const valid = {
+      command: "fixed",
+      cwd: ".",
+      purpose: "repair",
+      replacesCommand: "original",
+    };
+    for (const override of [
+      { replacesCommand: "unknown" },
+      { replacesCommand: "duplicate" },
+      { replacesCommand: "" },
+      { replacesCommand: " original" },
+      { replacesCommand: null },
+      { replacesCommand: 1 },
+      { command: " " },
+      { command: "x".repeat(32769) },
+      { command: null },
+      { cwd: "./" },
+      { cwd: "subdir" },
+      { cwd: null },
+      { purpose: null },
+    ]) {
+      // JSON models untyped tool input without weakening the runtime contract types.
+      await assert.rejects(
+        runtime.host.prepare!(
+          JSON.parse(JSON.stringify({ ...valid, ...override })),
+        ),
+      );
+      assert.deepEqual(runtime.snapshot(), before);
+    }
+    assert.equal(calls, 0);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("revoked in-flight preparation cannot leave successful replacement evidence", async () => {
+  const repo = fixture("preparation-revoked-abcdef12");
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  try {
+    const runtime = runtimeFor(
+      repo,
+      async () => {
+        await gate;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      undefined,
+      undefined,
+      repo.target,
+      ["original"],
+    );
+    const lease = runtime.host.acquireSessionLease!("repair");
+    const pending = assert.rejects(
+      lease.host.prepare!({
+        command: "fixed",
+        cwd: ".",
+        purpose: "repair",
+        replacesCommand: "original",
+      }),
+    );
+    lease.revoke();
+    finish();
+    await pending;
+    await lease.drain();
+    assert.equal(runtime.snapshot().preparations?.[0]?.status, "failed");
+    assert.equal(
+      runtime.snapshot().preparations?.[0]?.replacesCommand,
+      "original",
+    );
+  } finally {
+    finish();
+    repo.cleanup();
+  }
+});
+
+test("terminal task outcomes revoke ordinary-tool authority and reject readmission", async () => {
+  for (const outcome of ["accepted", "failed", "cancelled"] as const) {
+    const repo = fixture(`terminal-lease-${outcome}-abcdef12`);
+    try {
+      const runtime = runtimeFor(repo, async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }));
+      runtime.beginAttempt(1);
+      const lease = runtime.host.acquireSessionLease!("session");
+      if (outcome === "accepted") {
+        await lease.host.check({ checkId: "required-check" });
+        const accepted = await lease.host.finalize({
+          summary: "Verified without changes",
+        });
+        assert.equal(accepted.validated, true);
+        runtime.settleAttempt({ status: "settled", sessionId: "session" });
+      } else if (outcome === "failed") runtime.fail("Terminal failure");
+      else runtime.cancel();
+      assert.equal(lease.signal.aborted, true);
+      await assert.rejects(lease.host.diff());
+      assert.throws(() => runtime.host.acquireSessionLease!("replacement"));
+      await lease.drain();
+    } finally {
+      repo.cleanup();
+    }
+  }
+});
+
+test("session leases fence every method and retain checkpoint state", async () => {
+  const repo = fixture("lease-methods-abcdef12");
+  try {
+    const runtime = runtimeFor(repo, async () => ({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }));
+    const lease = runtime.host.acquireSessionLease!("first");
+    assert.equal(runtime.host.acquireSessionLease!("first"), lease);
+    assert.equal(lease.host.acquireSessionLease, undefined);
+    assert.equal(lease.host.authoritySignal, lease.signal);
+    assert.throws(() => runtime.host.acquireSessionLease!("second"));
+    fs.writeFileSync(
+      path.join(repo.workingDir, "selected.txt"),
+      "checkpoint\n",
+    );
+    await lease.host.stage!({ action: "stage", paths: ["selected.txt"] });
+    const checkpoint = await lease.host.checkpoint!({ message: "checkpoint" });
+    lease.revoke();
+    lease.revoke();
+    assert.throws(() => lease.host.describe!());
+    await assert.rejects(lease.host.diff());
+    await assert.rejects(lease.host.check({ checkId: "required-check" }));
+    await assert.rejects(
+      lease.host.prepare!({ command: "true", cwd: ".", purpose: "test" }),
+    );
+    await assert.rejects(lease.host.stage!({ action: "stage", paths: [] }));
+    await assert.rejects(lease.host.checkpoint!({ message: "old" }));
+    await assert.rejects(lease.host.finalize({ summary: "old" }));
+    await lease.drain();
+    assert.throws(() => runtime.host.acquireSessionLease!("first"));
+    const next = runtime.host.acquireSessionLease!("second");
+    assert.equal((await next.host.diff()).currentHead, checkpoint.commit);
+    assert.equal(runtime.snapshot().checkpointHead, checkpoint.commit);
+    await runtime.host.diff();
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test(
+  "session drain timeout permanently blocks replacement even after late settlement",
+  { timeout: 15_000 },
+  async () => {
+    const repo = fixture("lease-timeout-abcdef12");
+    try {
+      let finish!: () => void;
+      const runtime = runtimeFor(repo, async () => {
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return { exitCode: 0, stdout: "", stderr: "" };
+      });
+      const lease = runtime.host.acquireSessionLease!("first");
+      const rejected = assert.rejects(
+        lease.host.check({ checkId: "required-check" }),
+      );
+      lease.revoke();
+      await assert.rejects(lease.drain());
+      finish();
+      await rejected;
+      await assert.rejects(lease.drain());
+      assert.throws(() => runtime.host.acquireSessionLease!("second"));
+    } finally {
+      repo.cleanup();
+    }
+  },
+);
+
+test("review admits leases only after begin", async () => {
+  const repo = fixture("lease-review-abcdef12");
+  try {
+    const review = createFeatureReviewRuntime({
+      runId: "lease-review-abcdef12",
+      workingDir: repo.workingDir,
+      checks: [],
+    });
+    assert.throws(() => review.host.acquireSessionLease!("review"));
+    review.begin(repo.base);
+    const lease = review.host.acquireSessionLease!("review");
+    assert.equal(review.host.acquireSessionLease!("review"), lease);
+    await lease.host.diff();
+    lease.revoke();
+    await lease.drain();
+    await assert.rejects(lease.host.diff());
+  } finally {
+    repo.cleanup();
+  }
+});
+
+for (const operation of ["check", "prepare", "finalize"] as const) {
+  test(`revoked delayed ${operation} cannot publish authoritative results`, async () => {
+    const repo = fixture(`lease-delayed-${operation}-abcdef12`);
+    try {
+      let finish!: () => void;
+      let runnerSignal: AbortSignal | undefined;
+      const runtime = runtimeFor(repo, async (input) => {
+        runnerSignal = input.signal;
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return { exitCode: 0, stdout: "late", stderr: "" };
+      });
+      const lease = runtime.host.acquireSessionLease!("first");
+      const result =
+        operation === "check"
+          ? lease.host.check({ checkId: "required-check" })
+          : operation === "prepare"
+            ? lease.host.prepare!({
+                command: "true",
+                cwd: ".",
+                purpose: "test",
+              })
+            : lease.host.finalize({ summary: "test", commitPaths: [] });
+      const rejected = assert.rejects(result);
+      lease.revoke();
+      assert.equal(runnerSignal?.aborted, true);
+      let drained = false;
+      const draining = lease.drain().then(() => {
+        drained = true;
+      });
+      await Promise.resolve();
+      assert.equal(drained, false);
+      assert.throws(() => runtime.host.acquireSessionLease!("second"));
+      finish();
+      await rejected;
+      await draining;
+      assert.equal(runtime.isValidated(), false);
+      assert.equal(runtime.snapshot().checks.length, 0);
+      assert.equal(runtime.snapshot().preparations?.length, 0);
+      assert.ok(runtime.host.acquireSessionLease!("second"));
+    } finally {
+      repo.cleanup();
+    }
+  });
+}
+
+test("recovery accepts exact generated output without rerunning and rejects later source edits", async () => {
+  for (const mutate of [false, true]) {
+    const repo = fixture(`recovery-${mutate}-abcdef12`);
+    try {
+      let calls = 0;
+      const runtime = runtimeFor(repo, async () => {
+        calls++;
+        fs.writeFileSync(
+          path.join(repo.workingDir, "generated.txt"),
+          `version-${calls}\n`,
+        );
+        return { exitCode: 0, stdout: "built", stderr: "" };
+      });
+      runtime.beginAttempt(1);
+      const checked = await runtime.host.check({ checkId: "required-check" });
+      assert.equal(checked.status, "passed");
+      assert.deepEqual(checked.changedPaths, ["generated.txt"]);
+      assert.notEqual(
+        checked.inputRevision?.fingerprint,
+        checked.outputRevision?.fingerprint,
+      );
+      if (mutate)
+        fs.writeFileSync(
+          path.join(repo.workingDir, "selected.txt"),
+          "later source\n",
+        );
+      await runtime.host.stage!({
+        action: "stage",
+        paths: mutate ? ["generated.txt", "selected.txt"] : ["generated.txt"],
+      });
+      await runtime.host.checkpoint!({ message: "checkpoint output" });
+      const accepted = await runtime.host.finalize({ summary: "exact output" });
+      assert.equal(accepted.validated, !mutate);
+      assert.equal(calls, 1);
+      assert.equal(accepted.commitRange?.headCommit, repo.target.head());
+      if (mutate) assert.match(accepted.error ?? "", /Stale required check/);
+    } finally {
+      repo.cleanup();
+    }
+  }
+});
+
+test("AUD-002 revised recipes cannot remove failed original obligations", async () => {
+  const repo = fixture("audit-recipes-abcdef12");
+  try {
+    let repaired = false;
+    const runtime = runtimeFor(repo, async ({ command }) => ({
+      exitCode: command === "run required-check" && !repaired ? 1 : 0,
+      stdout: "",
+      stderr: "",
+    }));
+    runtime.beginAttempt(1);
+    const original = await runtime.host.check({ checkId: "required-check" });
+    const revised = await runtime.host.check({
+      checkId: "required-check",
+      recipe: {
+        command: "legitimate revised command",
+        cwd: ".",
+        purpose: "verify",
+        reason: "recover tool",
+      },
+    });
+    assert.equal(revised.status, "passed");
+    const another = await runtime.host.check({
+      checkId: "required-check",
+      recipe: {
+        command: "another revised command",
+        cwd: ".",
+        purpose: "verify again",
+        reason: "additional evidence",
+      },
+    });
+    assert.notEqual(another.checkId, revised.checkId);
+    const ids = runtime.host.describe!()!.checkIds;
+    assert.equal(new Set(ids).size, ids.length);
+    assert.equal(
+      (await runtime.host.finalize({ summary: "replacement alone" })).validated,
+      false,
+    );
+    assert.notEqual(revised.checkId, original.checkId);
+    assert.deepEqual(
+      runtime
+        .snapshot()
+        .checks.find((check) => check.checkId === original.checkId),
+      original,
+    );
+    repaired = true;
+    const fixed = await runtime.host.check({ checkId: original.checkId });
+    assert.equal(fixed.command, original.command);
+    assert.equal(fixed.recipeRevision, original.recipeRevision);
+    assert.equal(
+      (await runtime.host.finalize({ summary: "original repaired" })).validated,
+      true,
+    );
+    assert.deepEqual(runtime.snapshot().checkHistory?.[0], original);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("AUD-003 summary acceptance exempts only unchanged controller-recorded residuals", async () => {
+  for (const mutation of ["none", "changed", "staged", "untracked"] as const) {
+    const repo = fixture(`audit-residual-${mutation}-abcdef12`);
+    try {
+      fs.writeFileSync(
+        path.join(repo.workingDir, "selected.txt"),
+        "committed\n",
+      );
+      fs.writeFileSync(
+        path.join(repo.workingDir, "generated.txt"),
+        "retained\n",
+      );
+      fs.chmodSync(path.join(repo.workingDir, "generated.txt"), 0o400);
+      fs.chmodSync(repo.workingDir, 0o500);
+      let committed: ReturnType<typeof repo.target.commit>;
+      try {
+        committed = repo.target.commit(
+          repo.base,
+          ["selected.txt"],
+          "record residual",
+        );
+      } finally {
+        fs.chmodSync(repo.workingDir, 0o700);
+        fs.chmodSync(path.join(repo.workingDir, "generated.txt"), 0o600);
+      }
+      const root = repo.lifecycle.branch("root");
+      assert.deepEqual(root.trackedResidualPaths, ["generated.txt"]);
+      const review = createFeatureReviewRuntime({
+        runId: `audit-residual-${mutation}-abcdef12`,
+        workingDir: repo.workingDir,
+        checks: [requiredCheck()],
+        runCheck: passingCheck,
+        knownResidualPaths: root.trackedResidualPaths,
+        knownTrackedResiduals: root.trackedResiduals,
+      });
+      review.begin(committed.commit);
+      if (mutation === "changed")
+        fs.appendFileSync(
+          path.join(repo.workingDir, "generated.txt"),
+          "drift\n",
+        );
+      if (mutation === "staged") git(repo.workingDir, ["add", "generated.txt"]);
+      if (mutation === "untracked")
+        fs.writeFileSync(path.join(repo.workingDir, "arbitrary.txt"), "dirt\n");
+      await review.host.check({ checkId: "required-check" });
+      if (mutation === "changed" || mutation === "staged") {
+        await assert.rejects(
+          review.host.finalize({ summary: "review" }),
+          /residual changed/i,
+        );
+      } else {
+        assert.equal(
+          (await review.host.finalize({ summary: "review" })).validated,
+          mutation === "none",
+        );
+      }
+    } finally {
+      fs.chmodSync(repo.workingDir, 0o700);
+      repo.cleanup();
+    }
+  }
+});
+
+test("AUD-003 retained untracked output survives summary acceptance only unchanged", async () => {
+  for (const mutation of ["none", "changed", "staged", "arbitrary"] as const) {
+    const repo = fixture(`audit-untracked-${mutation}-abcdef12`);
+    const output = path.join(repo.workingDir, "retained.txt");
+    try {
+      fs.writeFileSync(
+        path.join(repo.workingDir, "selected.txt"),
+        "selected\n",
+      );
+      fs.writeFileSync(output, "retained\n");
+      fs.chmodSync(repo.workingDir, 0o500);
+      let committed: ReturnType<typeof repo.target.commit>;
+      try {
+        committed = repo.target.commit(
+          repo.base,
+          ["selected.txt"],
+          "retain output",
+        );
+      } finally {
+        fs.chmodSync(repo.workingDir, 0o700);
+      }
+      assert.ok(committed.residualPaths.includes("retained.txt"));
+      const root = repo.lifecycle.branch("root");
+      assert.ok(Object.isFrozen(root.untrackedResiduals));
+      assert.ok(Object.isFrozen(root.untrackedResiduals?.[0]));
+      const handoff = root.untrackedResiduals!.map((record) => ({ ...record }));
+      assert.deepEqual(
+        handoff.map((record) => record.path),
+        ["retained.txt"],
+      );
+      const review = createFeatureReviewRuntime({
+        runId: `audit-untracked-${mutation}-abcdef12`,
+        workingDir: repo.workingDir,
+        checks: [requiredCheck()],
+        runCheck: passingCheck,
+        knownResidualPaths: committed.residualPaths,
+        knownUntrackedResiduals: handoff,
+      });
+      handoff[0]!.fingerprint = "tampered after handoff";
+      handoff.push({ path: "dirt.txt", fingerprint: "path-only claim" });
+      review.begin(committed.commit);
+      if (mutation === "changed") fs.appendFileSync(output, "changed\n");
+      if (mutation === "staged") git(repo.workingDir, ["add", "retained.txt"]);
+      if (mutation === "arbitrary")
+        fs.writeFileSync(path.join(repo.workingDir, "dirt.txt"), "dirt\n");
+      await review.host.check({ checkId: "required-check" });
+      if (mutation === "changed" || mutation === "staged") {
+        await assert.rejects(
+          review.host.finalize({ summary: "review" }),
+          /residual changed/i,
+        );
+      } else {
+        assert.equal(
+          (await review.host.finalize({ summary: "review" })).validated,
+          mutation === "none",
+        );
+      }
+      assert.equal(
+        fs.readFileSync(output, "utf8"),
+        mutation === "changed" ? "retained\nchanged\n" : "retained\n",
+      );
+    } finally {
+      fs.chmodSync(repo.workingDir, 0o700);
+      repo.cleanup();
+    }
+  }
+});
+
+test("summary acceptance does not inherit path-only dirt or preparation exemptions", async () => {
+  const repo = fixture("audit-no-inherited-dirt-abcdef12");
+  try {
+    fs.writeFileSync(path.join(repo.workingDir, "arbitrary.txt"), "dirty\n");
+    const runtime = createFeatureTaskRuntime({
+      kind: "task",
+      task: executionTask("implement-feature"),
+      canonicalPlan: canonicalPlan(),
+      graph: executionGraph(),
+      target: repo.target,
+      taskBaseCommit: repo.base,
+      checks: [requiredCheck()],
+      preparationBaseline: ["arbitrary.txt"],
+      knownResidualPaths: ["arbitrary.txt"],
+      runCheck: passingCheck,
+      signal: new AbortController().signal,
+    });
+    runtime.beginAttempt(1);
+    await runtime.host.check({ checkId: "required-check" });
+    assert.equal(
+      (await runtime.host.finalize({ summary: "not exempt" })).validated,
+      false,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("preparation failure is recoverable, invocation identities are global, recipes retain obligations", async () => {
+  const repo = fixture("recovery-recipes-abcdef12");
+  try {
+    const runner: FeatureCheckRunner = async (input) => ({
+      exitCode: input.kind === "prepare" ? 1 : 0,
+      stdout: "",
+      stderr: "diagnostic",
+    });
+    const first = runtimeFor(repo, runner);
+    const second = runtimeFor(repo, runner);
+    first.beginAttempt(1);
+    second.beginAttempt(1);
+    const preparation = await first.host.prepare!({
+      command: "bootstrap",
+      cwd: ".",
+      purpose: "recover dependencies",
+    });
+    assert.equal(preparation.status, "failed");
+    assert.equal(first.snapshot().preparations?.length, 1);
+    const a = await first.host.check({ checkId: "required-check" });
+    const b = await second.host.check({ checkId: "required-check" });
+    assert.notEqual(a.checkInvocationId, b.checkInvocationId);
+    const updated = await first.host.check({
+      checkId: "required-check",
+      recipe: {
+        command: "replacement",
+        cwd: ".",
+        purpose: "verify",
+        reason: "tool unavailable",
+      },
+      acceptanceRefs: executionTask("implement-feature").acceptanceRefs,
+    });
+    assert.equal(updated.required, true);
+    assert.notEqual(updated.checkId, a.checkId);
+    assert.equal(updated.recipeRevision, 2);
+    assert.equal(first.snapshot().checkHistory?.length, 2);
+    assert.equal(
+      (await first.host.finalize({ summary: "verified" })).validated,
+      true,
+    );
+    const failed = runtimeFor(repo, async () => ({
+      exitCode: 2,
+      stdout: "",
+      stderr: "failed",
+    }));
+    failed.beginAttempt(1);
+    assert.equal(
+      (await failed.host.check({ checkId: "required-check" })).status,
+      "failed",
+    );
+    assert.equal(
+      (await failed.host.finalize({ summary: "not verified" })).validated,
+      false,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("supplementary checks preserve original failures and coverage, and reject revisions atomically", async () => {
+  const repo = fixture("supplementary-abcdef12");
+  try {
+    const task = executionTask("implement-feature");
+    const refs = task.acceptanceRefs;
+    const runtime = runtimeFor(repo, async ({ command }) => ({
+      exitCode: command === "run required-check" ? 1 : 0,
+      stdout: "",
+      stderr: "",
+    }));
+    runtime.beginAttempt(1);
+    const original = await runtime.host.check({ checkId: "required-check" });
+    const recipe = {
+      command: "supplement",
+      cwd: ".",
+      purpose: "extra coverage",
+      reason: "new verification",
+    };
+    for (const request of [
+      { checkId: "extra", recipe },
+      { checkId: "extra", recipe, acceptanceRefs: [] },
+      { checkId: "extra", acceptanceRefs: refs },
+      { checkId: "extra", recipe, acceptanceRefs: ["AC-UNKNOWN"] },
+      { checkId: "required-check", recipe, acceptanceRefs: ["AC-UNKNOWN"] },
+      {
+        checkId: "required-check",
+        recipe: { ...recipe, cwd: "../" },
+        acceptanceRefs: refs,
+      },
+    ]) {
+      const before = runtime.snapshot();
+      const description = runtime.host.describe!();
+      await assert.rejects(runtime.host.check(request));
+      assert.deepEqual(runtime.snapshot(), before);
+      assert.deepEqual(runtime.host.describe!(), description);
+    }
+    const extra = await runtime.host.check({
+      checkId: "extra",
+      recipe,
+      acceptanceRefs: refs,
+    });
+    assert.equal(extra.required, true);
+    assert.equal(extra.recipeRevision, 1);
+    assert.deepEqual(extra.acceptanceRefs, refs);
+    assert.notEqual(extra.checkInvocationId, original.checkInvocationId);
+    assert.deepEqual(runtime.host.describe!()?.checkIds, [
+      "required-check",
+      "extra",
+    ]);
+    assert.deepEqual(
+      runtime
+        .snapshot()
+        .checks.find((check) => check.checkId === original.checkId),
+      original,
+    );
+    assert.equal(
+      (
+        await runtime.host.finalize({
+          summary: "extra does not replace failure",
+        })
+      ).validated,
+      false,
+    );
+    const revised = await runtime.host.check({
+      checkId: "extra",
+      acceptanceRefs: [],
+    });
+    assert.equal(revised.recipeRevision, 2);
+    assert.deepEqual(revised.acceptanceRefs, refs);
+    assert.equal(runtime.snapshot().checkHistory?.length, 3);
+    assert.deepEqual(
+      runtime.beginAttempt(2).checks.map((check) => check.id),
+      ["required-check", "extra"],
+    );
+    assert.deepEqual(
+      runtime.snapshot().capsule?.checks.map((check) => check.acceptanceRefs),
+      [refs, refs],
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("planned explicit coverage is honored and cannot be removed by revisions", async () => {
+  const repo = fixture("explicit-coverage-abcdef12");
+  try {
+    const task = {
+      ...executionTask("implement-feature"),
+      acceptanceRefs: ["AC-ONE", "AC-TWO"],
+    };
+    const make = (acceptanceRefs: string[]) =>
+      createFeatureTaskRuntime({
+        kind: "task",
+        task,
+        canonicalPlan: canonicalPlan(),
+        graph: executionGraph(),
+        target: repo.target,
+        taskBaseCommit: repo.base,
+        checks: [{ ...requiredCheck(), acceptanceRefs }],
+        runCheck: passingCheck,
+        signal: new AbortController().signal,
+      });
+    assert.throws(() => make(["AC-UNKNOWN"]));
+    const runtime = make(["AC-ONE"]);
+    runtime.beginAttempt(1);
+    const first = await runtime.host.check({ checkId: "required-check" });
+    assert.deepEqual(first.acceptanceRefs, ["AC-ONE"]);
+    const second = await runtime.host.check({
+      checkId: "required-check",
+      acceptanceRefs: ["AC-TWO"],
+    });
+    assert.deepEqual(second.acceptanceRefs, ["AC-ONE", "AC-TWO"]);
+    assert.equal(second.required, true);
+    assert.equal(second.recipeRevision, 2);
+    assert.deepEqual(
+      runtime.snapshot().checkHistory?.map((check) => check.acceptanceRefs),
+      [["AC-ONE"], ["AC-ONE", "AC-TWO"]],
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
 
 const passingCheck: FeatureCheckRunner = async () => ({
   exitCode: 0,

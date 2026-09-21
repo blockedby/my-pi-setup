@@ -6,6 +6,9 @@ import type {
 import * as path from "node:path";
 
 const TASK_TOOL_NAMES = {
+  prepare: "pipeline_task_prepare",
+  stage: "pipeline_task_stage",
+  checkpoint: "pipeline_task_checkpoint",
   diff: "pipeline_task_diff",
   check: "pipeline_task_check",
   finalize: "pipeline_task_finalize",
@@ -19,6 +22,9 @@ type TaskToolName = (typeof TASK_TOOL_NAMES)[keyof typeof TASK_TOOL_NAMES];
 export type TaskToolPhase = "read-only" | "implementation";
 
 export type TaskToolOperation =
+  | "prepare"
+  | "stage"
+  | "checkpoint"
   | "diff"
   | "check"
   | "finalize"
@@ -36,10 +42,14 @@ export interface TaskToolContract {
   readonly writableRoots: ReadonlyArray<string>;
   readonly authority: {
     readonly git: "controller-only";
-    readonly commit: "pipeline_task_finalize" | null;
+    readonly commit:
+      "pipeline_task_checkpoint" | "pipeline_task_finalize" | null;
     readonly checks: "pipeline_task_check" | null;
   };
   readonly routes: {
+    readonly prepare: "pipeline_task_prepare" | null;
+    readonly stage: "pipeline_task_stage" | null;
+    readonly checkpoint: "pipeline_task_checkpoint" | null;
     readonly diff: "pipeline_task_diff" | null;
     readonly check: "pipeline_task_check" | null;
     readonly finalize: "pipeline_task_finalize" | null;
@@ -151,10 +161,31 @@ export function buildTaskToolContract(options: {
       options.phase === "implementation" ? [options.workspaceRoot] : [],
     authority: {
       git: "controller-only",
-      commit: canFinalize ? TASK_TOOL_NAMES.finalize : null,
+      commit:
+        options.phase === "implementation" &&
+        hasTool(activeTools, TASK_TOOL_NAMES.checkpoint)
+          ? TASK_TOOL_NAMES.checkpoint
+          : canFinalize
+            ? TASK_TOOL_NAMES.finalize
+            : null,
       checks: checkTool,
     },
     routes: {
+      prepare:
+        options.phase === "implementation" &&
+        hasTool(activeTools, TASK_TOOL_NAMES.prepare)
+          ? TASK_TOOL_NAMES.prepare
+          : null,
+      stage:
+        options.phase === "implementation" &&
+        hasTool(activeTools, TASK_TOOL_NAMES.stage)
+          ? TASK_TOOL_NAMES.stage
+          : null,
+      checkpoint:
+        options.phase === "implementation" &&
+        hasTool(activeTools, TASK_TOOL_NAMES.checkpoint)
+          ? TASK_TOOL_NAMES.checkpoint
+          : null,
       diff: hasTool(activeTools, TASK_TOOL_NAMES.diff)
         ? TASK_TOOL_NAMES.diff
         : null,
@@ -176,6 +207,27 @@ export function routeTaskOperation(
   checkId?: string,
 ): TaskToolRoute {
   switch (operation) {
+    case "prepare":
+    case "stage":
+    case "checkpoint": {
+      const tool = contract.routes[operation];
+      if (!tool)
+        return blocked(
+          operation,
+          contract.phase === "read-only" ? "read-only" : "tool-unavailable",
+          "This scoped controller operation is unavailable; no shell or Git bypass is permitted.",
+        );
+      const examples = {
+        prepare: {
+          command: "bun install --frozen-lockfile",
+          cwd: ".",
+          purpose: "Restore declared dependencies",
+        },
+        stage: { paths: ["example.txt"], action: "stage" },
+        checkpoint: { message: "Record verified task progress" },
+      };
+      return allowed(operation, tool, examples[operation]);
+    }
     case "diff":
       return contract.routes.diff
         ? allowed(operation, contract.routes.diff, {})
@@ -192,7 +244,13 @@ export function routeTaskOperation(
           "The controller check tool is not active; arbitrary commands are not an approved check route.",
         );
       }
-      if (checkId !== undefined && !contract.checkIds.includes(checkId)) {
+      // Implementation may propose supplementary checks. The runtime, not the
+      // routing hint, validates their recipe, coverage and preserved obligations.
+      if (
+        contract.phase !== "implementation" &&
+        checkId !== undefined &&
+        !contract.checkIds.includes(checkId)
+      ) {
         return blocked(
           operation,
           "unknown-check-id",
@@ -204,7 +262,7 @@ export function routeTaskOperation(
         return blocked(
           operation,
           "check-id-required",
-          "A declared check ID is required; arbitrary commands and check IDs are not allowed.",
+          "A bounded check ID is required. New implementation IDs additionally require a recipe and valid acceptance references at runtime.",
         );
       }
       return allowed(operation, contract.routes.check, {
@@ -214,7 +272,6 @@ export function routeTaskOperation(
     case "finalize":
       return contract.routes.finalize
         ? allowed(operation, contract.routes.finalize, {
-            commitPaths: [],
             summary: "Finalize through the controller.",
           })
         : blocked(
@@ -264,7 +321,7 @@ export function routeTaskOperation(
       return blocked(
         operation,
         "unsupported-operation",
-        "Generic Git mutation is never an approved task operation; use the distinct finalize operation for controller-owned finalization.",
+        "Generic Git mutation is never approved; use scoped stage/checkpoint tools and finalize for controller-owned acceptance.",
       );
     case "outside-workspace":
       return blocked(

@@ -1,4 +1,14 @@
 import { randomUUID } from "node:crypto";
+import {
+  parseFeaturePlannerRecoveryDecision,
+  type FeaturePlannerRecoveryRequest,
+  type FeaturePlannerRecoveryDecision,
+} from "./feature-planner-recovery.ts";
+import {
+  FeatureSubtreeOperationError,
+  type FeatureExecutionDiagnostic,
+} from "./feature-execution-contract.ts";
+import { ASTRA_MODEL } from "./domain.ts";
 import type { ExecutionTree } from "./feature-graph.ts";
 import type {
   FeatureCanonicalPlan,
@@ -24,8 +34,23 @@ import {
 } from "./feature-task-worktrees.ts";
 import type { CleanupEvidenceSink } from "./cleanup-evidence.ts";
 
-const MAX_TASK_ATTEMPTS = 4;
-const LUNA_MODEL = "openai-codex/gpt-5.6-luna" as const;
+// Continuations reuse the role-bound session. Both bounds are independent of clocks.
+const MAX_NO_PROGRESS_CONTINUATIONS = 3;
+const MAX_TASK_CONTINUATIONS = 24;
+
+function acceptedCommits(result: FeatureTaskSnapshot) {
+  return (
+    result.commitRange?.commits ??
+    (result.validatedCommit ? [result.validatedCommit] : [])
+  );
+}
+
+function accepted(result: FeatureTaskSnapshot) {
+  return (
+    result.status === "validated" ||
+    result.status === "satisfied_without_changes"
+  );
+}
 
 export type FeatureBranchStatus =
   | "waiting"
@@ -94,6 +119,11 @@ export interface FeatureJoinSnapshot {
 }
 
 export interface FeatureGraphExecutionSnapshot {
+  /** Safe planner boundary: observations only; this executor never rewrites the graph. */
+  readonly blockedTasks?: ReadonlyArray<{
+    readonly taskId: string;
+    readonly diagnostic: FeatureExecutionDiagnostic;
+  }>;
   readonly tree: ExecutionTree;
   readonly tasks: ReadonlyArray<FeatureTaskSnapshot>;
   readonly branches: ReadonlyArray<FeatureBranchSnapshot>;
@@ -107,6 +137,7 @@ export interface FeatureGraphExecutionResult extends FeatureGraphExecutionSnapsh
   readonly head: string;
   readonly rootResidualPaths?: ReadonlyArray<string>;
   readonly rootTrackedResiduals?: ReadonlyArray<FeatureTrackedResidualState>;
+  readonly rootUntrackedResiduals?: ReadonlyArray<FeatureTrackedResidualState>;
   readonly error?: string;
   /** Call only after the entire feature pipeline, including review/audit, succeeds. */
   cleanupCompleted(): ReadonlyArray<string>;
@@ -125,6 +156,10 @@ export interface FeatureGraphExecutionOptions {
   readonly runSession: (
     input: FeatureTaskSessionInput,
   ) => Promise<FeatureTaskSessionOutcome>;
+  readonly requestPlannerRecovery?: (
+    request: FeaturePlannerRecoveryRequest,
+    signal: AbortSignal,
+  ) => Promise<FeaturePlannerRecoveryDecision>;
   readonly runCheck?: FeatureCheckRunner;
   readonly signal?: AbortSignal;
   readonly now?: () => number;
@@ -218,6 +253,7 @@ interface BranchExecution {
   commits: BranchCommit[];
   visibleCommits: Map<string, string>;
   repairs: FeatureCompletedDependency[];
+  integratedSources: Map<string, string>;
 }
 
 interface ForkPlan {
@@ -389,7 +425,9 @@ export async function executeFeatureGraph(
   options: FeatureGraphExecutionOptions,
 ) {
   const ownedAbort = new AbortController();
-  const signal = options.signal ?? ownedAbort.signal;
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, ownedAbort.signal])
+    : ownedAbort.signal;
   const runCheck = options.runCheck ?? runFeatureCheckCommand;
   const now = options.now ?? (() => performance.now());
   const controllerInstanceId = options.controllerInstanceId ?? randomUUID();
@@ -414,6 +452,20 @@ export async function executeFeatureGraph(
     ["root", new Set()],
   ]);
   const results = new Map<string, FeatureTaskSnapshot>();
+  const blockedTasks = new Map<string, FeatureExecutionDiagnostic>();
+  const markBlocked = (node: ExecutionTree) => {
+    for (const taskId of taskIds(node)) {
+      if (taskSnapshots.get(taskId)?.status !== "waiting") continue;
+      blockedTasks.set(taskId, {
+        kind: "boundary",
+        disposition: "blocked",
+        scope: "task",
+        message:
+          terminalError ??
+          "A prerequisite subtree did not complete; planner intervention required.",
+      });
+    }
+  };
   const branchCommits = new Map<string, BranchCommit[]>([["root", []]]);
   const forkPlans = planForks(options.tree);
   const finishedJoins = new Set<string>();
@@ -444,6 +496,10 @@ export async function executeFeatureGraph(
 
   const snapshot = (): FeatureGraphExecutionSnapshot => ({
     tree: options.tree,
+    blockedTasks: [...blockedTasks].map(([taskId, diagnostic]) => ({
+      taskId,
+      diagnostic: { ...diagnostic },
+    })),
     tasks: [...taskSnapshots.values()]
       .sort((left, right) => {
         const leftOrder = taskOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER;
@@ -452,6 +508,14 @@ export async function executeFeatureGraph(
       })
       .map((task) => ({
         ...task,
+        ...(task.commitRange
+          ? {
+              commitRange: {
+                ...task.commitRange,
+                commits: [...task.commitRange.commits],
+              },
+            }
+          : {}),
         attempts: task.attempts.map((attempt) => ({ ...attempt })),
         checks: task.checks.map((check) => ({ ...check })),
         warnings: [...task.warnings],
@@ -480,6 +544,8 @@ export async function executeFeatureGraph(
     if (!mutable) throw new Error(`Missing branch snapshot ${branchId}.`);
     const current = value ?? lifecycle.branch(branchId);
     mutable.head = current.head;
+    mutable.worktree = current.worktree;
+    mutable.branch = current.branch;
     mutable.preparation.attempts = current.preparationAttempts;
     mutable.preparation.complete = current.prepared;
     mutable.preparation.baselinePaths = [...current.preparationBaseline];
@@ -591,6 +657,47 @@ export async function executeFeatureGraph(
       .filter(({ dependsOn }) => dependsOn.includes(taskId))
       .map(({ id, objective }) => ({ taskId: id, objective }));
 
+  const preparationRecipes = new Map<string, string[]>();
+  const preparationCommands = (branchId: string): ReadonlyArray<string> => {
+    let recipe = preparationRecipes.get(branchId);
+    if (!recipe) {
+      const parentId = lifecycle.branch(branchId).parentId;
+      recipe = [
+        ...(parentId
+          ? preparationCommands(parentId)
+          : (options.worktreePrepare ?? [])),
+      ];
+      preparationRecipes.set(branchId, recipe);
+    }
+    return recipe;
+  };
+  const adoptPreparationRepairs = (
+    branchId: string,
+    result: FeatureTaskSnapshot,
+  ) => {
+    const original = preparationCommands(branchId);
+    const revised = [...original];
+    for (const repair of result.preparations ?? []) {
+      if (
+        repair.status !== "passed" ||
+        repair.exitCode !== 0 ||
+        repair.replacesCommand === undefined
+      )
+        continue;
+      const index = original.indexOf(repair.replacesCommand);
+      if (
+        index < 0 ||
+        original.lastIndexOf(repair.replacesCommand) !== index ||
+        repair.cwd !== "."
+      )
+        throw new Error(
+          "Accepted preparation repair does not match its inherited recipe.",
+        );
+      revised[index] = repair.command;
+    }
+    preparationRecipes.set(branchId, revised);
+  };
+
   const prepareBranch = async (branchId: string) => {
     const branch = lifecycle.branch(branchId);
     if (branch.prepared) return undefined;
@@ -599,7 +706,7 @@ export async function executeFeatureGraph(
     mutable.preparation.error = undefined;
     const attempted = lifecycle.notePreparationAttempt(branchId);
     updateBranch(branchId, attempted);
-    for (const command of options.worktreePrepare ?? []) {
+    for (const command of preparationCommands(branchId)) {
       if (signal.aborted) return "Feature branch preparation was cancelled.";
       let recorded = false;
       try {
@@ -652,6 +759,19 @@ export async function executeFeatureGraph(
   };
 
   const verifiedBranches = new Set<string>();
+  const cleanOwnedHandoff = (branchId: string, explicitRange: boolean) => {
+    // Preserve caller-root/legacy compatibility: only lifecycle-owned children
+    // can be recreated. Recreation validates trusted dirt before the clean gate.
+    if (!lifecycle.branch(branchId).owned || !lifecycle.recreateForHandoff) {
+      if (explicitRange) lifecycle.assertCleanHandoff?.(branchId);
+      return;
+    }
+    const refreshed = lifecycle.recreateForHandoff(branchId);
+    lifecycle.assertCleanHandoff?.(branchId);
+    if (!refreshed.prepared) verifiedBranches.delete(branchId);
+    branchResidualPaths.get(branchId)?.clear();
+    updateBranch(branchId, refreshed);
+  };
 
   const executeRuntime = async (input: {
     runtime: FeatureTaskRuntime;
@@ -661,26 +781,22 @@ export async function executeFeatureGraph(
     role: string;
     prepare: boolean;
   }) => {
-    const block = (message: string) => {
-      launchingStopped = true;
-      terminalError ??= message;
-      return input.runtime.fail(message);
-    };
+    const diagnostics: string[] = [];
     if (signal.aborted || launchingStopped) return input.runtime.cancel();
     if (input.prepare && !lifecycle.branch(input.branchId).prepared) {
       const preparationFailure = await prepareBranch(input.branchId);
       if (signal.aborted) return input.runtime.cancel();
       if (preparationFailure) {
-        return block(
-          `Worktree preparation failed before agent launch: ${preparationFailure}`,
+        diagnostics.push(
+          `Worktree preparation needs repair: ${preparationFailure}`,
         );
       }
       input.runtime.setPreparationBaseline(
         lifecycle.branch(input.branchId).preparationBaseline,
       );
     }
-    // Preparation on the host is not proof that checks work in the execution
-    // sandbox. Prove each branch before spending a model session on it.
+    // Probe the sandbox, but hand failures and mutations to the persistent
+    // worker. Acceptance still requires the runtime's current passing evidence.
     if (input.kind === "task" && !verifiedBranches.has(input.branchId)) {
       for (const check of options.graph.baselineChecks) {
         if (signal.aborted) return input.runtime.cancel();
@@ -693,15 +809,44 @@ export async function executeFeatureGraph(
           const detail = (result.error || result.stderr || result.stdout)
             .trim()
             .slice(0, 4096);
-          return block(
-            `Baseline check ${check.id} failed before agent launch (exit ${result.exitCode})${result.changedPaths.length ? `; changed tracked paths: ${result.changedPaths.join(", ")}` : ""}${detail ? `: ${detail}` : "."}`,
+          diagnostics.push(
+            `Baseline check ${check.id} needs repair (exit ${result.exitCode})${result.changedPaths.length ? `; changed tracked paths: ${result.changedPaths.join(", ")}` : ""}${detail ? `: ${detail}` : "."}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
           );
         }
       }
       verifiedBranches.add(input.branchId);
     }
-    let previousFailure: string | undefined;
-    for (let attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt++) {
+    diagnostics.push(
+      ...branchSnapshots
+        .get(input.branchId)!
+        .preparation.commands.map(
+          (command) =>
+            `${command.command} (exit ${command.exitCode})\nstdout: ${command.stdout}\nstderr: ${command.stderr}`,
+        ),
+    );
+    let previousFailure = diagnostics.join("\n") || undefined;
+    let noProgress = 0;
+    let plannerConsulted = false;
+    const factualState = () => {
+      const evidence = lifecycle.inspect(
+        input.branchId,
+        lifecycle.branch(input.branchId).baseCommit,
+        1024 * 1024,
+      );
+      return JSON.stringify({
+        evidence,
+        checks: input.runtime
+          .snapshot()
+          .checks.map(({ checkId, status, exitCode, changedPaths }) => ({
+            checkId,
+            status,
+            exitCode,
+            changedPaths,
+          })),
+      });
+    };
+    let lastFacts = factualState();
+    for (let attempt = 1; attempt <= MAX_TASK_CONTINUATIONS; attempt++) {
       if (signal.aborted) return input.runtime.cancel();
       if (launchingStopped && attempt === 1) {
         return input.runtime.cancel();
@@ -715,8 +860,8 @@ export async function executeFeatureGraph(
         outcome = await options.runSession({
           kind: input.kind,
           role: input.role,
-          model: LUNA_MODEL,
-          thinkingLevel: "high",
+          model: ASTRA_MODEL,
+          thinkingLevel: "low",
           task: input.task,
           capsule,
           cwd: branch.worktree,
@@ -730,6 +875,7 @@ export async function executeFeatureGraph(
           error: boundedError(error),
         };
       }
+      if (outcome.status === "cancelled") ownedAbort.abort();
       const settled = input.runtime.settleAttempt(outcome);
       if (input.runtime.isValidated()) return settled;
       if (outcome.status === "cancelled" || signal.aborted) return settled;
@@ -742,12 +888,71 @@ export async function executeFeatureGraph(
             "Task could not validate before a sibling stopped the graph.",
         );
       }
+      const facts = factualState();
+      noProgress = facts === lastFacts ? noProgress + 1 : 0;
+      lastFacts = facts;
       previousFailure = settled.error;
+      if (noProgress >= MAX_NO_PROGRESS_CONTINUATIONS) {
+        if (
+          plannerConsulted ||
+          !options.requestPlannerRecovery ||
+          attempt >= MAX_TASK_CONTINUATIONS
+        )
+          break;
+        plannerConsulted = true;
+        const request: FeaturePlannerRecoveryRequest = {
+          taskId: settled.id,
+          role: input.role,
+          attempt,
+          remainingAttempts: MAX_TASK_CONTINUATIONS - attempt,
+          failure: (settled.error ?? "Task did not validate.").slice(0, 8192),
+          currentHead: lifecycle.target(input.branchId).head(),
+          commitRange: settled.commitRange
+            ? {
+                ...settled.commitRange,
+                commits: [...settled.commitRange.commits],
+              }
+            : undefined,
+          completedTaskIds: [...results.values()]
+            .filter(accepted)
+            .map((task) => task.id),
+          unstartedTaskIds: options.graph.tasks
+            .filter((task) => taskSnapshots.get(task.id)?.status === "waiting")
+            .map((task) => task.id),
+        };
+        // Keep our validation facts private even from trusted controller code.
+        // Callback exceptions (including evidence persistence) remain fatal.
+        let report: FeaturePlannerRecoveryDecision;
+        try {
+          report = await options.requestPlannerRecovery(
+            structuredClone(request),
+            signal,
+          );
+        } catch (error) {
+          if (signal.aborted) return input.runtime.cancel();
+          throw error;
+        }
+        if (signal.aborted) return input.runtime.cancel();
+        let decision: FeaturePlannerRecoveryDecision;
+        try {
+          decision = parseFeaturePlannerRecoveryDecision(report, request);
+        } catch (error) {
+          return input.runtime.fail(
+            `Planner recovery error: ${boundedError(error)}`,
+          );
+        }
+        if (decision.action === "blocked") {
+          return input.runtime.fail(
+            `Planner recovery blocked: ${decision.message.slice(0, 8192)}`,
+          );
+        }
+        previousFailure = `${previousFailure ?? "Task did not validate."}\nPlanner recovery advice (not acceptance evidence): ${decision.message}`;
+        noProgress = 0;
+      }
     }
     const failed = input.runtime.fail(
-      previousFailure ?? `Task failed after ${MAX_TASK_ATTEMPTS} attempts.`,
+      `${previousFailure ?? "Task did not validate."} Recovery continuation budget exhausted; planner intervention required.`,
     );
-    launchingStopped = true;
     terminalError ??= failed.error;
     return failed;
   };
@@ -757,7 +962,14 @@ export async function executeFeatureGraph(
     if (!task)
       throw new Error(`Execution tree references unknown task ${taskId}.`);
     if (signal.aborted || launchingStopped) return false;
-    lifecycle.verify(branch.branchId);
+    (lifecycle.verifyOwnership ?? lifecycle.verify).call(
+      lifecycle,
+      branch.branchId,
+    );
+    const previousTask = branchSnapshots.get(branch.branchId)!.taskIds.at(-1);
+    if (previousTask && !results.get(previousTask)?.commitRange) {
+      lifecycle.target(branch.branchId).assertRecordedResidualsUnchanged?.();
+    }
     const branchState = lifecycle.branch(branch.branchId);
     const mutableBranch = branchSnapshots.get(branch.branchId)!;
     if (!mutableBranch.taskIds.includes(task.id))
@@ -772,6 +984,7 @@ export async function executeFeatureGraph(
       completedDependencies: taskDependencies(task, branch),
       nextTasks: nextTasks(task.id),
       preparationBaseline: branchState.preparationBaseline,
+      preparationCommands: preparationCommands(branch.branchId),
       knownResidualPaths: [...(branchResidualPaths.get(branch.branchId) ?? [])],
       runCheck,
       signal,
@@ -808,10 +1021,16 @@ export async function executeFeatureGraph(
       publish();
       return false;
     }
-    if (result.validatedCommit) {
+    adoptPreparationRepairs(branch.branchId, result);
+    if (
+      acceptedCommits(result).length > 0 &&
+      (result.commitRange || result.residualPaths.length > 0)
+    )
+      cleanOwnedHandoff(branch.branchId, Boolean(result.commitRange));
+    for (const commit of acceptedCommits(result)) {
       branch.commits.push({
         taskId: task.id,
-        commit: result.validatedCommit,
+        commit,
         summary: result.summary ?? task.objective,
       });
     }
@@ -841,6 +1060,7 @@ export async function executeFeatureGraph(
       taskBaseCommit: input.baseCommit,
       checks: options.graph.baselineChecks,
       preparationBaseline: branchState.preparationBaseline,
+      preparationCommands: preparationCommands(input.branch.branchId),
       knownResidualPaths: [
         ...(branchResidualPaths.get(input.branch.branchId) ?? []),
       ],
@@ -869,12 +1089,20 @@ export async function executeFeatureGraph(
       prepare: false,
     });
     taskSnapshots.set(input.task.id, result);
-    if (result.validatedCommit) {
-      input.branch.commits.push({
-        taskId: input.task.id,
-        commit: result.validatedCommit,
-        summary: result.summary ?? input.task.objective,
-      });
+    if (accepted(result)) {
+      adoptPreparationRepairs(input.branch.branchId, result);
+      if (
+        acceptedCommits(result).length > 0 &&
+        (result.commitRange || result.residualPaths.length > 0)
+      )
+        cleanOwnedHandoff(input.branch.branchId, Boolean(result.commitRange));
+      for (const commit of acceptedCommits(result)) {
+        input.branch.commits.push({
+          taskId: input.task.id,
+          commit,
+          summary: result.summary ?? input.task.objective,
+        });
+      }
     }
     return result;
   };
@@ -961,6 +1189,11 @@ export async function executeFeatureGraph(
       });
       for (const child of orderedChildren) {
         for (const source of child.commits) {
+          const alreadyIntegrated = parent.integratedSources.get(source.commit);
+          if (alreadyIntegrated) {
+            parent.visibleCommits.set(source.taskId, alreadyIntegrated);
+            continue;
+          }
           if (signal.aborted) {
             join.status = "cancelled";
             publish();
@@ -973,6 +1206,7 @@ export async function executeFeatureGraph(
             source.commit,
           );
           let integratedCommit: string;
+          let integratedPosition = parent.commits.length;
           if (cherryPick.status === "conflict") {
             join.status = "conflict";
             publish();
@@ -983,7 +1217,7 @@ export async function executeFeatureGraph(
               checks: options.graph.baselineChecks,
               instructions: [
                 "Resolve every active conflict without aborting or restarting the controller-owned cherry-pick.",
-                "Use pipeline_task_finalize to stage selected resolution paths and continue the existing cherry-pick.",
+                "Use the controller stage/checkpoint tools to continue the active cherry-pick, then check and finalize acceptance. Legacy hosts may use finalize with selected paths.",
               ],
               evidence: [
                 `Conflicting source commit: ${source.commit}`,
@@ -1003,7 +1237,7 @@ export async function executeFeatureGraph(
               baseCommit: parentBefore,
               conflict: true,
             });
-            if (resolved.status !== "validated" || !resolved.validatedCommit) {
+            if (!accepted(resolved) || acceptedCommits(resolved).length === 0) {
               join.status = signal.aborted ? "cancelled" : "failed";
               join.error =
                 resolved.error ?? "Conflict resolution did not validate.";
@@ -1017,12 +1251,15 @@ export async function executeFeatureGraph(
               );
               return false;
             }
-            integratedCommit = resolved.validatedCommit;
+            integratedCommit = acceptedCommits(resolved)[0]!;
             // The source task owns the cherry-picked commit; the resolver is provenance only.
             const repairIndex = parent.commits.findIndex(
               ({ taskId }) => taskId === conflictTask.id,
             );
-            if (repairIndex >= 0) parent.commits.splice(repairIndex, 1);
+            if (repairIndex >= 0) {
+              integratedPosition = repairIndex;
+              parent.commits.splice(repairIndex, 1);
+            }
           } else {
             integratedCommit = cherryPick.integratedCommit;
           }
@@ -1033,7 +1270,20 @@ export async function executeFeatureGraph(
             childBranchId: child.branchId,
           };
           join.commits.push(mapping);
-          parent.commits.push({ ...source, commit: integratedCommit });
+          parent.integratedSources.set(source.commit, integratedCommit);
+          for (const [original, integrated] of child.integratedSources) {
+            if (integrated === source.commit)
+              parent.integratedSources.set(original, integratedCommit);
+          }
+          if (
+            !parent.commits.some(({ commit }) => commit === integratedCommit)
+          ) {
+            // Insert the resolved source before any extra repair checkpoints.
+            parent.commits.splice(integratedPosition, 0, {
+              ...source,
+              commit: integratedCommit,
+            });
+          }
           parent.visibleCommits.set(source.taskId, integratedCommit);
           if (
             source.taskId.startsWith("__join-") &&
@@ -1064,7 +1314,7 @@ export async function executeFeatureGraph(
           checks: options.graph.baselineChecks,
           instructions: [
             "Repair the combined child histories without rewriting any source task commit.",
-            "Use the failed join-check evidence and finalize one controller-owned repair commit.",
+            "Use failed join-check evidence, checkpoint any source repairs, rerun required checks, and finalize acceptance. Environment-only repair may have an empty commit range.",
           ],
           evidence: [
             ...join.commits.map(
@@ -1086,7 +1336,7 @@ export async function executeFeatureGraph(
           kind: "join-repair",
           baseCommit: verification.baseCommit,
         });
-        if (repaired.status !== "validated" || !repaired.validatedCommit) {
+        if (!accepted(repaired)) {
           join.status = signal.aborted ? "cancelled" : "failed";
           join.error = repaired.error ?? "Join repair did not validate.";
           terminalError ??= join.error;
@@ -1100,10 +1350,14 @@ export async function executeFeatureGraph(
           return false;
         }
         join.checks = repaired.checks.map((check) => ({ ...check }));
-        parent.visibleCommits.set(repairTask.id, repaired.validatedCommit);
+        const repairHead =
+          repaired.commitRange?.headCommit ??
+          repaired.validatedCommit ??
+          lifecycle.branch(parent.branchId).head;
+        parent.visibleCommits.set(repairTask.id, repairHead);
         parent.repairs.push({
           taskId: repairTask.id,
-          commit: repaired.validatedCommit,
+          commit: repairHead,
           summary: repaired.summary ?? repairTask.objective,
         });
         updateBranch(parent.branchId);
@@ -1137,7 +1391,11 @@ export async function executeFeatureGraph(
     if (node.kind === "task") return runGraphTask(node.taskId, branch);
     if (node.kind === "sequence") {
       for (const step of node.steps) {
-        if (!(await executeNode(step, branch))) return false;
+        if (!(await executeNode(step, branch))) {
+          markBlocked(node);
+          publish();
+          return false;
+        }
       }
       return true;
     }
@@ -1160,33 +1418,64 @@ export async function executeFeatureGraph(
         commits: branchCommits.get(worktree.id)!,
         visibleCommits: new Map(branch.visibleCommits),
         repairs: [...branch.repairs],
+        integratedSources: new Map(branch.integratedSources),
       } satisfies BranchExecution;
       return { plan: child, execution };
     });
     for (const { execution } of children)
       emitForkMembership(plan, execution.branchId, execution.taskIds);
     publish();
-    const outcomes = await Promise.all(
-      children.map(async ({ plan: child, execution }) => {
-        let ok = false;
-        try {
-          ok = await executeNode(child.tree, execution);
-        } catch (error) {
-          launchingStopped = true;
-          terminalError ??= boundedError(error);
-        }
-        const childSnapshot = branchSnapshots.get(execution.branchId)!;
-        childSnapshot.status = ok
-          ? "completed"
-          : signal.aborted
-            ? "cancelled"
-            : "failed";
-        publish();
-        return { ok, execution };
-      }),
+    const settled = await Promise.allSettled(
+      children
+        .map(async ({ plan: child, execution }) => {
+          let ok = false;
+          try {
+            ok = await executeNode(child.tree, execution);
+          } catch (error) {
+            if (!(error instanceof FeatureSubtreeOperationError))
+              launchingStopped = true;
+            terminalError ??= boundedError(error);
+            markBlocked(child.tree);
+          }
+          const childSnapshot = branchSnapshots.get(execution.branchId)!;
+          childSnapshot.status = ok
+            ? "completed"
+            : signal.aborted
+              ? "cancelled"
+              : "failed";
+          publish();
+          return { ok, execution };
+        })
+        .map((pending) =>
+          pending.catch((error: unknown) => {
+            // Snapshot/persistence failures during settlement are always fatal.
+            // Stop launches immediately, but drain every active sibling below.
+            launchingStopped = true;
+            terminalError ??= boundedError(error);
+            throw error;
+          }),
+        ),
+    );
+    const outcomes = settled.map((outcome, index) =>
+      outcome.status === "fulfilled"
+        ? outcome.value
+        : { ok: false, execution: children[index]!.execution },
     );
     const childExecutions = outcomes.map(({ execution }) => execution);
     if (outcomes.some(({ ok }) => !ok)) {
+      joinSnapshots.set(plan.joinId, {
+        id: plan.joinId,
+        parentBranchId: branch.branchId,
+        childBranchIds: childExecutions.map(({ branchId }) => branchId),
+        status: signal.aborted ? "cancelled" : "failed",
+        commits: [],
+        checks: [],
+        warnings: [],
+        error:
+          terminalError ??
+          "A child subtree did not complete; integration blocked.",
+      });
+      publish();
       emitJoinStarted(plan, branch.branchId, childExecutions);
       emitJoinFinished(
         plan,
@@ -1208,6 +1497,7 @@ export async function executeFeatureGraph(
       commits: branchCommits.get("root")!,
       visibleCommits: new Map<string, string>(),
       repairs: [],
+      integratedSources: new Map<string, string>(),
     } satisfies BranchExecution;
     const completed = await executeNode(options.tree, root);
     status = completed ? "completed" : signal.aborted ? "cancelled" : "failed";
@@ -1241,6 +1531,7 @@ export async function executeFeatureGraph(
     head: lifecycle.branch("root").head,
     rootResidualPaths,
     rootTrackedResiduals: rootBranch.trackedResiduals,
+    rootUntrackedResiduals: rootBranch.untrackedResiduals,
     ...finalSnapshot,
     ...(terminalError ? { error: terminalError } : {}),
     cleanupCompleted() {

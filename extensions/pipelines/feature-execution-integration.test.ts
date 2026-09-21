@@ -17,159 +17,238 @@ function git(cwd: string, args: string[]) {
   }).trim();
 }
 
-test("prepared nested graph completes real sandbox checks, Git joins and final review without model calls", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-real-feature-"));
-  const primary = path.join(root, "primary");
-  const workingDir = path.join(root, "caller");
-  const worktreeRoot = path.join(root, "tasks");
-  const runId = "integration-graph-a1b2c3d4";
-  fs.mkdirSync(primary);
-  fs.mkdirSync(worktreeRoot);
-  try {
-    git(primary, ["init", "-q"]);
-    git(primary, ["config", "user.email", "fixture@example.invalid"]);
-    git(primary, ["config", "user.name", "Fixture"]);
-    fs.writeFileSync(path.join(primary, ".gitignore"), ".deps/\n");
-    git(primary, ["add", ".gitignore"]);
-    git(primary, ["commit", "-qm", "baseline"]);
-    git(primary, ["worktree", "add", "-qb", "feature/integration", workingDir]);
-    fs.mkdirSync(path.join(workingDir, ".deps"));
-    fs.writeFileSync(path.join(workingDir, ".deps", "runtime"), "ready\n");
-    const base = git(workingDir, ["rev-parse", "HEAD"]);
-    const plan = canonicalPlan();
-    const task = (id: string, dependencies: string[]) => ({
-      ...executionTask(id, dependencies),
-      readPaths: [".gitignore"],
-      writePaths: [`${id}.txt`],
-      checks: [
-        {
-          id: `${id}-check`,
-          command: `test -f ${id}.txt`,
-          cwd: ".",
-          required: true,
-          purpose: "Verify the task's committed output exists.",
-        },
-      ],
-    });
-    const tasks = [
-      task("contracts", []),
-      task("context", ["contracts"]),
-      task("context-one", ["context"]),
-      task("context-two", ["context"]),
-      task("settings", ["contracts"]),
-      task("integration", ["context-one", "context-two", "settings"]),
-    ];
-    const whitespace = {
-      id: "whitespace",
-      command: "git diff --check",
-      cwd: ".",
-      required: true,
-      purpose: "Verify the complete task delta, including provisional commits.",
-    };
-    const graph = {
-      reportType: "feature-execution-graph-v1" as const,
-      summary:
-        "Exercise the real prepared offline execution path with nested forks.",
-      baselineChecks: [
-        {
-          id: "environment",
-          command: 'test "$(cat .deps/runtime)" = ready',
-          cwd: ".",
-          required: true,
-          purpose: "Prove branch preparation is visible inside the sandbox.",
-        },
-        whitespace,
-      ],
-      reviewChecks: [
-        {
-          id: "integrated-output",
-          command: tasks.map(({ id }) => `test -f ${id}.txt`).join(" && "),
-          cwd: ".",
-          required: true,
-          purpose:
-            "Prove every branch contribution reached the integrated worktree.",
-        },
-        whitespace,
-      ],
-      tasks,
-    };
-    const tree = compileFeatureExecutionGraph(plan, graph);
-    const sessions: string[] = [];
-    const result = await executeFeatureGraph({
-      runId,
-      workingDir,
-      worktreeRoot,
-      canonicalPlan: plan,
-      graph,
-      tree,
-      worktreePrepare: ["mkdir -p .deps && printf 'ready\\n' > .deps/runtime"],
-      // Only model generation is simulated. The default check runner, real
-      // bubblewrap, Git lifecycle, graph compiler and final review are used.
-      async runSession(input) {
-        const id = input.task!.id;
-        sessions.push(id);
-        assert.equal(input.attempt, 1);
-        for (const dependency of input.task!.dependsOn) {
+// The real six-task/two-join fixture measures ~7s with twelve checkpoints and
+// sandboxed checks, exceeding Bun's 5s default. Keep a bounded fixture-only budget.
+test(
+  "prepared nested graph completes real sandbox checks, Git joins and final review without model calls",
+  { timeout: 20_000 },
+  async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-real-feature-"));
+    const primary = path.join(root, "primary");
+    const workingDir = path.join(root, "caller");
+    const worktreeRoot = path.join(root, "tasks");
+    const runId = "integration-graph-a1b2c3d4";
+    fs.mkdirSync(primary);
+    fs.mkdirSync(worktreeRoot);
+    try {
+      git(primary, ["init", "-q"]);
+      git(primary, ["config", "user.email", "fixture@example.invalid"]);
+      git(primary, ["config", "user.name", "Fixture"]);
+      fs.writeFileSync(path.join(primary, ".gitignore"), ".deps/\n");
+      git(primary, ["add", ".gitignore"]);
+      git(primary, ["commit", "-qm", "baseline"]);
+      git(primary, [
+        "worktree",
+        "add",
+        "-qb",
+        "feature/integration",
+        workingDir,
+      ]);
+      fs.mkdirSync(path.join(workingDir, ".deps"));
+      fs.writeFileSync(path.join(workingDir, ".deps", "runtime"), "ready\n");
+      const base = git(workingDir, ["rev-parse", "HEAD"]);
+      const plan = canonicalPlan();
+      const task = (id: string, dependencies: string[]) => ({
+        ...executionTask(id, dependencies),
+        readPaths: [".gitignore"],
+        writePaths: [`${id}.txt`, `${id}.generated.txt`],
+        checks: [
+          {
+            id: `${id}-check`,
+            command: `test "$(cat ${id}.txt)" = ${id} && cp ${id}.txt ${id}.generated.txt`,
+            cwd: ".",
+            required: true,
+            purpose:
+              "Verify task content and generate its exact derived output.",
+          },
+        ],
+      });
+      const tasks = [
+        task("contracts", []),
+        task("context", ["contracts"]),
+        task("context-one", ["context"]),
+        task("context-two", ["context"]),
+        task("settings", ["contracts"]),
+        task("integration", ["context-one", "context-two", "settings"]),
+      ];
+      const whitespace = {
+        id: "whitespace",
+        command: "git diff --check",
+        cwd: ".",
+        required: true,
+        purpose:
+          "Verify the complete task delta, including provisional commits.",
+      };
+      const graph = {
+        reportType: "feature-execution-graph-v1" as const,
+        summary:
+          "Exercise the real prepared offline execution path with nested forks.",
+        baselineChecks: [
+          {
+            id: "environment",
+            command: 'test "$(cat .deps/runtime)" = ready',
+            cwd: ".",
+            required: true,
+            purpose: "Prove branch preparation is visible inside the sandbox.",
+          },
+          whitespace,
+        ],
+        reviewChecks: [
+          {
+            id: "integrated-output",
+            command: tasks
+              .map(
+                ({ id }) =>
+                  `test "$(cat ${id}.txt)" = ${id} && cmp ${id}.txt ${id}.generated.txt`,
+              )
+              .join(" && "),
+            cwd: ".",
+            required: true,
+            purpose:
+              "Prove every branch contribution reached the integrated worktree.",
+          },
+          whitespace,
+        ],
+        tasks,
+      };
+      const tree = compileFeatureExecutionGraph(plan, graph);
+      const sessions: string[] = [];
+      const result = await executeFeatureGraph({
+        runId,
+        workingDir,
+        worktreeRoot,
+        canonicalPlan: plan,
+        graph,
+        tree,
+        worktreePrepare: [
+          "mkdir -p .deps && printf 'ready\\n' > .deps/runtime",
+        ],
+        // Only model generation is simulated. The default check runner, real
+        // bubblewrap, Git lifecycle, graph compiler and final review are used.
+        async runSession(input) {
+          const id = input.task!.id;
+          sessions.push(id);
+          assert.equal(input.attempt, 1);
+          for (const dependency of input.task!.dependsOn) {
+            for (const file of [
+              `${dependency}.txt`,
+              `${dependency}.generated.txt`,
+            ])
+              assert.equal(
+                fs.readFileSync(path.join(input.cwd, file), "utf8"),
+                `${dependency}\n`,
+              );
+          }
+          const evidence = await input.tools.diff();
           assert.equal(
-            fs.existsSync(path.join(input.cwd, `${dependency}.txt`)),
-            true,
+            evidence.currentHead,
+            input.capsule.graphContext.currentHead,
           );
-        }
-        const evidence = await input.tools.diff();
-        assert.equal(
-          evidence.currentHead,
-          input.capsule.graphContext.currentHead,
-        );
-        fs.writeFileSync(path.join(input.cwd, `${id}.txt`), `${id}\n`);
-        const finalized = await input.tools.finalize({
-          commitPaths: [`${id}.txt`],
-          summary: `Implemented ${id}.`,
-        });
-        assert.equal(
-          finalized.validated,
-          true,
-          JSON.stringify(finalized.checks),
-        );
-        return { status: "settled", sessionId: `synthetic-${id}` };
-      },
-    });
-    assert.equal(
-      result.status,
-      "completed",
-      result.error ?? "graph execution failed",
-    );
-    assert.equal(sessions.length, tasks.length);
-    assert.equal(new Set(sessions).size, tasks.length);
-    assert.equal(result.joins.length, 2);
-    assert.ok(result.tasks.every(({ status }) => status === "validated"));
-    assert.equal(
-      git(workingDir, ["rev-list", "--count", `${base}..HEAD`]),
-      String(tasks.length),
-    );
-    assert.equal(git(workingDir, ["status", "--porcelain"]), "");
-    const review = createFeatureReviewRuntime({
-      runId,
-      workingDir,
-      checks: graph.reviewChecks,
-      canonicalPlan: plan,
-      graph,
-      diffBaseCommit: base,
-      knownResidualPaths: result.rootResidualPaths,
-      knownTrackedResiduals: result.rootTrackedResiduals,
-    });
-    review.begin(result.head);
-    const reviewed = await review.host.finalize({
-      commitPaths: [],
-      summary: "All integrated outputs and whitespace checks passed.",
-    });
-    assert.equal(reviewed.validated, true, JSON.stringify(reviewed.checks));
-    assert.equal(git(workingDir, ["rev-parse", "HEAD"]), result.head);
-    assert.deepEqual(result.cleanupCompleted(), []);
-    assert.equal(
-      fs.readFileSync(path.join(workingDir, ".deps", "runtime"), "utf8"),
-      "ready\n",
-    );
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
+          fs.writeFileSync(path.join(input.cwd, `${id}.txt`), `${id}\n`);
+          assert.ok(input.tools.stage);
+          assert.ok(input.tools.checkpoint);
+          await input.tools.stage({ action: "stage", paths: [`${id}.txt`] });
+          const source = await input.tools.checkpoint({
+            message: `${id}: source`,
+          });
+          const generated = await input.tools.check({ checkId: `${id}-check` });
+          assert.equal(generated.status, "passed", JSON.stringify(generated));
+          assert.deepEqual(generated.changedPaths, [`${id}.generated.txt`]);
+          assert.ok(generated.inputRevision);
+          assert.ok(generated.outputRevision);
+          assert.notEqual(
+            generated.inputRevision.fingerprint,
+            generated.outputRevision.fingerprint,
+          );
+          await input.tools.stage({
+            action: "stage",
+            paths: [`${id}.generated.txt`],
+          });
+          const output = await input.tools.checkpoint({
+            message: `${id}: generated output`,
+          });
+          for (const check of graph.baselineChecks) {
+            const checked = await input.tools.check({ checkId: check.id });
+            assert.equal(checked.status, "passed", JSON.stringify(checked));
+          }
+          const finalized = await input.tools.finalize({
+            summary: `Implemented ${id}.`,
+          });
+          assert.deepEqual(finalized.commitRange?.commits, [
+            source.commit,
+            output.commit,
+          ]);
+          assert.equal(git(input.cwd, ["rev-parse", "HEAD"]), output.commit);
+          assert.equal(finalized.validated, true, JSON.stringify(finalized));
+          assert.deepEqual(
+            finalized.checks.find(({ checkId }) => checkId === `${id}-check`),
+            generated,
+            "Acceptance must retain the original generated-output evidence without rerunning it.",
+          );
+          return { status: "settled", sessionId: `synthetic-${id}` };
+        },
+      });
+      assert.equal(
+        result.status,
+        "completed",
+        result.error ?? "graph execution failed",
+      );
+      assert.equal(sessions.length, tasks.length);
+      assert.equal(new Set(sessions).size, tasks.length);
+      assert.equal(result.joins.length, 2);
+      assert.ok(result.tasks.every(({ status }) => status === "validated"));
+      assert.equal(
+        git(workingDir, ["rev-list", "--count", `${base}..HEAD`]),
+        String(tasks.length * 2),
+      );
+      assert.deepEqual(
+        result.tasks.map(({ commitRange }) => commitRange?.commits.length),
+        tasks.map(() => 2),
+      );
+      const subjects = git(workingDir, ["log", "--format=%s", `${base}..HEAD`])
+        .split("\n")
+        .sort();
+      assert.deepEqual(
+        subjects,
+        tasks
+          .flatMap(({ id }) => [`${id}: source`, `${id}: generated output`])
+          .sort(),
+      );
+      for (const { id } of tasks) {
+        for (const file of [`${id}.txt`, `${id}.generated.txt`])
+          assert.equal(
+            fs.readFileSync(path.join(workingDir, file), "utf8"),
+            `${id}\n`,
+          );
+      }
+      assert.equal(git(workingDir, ["status", "--porcelain"]), "");
+      const review = createFeatureReviewRuntime({
+        runId,
+        workingDir,
+        checks: graph.reviewChecks,
+        canonicalPlan: plan,
+        graph,
+        diffBaseCommit: base,
+        knownResidualPaths: result.rootResidualPaths,
+        knownTrackedResiduals: result.rootTrackedResiduals,
+      });
+      review.begin(result.head);
+      for (const check of graph.reviewChecks) {
+        const checked = await review.host.check({ checkId: check.id });
+        assert.equal(checked.status, "passed", JSON.stringify(checked));
+      }
+      const reviewed = await review.host.finalize({
+        summary: "All integrated outputs and whitespace checks passed.",
+      });
+      assert.equal(reviewed.validated, true, JSON.stringify(reviewed));
+      assert.equal(git(workingDir, ["rev-parse", "HEAD"]), result.head);
+      assert.deepEqual(result.cleanupCompleted(), []);
+      assert.equal(
+        fs.readFileSync(path.join(workingDir, ".deps", "runtime"), "utf8"),
+        "ready\n",
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
