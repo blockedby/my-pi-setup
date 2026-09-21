@@ -15,7 +15,7 @@
         "schemas/review-result.schema.json",
         "scripts/review_policy.py"
       ],
-      "piSkillPath": "./vendor/gpt5.6-reviewer/skills",
+      "nonDiscoveredSkillPath": "./vendor/gpt5.6-reviewer/skills",
       "replacesHostPaths": ["skills/code-review"]
     },
     "plan-gh-backlog": {

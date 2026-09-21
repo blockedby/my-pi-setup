@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { existsSync, globSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptRepositoryRoot = resolve(
@@ -38,6 +38,43 @@ const assertRelativeVendorPath = (path, name) => {
   ) {
     fail(`Submodule ${name} has unsafe path: ${path}`);
   }
+};
+
+const isPathWithin = (path, root) =>
+  path === root || path.startsWith(`${root}${sep}`);
+
+const manifestSkillPath = (entry) =>
+  typeof entry === "string" ? entry : entry?.source;
+
+const exposesSkillPath = (entry, targetPath) => {
+  const sourcePath = manifestSkillPath(entry);
+  if (
+    typeof sourcePath !== "string" ||
+    sourcePath.startsWith("!") ||
+    sourcePath.startsWith("+") ||
+    sourcePath.startsWith("-")
+  ) {
+    return false;
+  }
+
+  const resolvedSourcePath = resolve(repositoryRoot, sourcePath);
+  const matches = existsSync(resolvedSourcePath) ? [resolvedSourcePath] : [];
+  try {
+    matches.push(...globSync(sourcePath, { cwd: repositoryRoot }));
+  } catch {
+    // Keep literal path matches when the manifest entry is not a valid glob.
+  }
+
+  const canonicalTargetPath = realpathSync.native(
+    resolve(repositoryRoot, targetPath),
+  );
+  return matches.some((match) => {
+    const canonicalMatch = realpathSync.native(resolve(repositoryRoot, match));
+    return (
+      isPathWithin(canonicalMatch, canonicalTargetPath) ||
+      isPathWithin(canonicalTargetPath, canonicalMatch)
+    );
+  });
 };
 
 const config = JSON.parse(readFileSync(configPath, "utf8"));
@@ -137,6 +174,17 @@ for (const [name, submodule] of entries) {
           `Read-only submodule ${name} must not participate directly in the Bun workspace`,
         );
       }
+    }
+  }
+
+  if (submodule.nonDiscoveredSkillPath !== undefined) {
+    const exposedSkillPath = configuredSkills.find((entry) =>
+      exposesSkillPath(entry, submodule.nonDiscoveredSkillPath),
+    );
+    if (exposedSkillPath !== undefined) {
+      fail(
+        `package.json must not expose ${submodule.nonDiscoveredSkillPath}; found ${manifestSkillPath(exposedSkillPath)}`,
+      );
     }
   }
 

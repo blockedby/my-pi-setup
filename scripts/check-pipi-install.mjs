@@ -5,6 +5,16 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveBunRuntime } from "../extensions/shared/executable-runtime.ts";
 import { getDeclaredPipiVersion, readJson } from "./pipi-version.mjs";
+import {
+  assertSelectedSkillIdentities,
+  discoverInstalledSkills,
+} from "./skill-discovery.mjs";
+import {
+  assertNoDiscoverableAdapterMetadata,
+  inspectSharedSkills,
+  sharedSkillNames,
+  validateBrowserControlContract,
+} from "./shared-skills.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const home = process.env.HOME || homedir();
@@ -23,6 +33,20 @@ const installedPackage = readJson(
 const isolatedManifest = readJson(join(isolatedPrefix, "package.json"));
 const bunRuntime = resolveBunRuntime();
 const expectedTrustedDependencies = ["@google/genai", "protobufjs"];
+const sharedSkills = inspectSharedSkills(home);
+const browserAdapterDir = join(
+  home,
+  ".pipi",
+  "agent",
+  "adapters",
+  "browser-chrome",
+);
+validateBrowserControlContract({
+  executable: bunRuntime.executable,
+  sharedBrowserDir: sharedSkills["browser-chrome"].path,
+  adapterSourceDir: browserAdapterDir,
+});
+assertNoDiscoverableAdapterMetadata(browserAdapterDir);
 
 if (installedPackage.version !== expectedVersion) {
   throw new Error(
@@ -75,6 +99,19 @@ if (!trackedOverrides.equals(installedOverrides)) {
 const installedSettings = readJson(
   join(home, ".pipi", "agent", "settings.json"),
 );
+const skillDiscovery = await discoverInstalledSkills({
+  home,
+  agentDir: join(home, ".pipi", "agent"),
+  cwd: repositoryRoot,
+  settings: installedSettings,
+  repositoryRoot,
+});
+assertSelectedSkillIdentities({
+  discovery: skillDiscovery,
+  expected: Object.fromEntries(
+    sharedSkillNames.map((name) => [name, sharedSkills[name].path]),
+  ),
+});
 if (
   installedSettings.defaultProvider !== "openai-codex" ||
   installedSettings.defaultModel !== "gpt-6-astra" ||
@@ -114,6 +151,24 @@ const herdrIntegrationPath = join(
 );
 if (!existsSync(herdrIntegrationPath)) {
   throw new Error(`Pipi Herdr integration is missing: ${herdrIntegrationPath}`);
+}
+
+const browserMcp = readJson(join(home, ".pipi", "agent", "mcp.json"));
+const expectedBrowserCommands = {
+  "browser-chrome-control": join(
+    browserAdapterDir,
+    "scripts",
+    "control-mcp.sh",
+  ),
+  "browser-chrome-headed": join(browserAdapterDir, "scripts", "mcp.sh"),
+  "browser-chrome-headless": join(browserAdapterDir, "scripts", "mcp.sh"),
+};
+for (const [name, command] of Object.entries(expectedBrowserCommands)) {
+  if (browserMcp.mcpServers?.[name]?.command !== command) {
+    throw new Error(
+      `Installed browser MCP server is not adapter-backed: ${name}`,
+    );
+  }
 }
 
 const launcher = join(home, ".local", "bin", "pipi");

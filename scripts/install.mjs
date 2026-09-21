@@ -31,6 +31,15 @@ import {
   createManagedInstallTransaction,
   writeExecutable,
 } from "./install-state.mjs";
+import {
+  assertNoDiscoverableAdapterMetadata,
+  inspectLegacySharedSkills,
+  inspectSharedSkills,
+  migrateLegacySharedSkills,
+  reportStaleExplicitSkillSettings,
+  sharedSkillLabel,
+  validateBrowserControlContract,
+} from "./shared-skills.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeManifest = JSON.parse(
@@ -92,6 +101,7 @@ Options:
   --codex-tools PATH    Local pi-codex-tools override (default: pinned vendor/pi-codex submodule)
   --bin-dir PATH        Launcher directory (default: ~/.local/bin)
   --share-auth                    Symlink regular Pi auth into Pipi (opt-in)
+  --adopt-shared-skills           Back up differing legacy Pipi-local copies, then use ~/.agents/skills
   --skip-repository-dependencies  Skip only the root workspace install; isolated runtime installation remains required
   --help                          Show this help
 `;
@@ -103,6 +113,7 @@ const parseArgs = (args) => {
     codexTools: codexToolsSubmoduleRoot,
     binDir: undefined,
     shareAuth: false,
+    adoptSharedSkills: false,
     skipRepositoryDependencies: false,
   };
 
@@ -114,6 +125,10 @@ const parseArgs = (args) => {
     }
     if (argument === "--share-auth") {
       options.shareAuth = true;
+      continue;
+    }
+    if (argument === "--adopt-shared-skills") {
+      options.adoptSharedSkills = true;
       continue;
     }
     if (argument === "--skip-dependencies") {
@@ -433,13 +448,6 @@ const validateManagedInstallSources = () => {
       "skills",
       "browser-chrome",
       "scripts",
-      "install-local.sh",
-    ),
-    join(
-      browserAssetsRoot,
-      "skills",
-      "browser-chrome",
-      "scripts",
       "control-mcp.sh",
     ),
     join(
@@ -456,12 +464,22 @@ const validateManagedInstallSources = () => {
 };
 
 const installBrowserChromeAssets = (agentDir) => {
-  const browserSkillDir = join(agentDir, "skills", "browser-chrome");
+  const browserAdapterDir = join(agentDir, "adapters", "browser-chrome");
   const transaction = installAssetDirectory(
     join(browserAssetsRoot, "skills", "browser-chrome"),
-    browserSkillDir,
+    browserAdapterDir,
   );
-  return { browserSkillDir, transaction };
+  for (const entry of [
+    "SKILL.md",
+    "package.json",
+    ".gitignore",
+    "mcp",
+    "tests",
+  ]) {
+    rmSync(join(browserAdapterDir, entry), { recursive: true, force: true });
+  }
+  assertNoDiscoverableAdapterMetadata(browserAdapterDir);
+  return { browserAdapterDir, transaction };
 };
 
 const unrecognizedHerdrIntegrationError = (path) =>
@@ -574,44 +592,104 @@ exec "$recorded_bun" ${shellQuote(browserEntry)} "$@"
 const hardenInstalledBrowserSkill = ({
   stagedBrowserSkillDir,
   finalBrowserSkillDir,
-  finalAgentDir,
   bunExecutable,
   bunVersion,
   browserBunWrapper,
 }) => {
   const stagedScripts = join(stagedBrowserSkillDir, "scripts");
   const finalScripts = join(finalBrowserSkillDir, "scripts");
+  const browserRuntimeRoot = join(
+    dirname(dirname(browserBunWrapper)),
+    "runtime",
+    "node_modules",
+  );
+  const browserEntry = join(browserRuntimeRoot, ".bin", "chrome-devtools-mcp");
+  const browserManifest = join(
+    browserRuntimeRoot,
+    "chrome-devtools-mcp",
+    "package.json",
+  );
   const validateOverrides = `
-if [ "\${PIPI_BUN_RUNTIME+x}" = x ] && [ "$PIPI_BUN_RUNTIME" != ${shellQuote(bunExecutable)} ]; then
-  echo "PIPI_BUN_RUNTIME must match the recorded Pipi Bun runtime: ${bunExecutable}" >&2
+recorded_bun=${shellQuote(bunExecutable)}
+recorded_bun_version=${shellQuote(bunVersion)}
+managed_wrapper=${shellQuote(browserBunWrapper)}
+browser_entry=${shellQuote(browserEntry)}
+browser_manifest=${shellQuote(browserManifest)}
+if [ "\${PIPI_BUN_RUNTIME+x}" = x ] && [ "$PIPI_BUN_RUNTIME" != "$recorded_bun" ]; then
+  echo "PIPI_BUN_RUNTIME must match the recorded Pipi Bun runtime: $recorded_bun" >&2
   exit 2
 fi
-if [ "\${BROWSER_CHROME_NPX+x}" = x ] && [ "$BROWSER_CHROME_NPX" != ${shellQuote(browserBunWrapper)} ]; then
-  echo "BROWSER_CHROME_NPX must match the managed Pipi browser wrapper: ${browserBunWrapper}" >&2
+if [ "\${BROWSER_CHROME_NODE+x}" = x ] && [ "$BROWSER_CHROME_NODE" != "$recorded_bun" ]; then
+  echo "BROWSER_CHROME_NODE must match the recorded Pipi Bun runtime: $recorded_bun" >&2
+  exit 2
+fi
+if [ "\${BROWSER_CHROME_NPX+x}" = x ] && [ "$BROWSER_CHROME_NPX" != "$managed_wrapper" ]; then
+  echo "BROWSER_CHROME_NPX must match the managed Pipi browser wrapper: $managed_wrapper" >&2
   exit 2
 fi
 if [ "\${BROWSER_CHROME_MCP_PACKAGE+x}" = x ] && [ "$BROWSER_CHROME_MCP_PACKAGE" != ${shellQuote(browserMcpPackage)} ]; then
   echo "BROWSER_CHROME_MCP_PACKAGE must be ${browserMcpPackage}" >&2
   exit 2
-fi`;
+fi
+if [ ! -x "$recorded_bun" ]; then
+  echo "Recorded Pipi Bun runtime is not executable: $recorded_bun" >&2
+  exit 127
+fi
+actual_bun_version=$("$recorded_bun" --version 2>/dev/null) || {
+  echo "Recorded Pipi Bun runtime version probe failed: $recorded_bun" >&2
+  exit 127
+}
+if [ "$actual_bun_version" != "$recorded_bun_version" ]; then
+  echo "Recorded Pipi Bun runtime must remain stable version $recorded_bun_version: $recorded_bun" >&2
+  exit 2
+fi
+if [ ! -x "$managed_wrapper" ]; then
+  echo "Managed Pipi browser wrapper is not executable: $managed_wrapper" >&2
+  exit 127
+fi
+if [ ! -f "$browser_entry" ]; then
+  echo "Pinned chrome-devtools-mcp entrypoint is missing: $browser_entry" >&2
+  exit 127
+fi
+if [ ! -f "$browser_manifest" ]; then
+  echo "Pinned chrome-devtools-mcp manifest is missing: $browser_manifest" >&2
+  exit 127
+fi
+"$recorded_bun" -e 'const { readFileSync } = require("node:fs"); const manifest = JSON.parse(readFileSync(process.argv.at(-1), "utf8")); if (manifest.name !== "chrome-devtools-mcp" || manifest.version !== "1.8.0" || !["build/src/bin/chrome-devtools-mcp.js", "./build/src/bin/chrome-devtools-mcp.js"].includes(manifest.bin?.["chrome-devtools-mcp"])) process.exit(1)' "$browser_manifest" || {
+  echo "Pinned chrome-devtools-mcp package metadata is invalid: $browser_manifest" >&2
+  exit 2
+}`;
   writeExecutable(
     join(stagedScripts, "mcp.sh"),
     `#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR=${shellQuote(finalScripts)}
 source "$SCRIPT_DIR/common.sh"
-${validateOverrides}
 mode="\${1:-}"
 shift || true
+case "$mode" in
+  headed|headed-connect|headless) ;;
+  *)
+    echo "Usage: $0 <headed|headed-connect|headless> [chrome-devtools-mcp args...]" >&2
+    exit 2
+    ;;
+esac
+${validateOverrides}
 export CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1
 common_args=("-y" ${shellQuote(browserMcpPackage)} "--no-usage-statistics" "--no-performance-crux")
 case "$mode" in
-  headed)
-    "$SCRIPT_DIR/open-headed.sh" >/dev/null
+  headed|headed-connect)
+    if [ "$mode" = "headed" ]; then
+      "$SCRIPT_DIR/open-headed.sh" >/dev/null
+    fi
     url="$(bc_headed_url)"
-    exec ${shellQuote(browserBunWrapper)} "\${common_args[@]}" "--browser-url=$url" "$@"
+    exec "$managed_wrapper" "\${common_args[@]}" "--browser-url=$url" "$@"
     ;;
   headless)
+    if [ -n "\${BROWSER_CHROME_HEADLESS_START_COMMAND:-}" ] && [ -z "\${BROWSER_CHROME_HEADLESS_CLOSE_COMMAND:-}" ]; then
+      echo "FAILED mode=headless reason=remote-start-requires-close-command" >&2
+      exit 2
+    fi
     output="$("$SCRIPT_DIR/open-headless.sh")"
     id="$(awk '{for(i=1;i<=NF;i++){if($i ~ /^id=/){sub(/^id=/,"",$i); print $i}}}' <<<"$output" | tail -n1)"
     url="$(awk '{for(i=1;i<=NF;i++){if($i ~ /^url=/){sub(/^url=/,"",$i); print $i}}}' <<<"$output" | tail -n1)"
@@ -619,13 +697,23 @@ case "$mode" in
       echo "FAILED mode=headless reason=could-not-parse-open-output output=$output" >&2
       exit 1
     fi
-    cleanup() { "$SCRIPT_DIR/close-headless.sh" "$id" >/dev/null 2>&1 || true; }
-    trap cleanup EXIT INT TERM
-    ${shellQuote(browserBunWrapper)} "\${common_args[@]}" "--browser-url=$url" "$@"
-    ;;
-  *)
-    echo "Usage: $0 <headed|headless> [chrome-devtools-mcp args...]" >&2
-    exit 2
+    child=""
+    cleanup() {
+      if [ -n "$child" ]; then
+        kill "$child" >/dev/null 2>&1 || true
+        wait "$child" >/dev/null 2>&1 || true
+      fi
+      "$SCRIPT_DIR/close-headless.sh" "$id" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    "$managed_wrapper" "\${common_args[@]}" "--browser-url=$url" "$@" <&0 &
+    child=$!
+    status=0
+    wait "$child" || status=$?
+    child=""
+    exit "$status"
     ;;
 esac
 `,
@@ -660,63 +748,89 @@ exec "$recorded_bun" ${shellQuote(join(finalBrowserSkillDir, "control-mcp", "ser
 `,
   );
 
-  const installerModule = join(finalScripts, "install-local.mjs");
-  writeExecutable(
-    join(stagedScripts, "install-local.sh"),
-    `#!/bin/sh
-set -eu
-${validateOverrides}
-exec ${shellQuote(bunExecutable)} ${shellQuote(installerModule)} "$@"
-`,
-  );
-  writeFileSync(
-    join(stagedScripts, "install-local.mjs"),
-    `import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-const sourceSkill = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const agentDir = resolve(process.env.PI_AGENT_DIR ?? ${JSON.stringify(finalAgentDir)});
-const targetSkill = resolve(process.env.BROWSER_CHROME_SKILL_TARGET ?? join(agentDir, "skills", "browser-chrome"));
-const mcpPath = resolve(process.env.BROWSER_CHROME_MCP_JSON ?? join(agentDir, "mcp.json"));
-if (targetSkill !== sourceSkill) {
-  rmSync(targetSkill, { recursive: true, force: true });
-  mkdirSync(dirname(targetSkill), { recursive: true, mode: 0o700 });
-  cpSync(sourceSkill, targetSkill, { recursive: true, dereference: false, verbatimSymlinks: true });
-}
-const current = existsSync(mcpPath) ? JSON.parse(readFileSync(mcpPath, "utf8")) : {};
-if (!current || typeof current !== "object" || Array.isArray(current)) throw new Error("MCP config must be a JSON object");
-const servers = current.mcpServers && typeof current.mcpServers === "object" && !Array.isArray(current.mcpServers) ? current.mcpServers : {};
-const commonEnv = { CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1", PIPI_BUN_RUNTIME: ${JSON.stringify(bunExecutable)}, BROWSER_CHROME_NPX: ${JSON.stringify(browserBunWrapper)}, BROWSER_CHROME_MCP_PACKAGE: ${JSON.stringify(browserMcpPackage)} };
-current.mcpServers = { ...servers,
-  "browser-chrome-control": { command: join(targetSkill, "scripts", "control-mcp.sh"), args: [], lifecycle: "lazy", env: { BROWSER_CHROME_NODE: ${JSON.stringify(bunExecutable)}, PIPI_BUN_RUNTIME: ${JSON.stringify(bunExecutable)} } },
-  "browser-chrome-headed": { command: join(targetSkill, "scripts", "mcp.sh"), args: ["headed"], lifecycle: "lazy", env: commonEnv },
-  "browser-chrome-headless": { command: join(targetSkill, "scripts", "mcp.sh"), args: ["headless"], lifecycle: "lazy", idleTimeout: 1, env: commonEnv },
-};
-mkdirSync(dirname(mcpPath), { recursive: true, mode: 0o700 });
-const temporary = mcpPath + "." + process.pid + ".tmp";
-writeFileSync(temporary, JSON.stringify(current, null, 2) + "\\n", { mode: 0o600 });
-renameSync(temporary, mcpPath);
-chmodSync(mcpPath, 0o600);
-console.log("Installed Bun-safe browser-chrome MCP wiring at " + mcpPath);
-`,
-    { mode: 0o600 },
-  );
+  rmSync(join(stagedScripts, "install-local.sh"), { force: true });
 
   writeFileSync(
     join(stagedBrowserSkillDir, "README.md"),
-    `# Pipi-managed browser-chrome skill\n\nThis installed copy uses ${browserMcpPackage} from Pipi's isolated frozen Bun runtime. Run \`scripts/mcp.sh headed\` or \`scripts/mcp.sh headless\`; both invoke the recorded absolute Bun and local pinned entrypoint. Direct \`scripts/control-mcp.sh\`, \`scripts/mcp.sh\`, and \`scripts/install-local.sh\` accept an unset \`PIPI_BUN_RUNTIME\`; when set, it must exactly match the recorded absolute Bun or invocation fails before server startup. Control startup also rechecks that the recorded executable still reports its installed stable Bun version. \`scripts/install-local.sh\` copies only this hardened installed boundary and writes equivalent MCP entries. Registry lookup and alternate package-manager fallback are unavailable.\n`,
+    `# Pipi-managed browser-chrome runtime adapter\n\nThis private, non-discoverable adapter implements the same control tool schemas and headed/headless safety protocol as the required shared browser-chrome skill. It uses ${browserMcpPackage} from Pipi's isolated frozen Bun runtime. The MCP entries invoke this adapter with the recorded absolute Bun and local pinned entrypoint; registry lookup and alternate package-manager fallback are unavailable.\n`,
     { mode: 0o600 },
   );
   writeFileSync(
     join(stagedBrowserSkillDir, "references", "mcp-config.md"),
-    `# Pipi-managed Browser Chrome MCP config\n\nThe generated \`mcp.json\`, direct \`scripts/control-mcp.sh\`, \`scripts/mcp.sh\`, and \`scripts/install-local.sh\` all use the recorded Bun ${bunExecutable}; browser sessions use ${browserMcpPackage} through ${browserBunWrapper}. \`PIPI_BUN_RUNTIME\` may be unset, but a set value must exactly equal that recorded absolute Bun on every installed entrypoint. Control startup also rechecks the installed stable Bun version. Floating package resolution and alternate package-manager fallback are intentionally unavailable; invalid runtime, wrapper, or package overrides fail before browser MCP starts.\n`,
+    `# Pipi-managed Browser Chrome MCP config\n\nThe generated \`mcp.json\`, direct \`scripts/control-mcp.sh\`, and \`scripts/mcp.sh\` all use the recorded Bun ${bunExecutable}; browser sessions use ${browserMcpPackage} through ${browserBunWrapper}. \`PIPI_BUN_RUNTIME\` may be unset, but a set value must exactly equal that recorded absolute Bun on every installed entrypoint. Control startup also rechecks the installed stable Bun version. Floating package resolution and alternate package-manager fallback are intentionally unavailable; invalid runtime, wrapper, or package overrides fail before browser MCP starts.\n`,
     { mode: 0o600 },
   );
 };
 
+const browserServerContracts = {
+  "browser-chrome-control": { script: "control-mcp.sh", args: [] },
+  "browser-chrome-headed": { script: "mcp.sh", args: ["headed"] },
+  "browser-chrome-headless": { script: "mcp.sh", args: ["headless"] },
+};
+
+const validateBrowserChromeMcpOwnership = (
+  mcpPath,
+  agentDir,
+  bunExecutable,
+) => {
+  const current = readSettings(mcpPath, true);
+  const servers = current.mcpServers ?? {};
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+    throw new Error(`Cannot read ${mcpPath}: mcpServers must be an object`);
+  }
+  for (const [name, contract] of Object.entries(browserServerContracts)) {
+    const server = servers[name];
+    if (server === undefined) continue;
+    if (!server || typeof server !== "object" || Array.isArray(server)) {
+      throw new Error(
+        `Refusing to replace conflicting MCP server ${name} in ${mcpPath}`,
+      );
+    }
+    const expectedRuntimeEnv = {
+      PIPI_BUN_RUNTIME: bunExecutable,
+      BROWSER_CHROME_NODE: bunExecutable,
+      BROWSER_CHROME_NPX: join(agentDir, "bin", "pipi-browser-bun"),
+      BROWSER_CHROME_MCP_PACKAGE: browserMcpPackage,
+      CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1",
+    };
+    if (
+      server.env !== undefined &&
+      (!server.env ||
+        typeof server.env !== "object" ||
+        Array.isArray(server.env))
+    ) {
+      throw new Error(`Refusing invalid MCP environment for ${name}`);
+    }
+    for (const [key, expected] of Object.entries(expectedRuntimeEnv)) {
+      if (server.env?.[key] !== undefined && server.env[key] !== expected) {
+        throw new Error(
+          `Refusing to overwrite customized MCP environment ${key} for ${name}; resolve it explicitly before reinstalling.`,
+        );
+      }
+    }
+    const recognizedCommands = [
+      join(agentDir, "skills", "browser-chrome", "scripts", contract.script),
+      join(agentDir, "adapters", "browser-chrome", "scripts", contract.script),
+    ];
+    if (
+      !recognizedCommands.includes(server.command) ||
+      JSON.stringify(server.args ?? []) !== JSON.stringify(contract.args) ||
+      (server.lifecycle !== undefined && server.lifecycle !== "lazy") ||
+      (name === "browser-chrome-headless" &&
+        server.idleTimeout !== undefined &&
+        server.idleTimeout !== 1)
+    ) {
+      throw new Error(
+        `Refusing to replace conflicting MCP server ${name} in ${mcpPath}; rename or remove that entry explicitly before reinstalling.`,
+      );
+    }
+  }
+  return current;
+};
+
 const installBrowserChromeMcp = (
   mcpPath,
-  browserSkillDir,
+  browserAdapterDir,
   bunExecutable,
   browserBunWrapper,
 ) => {
@@ -740,26 +854,36 @@ const installBrowserChromeMcp = (
     mcpServers: {
       ...existingServers,
       "browser-chrome-control": {
-        command: join(browserSkillDir, "scripts", "control-mcp.sh"),
+        ...existingServers["browser-chrome-control"],
+        command: join(browserAdapterDir, "scripts", "control-mcp.sh"),
         args: [],
         lifecycle: "lazy",
         env: {
+          ...existingServers["browser-chrome-control"]?.env,
           BROWSER_CHROME_NODE: bunExecutable,
           PIPI_BUN_RUNTIME: bunExecutable,
         },
       },
       "browser-chrome-headed": {
-        command: join(browserSkillDir, "scripts", "mcp.sh"),
+        ...existingServers["browser-chrome-headed"],
+        command: join(browserAdapterDir, "scripts", "mcp.sh"),
         args: ["headed"],
         lifecycle: "lazy",
-        env: commonEnv,
+        env: {
+          ...existingServers["browser-chrome-headed"]?.env,
+          ...commonEnv,
+        },
       },
       "browser-chrome-headless": {
-        command: join(browserSkillDir, "scripts", "mcp.sh"),
+        ...existingServers["browser-chrome-headless"],
+        command: join(browserAdapterDir, "scripts", "mcp.sh"),
         args: ["headless"],
         lifecycle: "lazy",
         idleTimeout: 1,
-        env: commonEnv,
+        env: {
+          ...existingServers["browser-chrome-headless"]?.env,
+          ...commonEnv,
+        },
       },
     },
   });
@@ -801,6 +925,25 @@ const assertDirectoryWhenPresent = (path, label) => {
   }
 };
 
+const rejectSymlinkedManagedFile = (path, name) => {
+  try {
+    if (!lstatSync(path).isSymbolicLink()) return;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  throw new Error(
+    `Refusing to replace symlinked managed ${name}: ${path}; remove the symlink or replace it with a regular file before reinstalling. The link target will not be modified.`,
+  );
+};
+
+const rejectSymlinkedManagedFiles = ({ settingsPath, mcpPath }) => {
+  rejectSymlinkedManagedFile(settingsPath, "settings.json");
+  rejectSymlinkedManagedFile(mcpPath, "mcp.json");
+};
+
 const install = () => {
   const options = parseArgs(process.argv.slice(2));
   const bunRuntime = resolveBunRuntime({
@@ -831,6 +974,17 @@ const install = () => {
   const pipiAuthPath = join(agentDir, "auth.json");
   const isolatedRuntimePrefix = join(agentDir, "runtime");
 
+  rejectSymlinkedManagedFiles({
+    settingsPath: pipiSettingsPath,
+    mcpPath: pipiMcpPath,
+  });
+
+  const sharedSkills = inspectSharedSkills(home);
+  validateBrowserControlContract({
+    executable: bunRuntime.executable,
+    sharedBrowserDir: sharedSkills["browser-chrome"].path,
+    adapterSourceDir: join(browserAssetsRoot, "skills", "browser-chrome"),
+  });
   assertDirectoryWhenPresent(agentDir, "Pipi agent path");
   assertDirectoryWhenPresent(sessionDir, "Pipi session path");
   try {
@@ -852,6 +1006,20 @@ const install = () => {
       throw error;
     }
   }
+
+  inspectLegacySharedSkills({
+    agentDir,
+    adopt: options.adoptSharedSkills,
+  });
+  validateBrowserChromeMcpOwnership(
+    pipiMcpPath,
+    agentDir,
+    bunRuntime.executable,
+  );
+  reportStaleExplicitSkillSettings({
+    settings: readSettings(pipiSettingsPath, true),
+    agentDir,
+  });
 
   const codexManifestPath = join(options.codexTools, "package.json");
   if (!existsSync(codexManifestPath)) {
@@ -876,7 +1044,6 @@ const install = () => {
   ) {
     throw new Error("Configured pi-codex submodule path is inconsistent");
   }
-  const reviewerSkillDir = join(reviewerAssetsRoot, "skills", "code-review");
   validateManagedInstallSources();
 
   let piExecutable = externalPiExecutable;
@@ -902,6 +1069,10 @@ const install = () => {
     });
     const stagedAgentDir = transaction.stagedAgentDir;
     const stagedRuntimePrefix = join(stagedAgentDir, "runtime");
+    const sharedSkillMigration = migrateLegacySharedSkills({
+      stagedAgentDir,
+      adopt: options.adoptSharedSkills,
+    });
     removePiSubagentsAssets(stagedAgentDir);
     transaction.injectFailure("legacy-removals");
 
@@ -919,11 +1090,11 @@ const install = () => {
     }
 
     const {
-      browserSkillDir: stagedBrowserSkillDir,
+      browserAdapterDir: stagedBrowserAdapterDir,
       transaction: browserAssets,
     } = installBrowserChromeAssets(stagedAgentDir);
     browserAssets.commit();
-    const finalBrowserSkillDir = join(agentDir, "skills", "browser-chrome");
+    const finalBrowserAdapterDir = join(agentDir, "adapters", "browser-chrome");
     transaction.injectFailure("browser-assets");
 
     const browserBunWrapper = installBrowserBunWrapper({
@@ -932,9 +1103,8 @@ const install = () => {
       bunExecutable: bunRuntime.executable,
     });
     hardenInstalledBrowserSkill({
-      stagedBrowserSkillDir,
-      finalBrowserSkillDir,
-      finalAgentDir: agentDir,
+      stagedBrowserSkillDir: stagedBrowserAdapterDir,
+      finalBrowserSkillDir: finalBrowserAdapterDir,
       bunExecutable: bunRuntime.executable,
       bunVersion: bunRuntime.version,
       browserBunWrapper,
@@ -943,7 +1113,7 @@ const install = () => {
 
     installBrowserChromeMcp(
       join(stagedAgentDir, "mcp.json"),
-      finalBrowserSkillDir,
+      finalBrowserAdapterDir,
       bunRuntime.executable,
       browserBunWrapper,
     );
@@ -1030,8 +1200,21 @@ const install = () => {
     console.log(`Installed Pipi launcher: ${launcherPath}`);
     console.log(`Pipi settings: ${pipiSettingsPath}`);
     console.log(`Pipi sessions: ${sessionDir}`);
-    console.log(`Browser Chrome skill: ${finalBrowserSkillDir}`);
-    console.log(`Evidence-driven code-review skill: ${reviewerSkillDir}`);
+    console.log(
+      `Shared browser skill: ${sharedSkills["browser-chrome"].path} (${sharedSkillLabel(sharedSkills["browser-chrome"])})`,
+    );
+    console.log(`Browser Chrome runtime adapter: ${finalBrowserAdapterDir}`);
+    console.log(
+      `Shared frontend quality skill: ${sharedSkills["frontend-quality"].path}`,
+    );
+    console.log(
+      `Shared code-review skill: ${sharedSkills["code-review"].path}`,
+    );
+    if (sharedSkillMigration.adopted.length > 0) {
+      console.log(
+        `Preserved adopted legacy skills under: ${sharedSkillMigration.backupRoot}`,
+      );
+    }
     console.log(`Plan GitHub backlog skill: ${backlogSkillDir}`);
     console.log(`Browser Chrome MCP config: ${pipiMcpPath}`);
     console.log(`Herdr Pipi integration: ${herdrIntegrationPath}`);

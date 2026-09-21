@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -28,9 +28,12 @@ const initializeRepository = (root) => {
 const createFixture = async () => {
   const fixture = await mkdtemp(join(tmpdir(), "pipi-submodule-check-"));
   const source = join(fixture, "reviewer-source");
+  const backlogSource = join(fixture, "backlog-source");
   const root = join(fixture, "host");
   const submodulePath = "vendor/reviewer";
+  const backlogPath = "vendor/backlog";
   const sourceSkill = join(source, "skills", "code-review", "SKILL.md");
+  const backlogSkill = join(backlogSource, "SKILL.md");
 
   mkdirSync(dirname(sourceSkill), { recursive: true });
   writeFileSync(
@@ -42,25 +45,39 @@ const createFixture = async () => {
   git(source, ["add", "."]);
   git(source, ["commit", "-qm", "reviewer source"]);
 
+  mkdirSync(dirname(backlogSkill), { recursive: true });
+  writeFileSync(
+    backlogSkill,
+    "---\nname: plan-gh-backlog\ndescription: Test backlog.\n---\n",
+  );
+  initializeRepository(backlogSource);
+  git(backlogSource, ["add", "."]);
+  git(backlogSource, ["commit", "-qm", "backlog source"]);
+
   mkdirSync(root, { recursive: true });
   initializeRepository(root);
   writeJson(join(root, "package.json"), {
-    pi: { skills: ["./skills", "./vendor/reviewer/skills"] },
+    pi: { skills: ["./skills", `./${backlogPath}`] },
   });
   git(root, ["add", "."]);
   git(root, ["commit", "-qm", "host"]);
-  git(root, [
-    "-c",
-    "protocol.file.allow=always",
-    "submodule",
-    "add",
-    "--name",
-    "reviewer",
-    "-b",
-    "main",
-    source,
-    submodulePath,
-  ]);
+  for (const [name, sourcePath, path] of [
+    ["reviewer", source, submodulePath],
+    ["backlog", backlogSource, backlogPath],
+  ]) {
+    git(root, [
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--name",
+      name,
+      "-b",
+      "main",
+      sourcePath,
+      path,
+    ]);
+  }
 
   mkdirSync(join(root, "config"), { recursive: true });
   writeJson(join(root, "config", "submodules.json"), {
@@ -72,13 +89,22 @@ const createFixture = async () => {
         branch: "main",
         requiredFiles: ["package.json", "skills/code-review/SKILL.md"],
         piPackageName: "reviewer-tools",
-        piSkillPath: "./vendor/reviewer/skills",
+        nonDiscoveredSkillPath: "./vendor/reviewer/skills",
         replacesHostPaths: ["skills/code-review"],
+      },
+      backlog: {
+        path: backlogPath,
+        gitmodulesName: "backlog",
+        url: backlogSource,
+        branch: "main",
+        requiredFiles: ["SKILL.md"],
+        piSkillPath: `./${backlogPath}`,
+        replacesHostPaths: ["skills/plan-gh-backlog"],
       },
     },
   });
   git(root, ["add", "."]);
-  git(root, ["commit", "-qm", "add reviewer submodule"]);
+  git(root, ["commit", "-qm", "add reviewer and backlog submodules"]);
   return {
     fixture,
     root,
@@ -101,7 +127,7 @@ const withFixture = async (t) => {
   return fixture;
 };
 
-test("submodule checker accepts an initialized exact gitlink", async (t) => {
+test("submodule checker accepts a retained non-discovered reviewer without manifest exposure", async (t) => {
   const { root } = await withFixture(t);
   const result = runChecker(root);
   assert.equal(result.status, 0, result.stderr);
@@ -172,15 +198,16 @@ test("submodule checker rejects a package name mismatch", async (t) => {
   );
 });
 
-test("submodule checker rejects a missing manifest skill path", async (t) => {
+test("submodule checker accepts a retained non-discovered submodule without a manifest skill path", async (t) => {
   const { root } = await withFixture(t);
-  writeJson(join(root, "package.json"), { pi: { skills: ["./skills"] } });
+  writeJson(join(root, "package.json"), {
+    pi: { skills: ["./skills", "./vendor/backlog"] },
+  });
   const result = runChecker(root);
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /package.json must load/);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("submodule checker rejects a duplicate manifest skill path", async (t) => {
+test("submodule checker rejects reintroduced non-discovered reviewer exposure", async (t) => {
   const { root } = await withFixture(t);
   const packagePath = join(root, "package.json");
   const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
@@ -188,7 +215,58 @@ test("submodule checker rejects a duplicate manifest skill path", async (t) => {
   writeJson(packagePath, manifest);
   const result = runChecker(root);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /exactly once; found 2/);
+});
+
+test("submodule checker rejects ancestor and glob exposure of a non-discovered reviewer", async (t) => {
+  const { root } = await withFixture(t);
+  const packagePath = join(root, "package.json");
+  const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
+
+  for (const skillPath of [".", "./vendor/reviewer", "./vendor/*/skills"]) {
+    manifest.pi.skills = [skillPath, "./vendor/backlog"];
+    writeJson(packagePath, manifest);
+    const result = runChecker(root);
+    assert.notEqual(result.status, 0);
+  }
+});
+
+test("submodule checker rejects a symlink alias exposing a non-discovered reviewer", async (t) => {
+  const { root } = await withFixture(t);
+  const aliasPath = join(root, "reviewer-skills-alias");
+  symlinkSync(join(root, "vendor", "reviewer", "skills"), aliasPath, "dir");
+
+  const packagePath = join(root, "package.json");
+  const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
+  manifest.pi.skills = ["./reviewer-skills-alias", "./vendor/backlog"];
+  writeJson(packagePath, manifest);
+
+  const result = runChecker(root);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /must not expose/);
+});
+
+test("submodule checker keeps exactly-one piSkillPath enforcement for backlog entries", async (t) => {
+  const { root } = await withFixture(t);
+  const configPath = join(root, "config", "submodules.json");
+  const packagePath = join(root, "package.json");
+  const config = JSON.parse(readFileSync(configPath, "utf8"));
+  const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
+  const backlogPath = config.submodules.backlog.piSkillPath;
+  manifest.pi.skills = ["./skills"];
+  writeJson(packagePath, manifest);
+
+  let result = runChecker(root);
+  assert.notEqual(result.status, 0);
+
+  manifest.pi.skills.push(backlogPath);
+  writeJson(packagePath, manifest);
+  result = runChecker(root);
+  assert.equal(result.status, 0, result.stderr);
+
+  manifest.pi.skills.push(backlogPath);
+  writeJson(packagePath, manifest);
+  result = runChecker(root);
+  assert.notEqual(result.status, 0);
 });
 
 test("submodule checker rejects a duplicate host skill", async (t) => {
