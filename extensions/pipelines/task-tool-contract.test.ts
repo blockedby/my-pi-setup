@@ -31,6 +31,9 @@ test("builds phase and authority metadata from the actual active tools", () => {
     checks: "pipeline_task_check",
   });
   assert.deepEqual(contract.routes, {
+    prepare: null,
+    stage: null,
+    checkpoint: null,
     diff: "pipeline_task_diff",
     check: "pipeline_task_check",
     finalize: "pipeline_task_finalize",
@@ -50,6 +53,9 @@ test("never suggests a tool that is absent from the active tool set", () => {
   });
 
   for (const operation of [
+    "prepare",
+    "stage",
+    "checkpoint",
     "diff",
     "check",
     "finalize",
@@ -73,6 +79,9 @@ test("blocks writes and finalization in the read-only phase", () => {
       "write",
       "edit",
       "pipeline_task_finalize",
+      "pipeline_task_prepare",
+      "pipeline_task_stage",
+      "pipeline_task_checkpoint",
       "pipeline_task_check",
     ],
     workspaceRoot: "/workspace/task",
@@ -86,7 +95,13 @@ test("blocks writes and finalization in the read-only phase", () => {
   assert.equal(contract.routes.finalize, null);
   assert.equal(contract.routes["git-mutation"], null);
 
-  for (const operation of ["write", "finalize"] as const) {
+  for (const operation of [
+    "write",
+    "finalize",
+    "prepare",
+    "stage",
+    "checkpoint",
+  ] as const) {
     const route = routeTaskOperation(contract, operation);
     assert.equal(route.allowed, false);
     if (!route.allowed) {
@@ -143,6 +158,23 @@ test("routes declared checks only and supplies a valid known check ID", () => {
   if (!missingId.allowed) assert.equal(missingId.code, "check-id-required");
 });
 
+test("implementation routes supplementary check proposals to runtime validation", () => {
+  const contract = buildTaskToolContract({
+    activeTools: ["pipeline_task_check"],
+    workspaceRoot: "/workspace/task",
+    phase: "implementation",
+    checkIds: ["original"],
+  });
+  const route = routeTaskOperation(contract, "check", "supplementary");
+  assert.equal(route.allowed, true);
+  if (route.allowed) assert.equal(route.tool, "pipeline_task_check");
+  assert.equal(routeTaskOperation(contract, "check", "").allowed, false);
+  assert.equal(
+    routeTaskOperation(contract, "check", "x".repeat(257)).allowed,
+    false,
+  );
+});
+
 test("blocks generic Git mutation while allowing distinct controller finalization", () => {
   const withoutController = buildTaskToolContract({
     activeTools: ["bash", "read"],
@@ -181,7 +213,6 @@ test("blocks generic Git mutation while allowing distinct controller finalizatio
     assert.equal(finalize.tool, "pipeline_task_finalize");
     assert.notEqual(finalize.tool, "bash");
     assert.deepEqual(finalize.exampleArgs, {
-      commitPaths: [],
       summary: "Finalize through the controller.",
     });
   }

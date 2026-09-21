@@ -365,6 +365,8 @@ export interface PipelineWallclockLimitation {
 }
 
 export interface PlanningReadinessResult {
+  readonly execution?: "not-run" | "completed" | "unknown";
+  readonly provenance?: import("./planning-readiness.ts").PlanningReadinessProvenance;
   readonly command: string;
   readonly cwd: string;
   readonly purpose: string;

@@ -85,7 +85,23 @@ export interface AgentTreeExecutionMetadata {
   readonly servingRevision?: string;
 }
 
+export type AgentSessionAvailability =
+  | { readonly kind: "available" }
+  | { readonly kind: "unavailable"; readonly reason: "missing" | "disposed" };
+
+export class AgentSessionUnavailableError extends Error {
+  constructor(
+    readonly nodeId: string,
+    readonly reason: "missing" | "disposed",
+  ) {
+    super(`Agent session ${nodeId} is ${reason}`);
+    this.name = "AgentSessionUnavailableError";
+  }
+}
+
 export interface AgentTreeSession {
+  /** Adapter-owned lifecycle signal; older adapters retain tree-owned disposal tracking. */
+  readonly disposed?: boolean;
   readonly sessionFile?: string;
   readonly activeTools: ReadonlyArray<string>;
   readonly executionMetadata?: AgentTreeExecutionMetadata;

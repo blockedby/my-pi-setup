@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import type { CleanupEvidence } from "./cleanup-evidence.ts";
+import { FeatureSubtreeOperationError } from "./feature-execution-contract.ts";
 import {
   createFeatureRootTaskGitTarget,
   createFeatureTaskWorktreeLifecycle,
@@ -17,6 +18,421 @@ function git(cwd: string, args: ReadonlyArray<string>) {
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
 }
+
+for (const mode of [
+  "recreate",
+  "submodule-layout",
+  "mutated",
+  "staged",
+  "arbitrary",
+  "drift",
+  "conflict",
+  "failure",
+  "failure-after-move",
+] as const) {
+  test(`owned clean handoff: ${mode}`, () => {
+    const repo = fixture();
+    const originalPath = process.env.PATH;
+    try {
+      const lifecycle = createFeatureTaskWorktreeLifecycle({
+        runId: "handoff-12345678",
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+      });
+      const child = lifecycle.createChild("root", 1, "task");
+      assert.deepEqual(lifecycle.recreateForHandoff(child.id), child);
+      assert.deepEqual(
+        lifecycle.recreateForHandoff("root"),
+        lifecycle.branch("root"),
+      );
+      fs.writeFileSync(path.join(repo.workingDir, "foreign"), "caller");
+      assert.throws(
+        () => lifecycle.recreateForHandoff("root"),
+        /caller-owned root/,
+      );
+      const oldTarget = lifecycle.target(child.id);
+      const nested = path.join(child.worktree, "leftover");
+      fs.mkdirSync(nested);
+      git(nested, ["init", "-q"]);
+      fs.writeFileSync(path.join(nested, "bytes"), "diagnostic bytes");
+      fs.mkdirSync(path.join(child.worktree, "node_modules"));
+      fs.writeFileSync(
+        path.join(child.worktree, "node_modules", "cache"),
+        "original cache",
+      );
+      fs.writeFileSync(path.join(child.worktree, "selected.txt"), "accepted\n");
+      if (mode === "submodule-layout")
+        git(child.worktree, [
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          "-q",
+          repo.primary,
+          "component",
+        ]);
+      const accepted = lifecycle.commit(
+        child.id,
+        child.head,
+        mode === "submodule-layout"
+          ? ["selected.txt", ".gitmodules", "component"]
+          : ["selected.txt"],
+        "accepted",
+      );
+      assert.ok(lifecycle.branch(child.id).untrackedResiduals?.length);
+      if (mode === "mutated")
+        fs.writeFileSync(path.join(nested, "bytes"), "changed");
+      if (mode === "staged") {
+        fs.writeFileSync(path.join(child.worktree, "amendment.txt"), "staged");
+        git(child.worktree, ["add", "amendment.txt"]);
+      }
+      if (mode === "arbitrary")
+        fs.writeFileSync(path.join(child.worktree, "foreign"), "foreign");
+      if (mode === "drift")
+        git(child.worktree, ["commit", "--allow-empty", "-qm", "foreign"]);
+      if (mode === "conflict")
+        fs.writeFileSync(
+          git(child.worktree, ["rev-parse", "--git-path", "MERGE_HEAD"]),
+          accepted.commit,
+        );
+      if (mode === "failure")
+        git(repo.workingDir, ["worktree", "lock", child.worktree]);
+      if (mode === "failure-after-move") {
+        const realGit = execFileSync("which", ["git"], {
+          encoding: "utf8",
+        }).trim();
+        const wrapperDirectory = path.join(repo.root, "wrapper");
+        fs.mkdirSync(wrapperDirectory);
+        fs.writeFileSync(
+          path.join(wrapperDirectory, "git"),
+          `#!/bin/sh\ncase " $* " in *" worktree add "*) exit 43;; esac\nexec '${realGit.replaceAll("'", "'\\\"'\\\"'")}' "$@"\n`,
+          { mode: 0o755 },
+        );
+        process.env.PATH = `${wrapperDirectory}${path.delimiter}${originalPath ?? ""}`;
+        assert.throws(
+          () => lifecycle.recreateForHandoff(child.id),
+          /recovery evidence/,
+        );
+        process.env.PATH = originalPath;
+        assert.throws(() => lifecycle.target(child.id), /manual recovery/);
+        lifecycle.cleanupCompleted();
+        const directory = fs
+          .readdirSync(lifecycle.runDirectory)
+          .find((name) => name.startsWith("retained-handoff-"))!;
+        const retained = path.join(
+          lifecycle.runDirectory,
+          directory,
+          "worktree",
+        );
+        assert.equal(
+          fs.readFileSync(path.join(retained, "leftover", "bytes"), "utf8"),
+          "diagnostic bytes",
+        );
+        assert.equal(git(retained, ["rev-parse", "HEAD"]), accepted.commit);
+        assert.equal(
+          git(repo.workingDir, ["rev-parse", child.branch]),
+          accepted.commit,
+        );
+        return;
+      }
+      if (mode !== "recreate" && mode !== "submodule-layout") {
+        assert.throws(() => lifecycle.recreateForHandoff(child.id));
+        assert.ok(fs.existsSync(nested));
+        if (mode === "failure") {
+          assert.throws(() => lifecycle.branch(child.id), /manual recovery/);
+          lifecycle.cleanupCompleted();
+          assert.ok(fs.existsSync(nested));
+          assert.equal(
+            git(child.worktree, ["rev-parse", "HEAD"]),
+            accepted.commit,
+          );
+        }
+        return;
+      }
+      const replacement = lifecycle.recreateForHandoff(child.id);
+      if (mode === "submodule-layout") {
+        assert.notEqual(replacement.worktree, child.worktree);
+        assert.notEqual(replacement.branch, child.branch);
+      } else {
+        assert.equal(replacement.worktree, child.worktree);
+        assert.equal(replacement.branch, child.branch);
+      }
+      assert.equal(replacement.head, accepted.commit);
+      assert.equal(replacement.prepared, false);
+      assert.deepEqual(replacement.untrackedResiduals, []);
+      assert.deepEqual(replacement.trackedResiduals, []);
+      assert.deepEqual(replacement.preparationBaseline, []);
+      assert.equal(git(replacement.worktree, ["status", "--porcelain"]), "");
+      lifecycle.target(child.id).assertCleanHandoff!();
+      assert.throws(() => oldTarget.assertCleanHandoff!(), /ownership/);
+      const retainedDirectory = fs
+        .readdirSync(lifecycle.runDirectory)
+        .find((name) => name.startsWith("retained-handoff-"))!;
+      const directory = path.join(lifecycle.runDirectory, retainedDirectory);
+      const retained =
+        mode === "submodule-layout"
+          ? child.worktree
+          : path.join(directory, "worktree");
+      const evidence = JSON.parse(
+        fs.readFileSync(path.join(directory, "retention.json"), "utf8"),
+      );
+      assert.equal(evidence.branch.head, accepted.commit);
+      assert.equal(git(retained, ["rev-parse", "HEAD"]), accepted.commit);
+      assert.equal(
+        fs.readFileSync(path.join(retained, "leftover", "bytes"), "utf8"),
+        "diagnostic bytes",
+      );
+      assert.equal(
+        fs.readFileSync(path.join(retained, "node_modules", "cache"), "utf8"),
+        "original cache",
+      );
+      assert.equal(
+        fs.existsSync(path.join(replacement.worktree, "node_modules")),
+        false,
+      );
+      lifecycle.removeJoinedWorktree(child.id);
+      lifecycle.cleanupCompleted();
+      assert.ok(fs.existsSync(path.join(retained, "node_modules", "cache")));
+      if (mode === "submodule-layout") {
+        assert.equal(
+          fs.readFileSync(
+            path.join(retained, "component", "selected.txt"),
+            "utf8",
+          ),
+          "base\n",
+        );
+        assert.equal(
+          git(repo.workingDir, ["rev-parse", child.branch]),
+          accepted.commit,
+        );
+      }
+      assert.equal(git(retained, ["rev-parse", "HEAD"]), accepted.commit);
+    } finally {
+      process.env.PATH = originalPath;
+      repo.cleanup();
+    }
+  });
+}
+
+test("tracked residual recreation preserves dirty bytes and committed source", () => {
+  const repo = fixture();
+  const originalPath = process.env.PATH;
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "tracked-handoff-12345678",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "task");
+    fs.writeFileSync(path.join(child.worktree, "selected.txt"), "accepted\n");
+    fs.writeFileSync(path.join(child.worktree, "amendment.txt"), "residual\n");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const wrapperDirectory = path.join(repo.root, "wrapper");
+    fs.mkdirSync(wrapperDirectory);
+    fs.writeFileSync(
+      path.join(wrapperDirectory, "git"),
+      `#!/bin/sh\ncase " $* " in *" restore "*) exit 43;; esac\nexec '${realGit.replaceAll("'", "'\\\"'\\\"'")}' "$@"\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${wrapperDirectory}${path.delimiter}${originalPath ?? ""}`;
+    const result = lifecycle.commit(
+      child.id,
+      child.head,
+      ["selected.txt"],
+      "accepted",
+    );
+    process.env.PATH = originalPath;
+    assert.deepEqual(lifecycle.branch(child.id).trackedResidualPaths, [
+      "amendment.txt",
+    ]);
+    fs.writeFileSync(path.join(child.worktree, "amendment.txt"), "mutated\n");
+    assert.throws(
+      () => lifecycle.recreateForHandoff(child.id),
+      /changed handoff residual/,
+    );
+    fs.writeFileSync(path.join(child.worktree, "amendment.txt"), "residual\n");
+    const target = lifecycle.target(child.id);
+    fs.writeFileSync(path.join(child.worktree, "selected.txt"), "checkpoint\n");
+    target.stage!({ action: "stage", paths: ["selected.txt"] });
+    const checkpoint = target.checkpoint!({ message: "checkpoint" });
+    const replacement = lifecycle.recreateForHandoff(child.id);
+    assert.equal(replacement.head, checkpoint.commit);
+    assert.deepEqual(lifecycle.target(child.id).range!(result.commit).commits, [
+      checkpoint.commit,
+    ]);
+    assert.equal(
+      fs.readFileSync(path.join(replacement.worktree, "amendment.txt"), "utf8"),
+      "base\n",
+    );
+    const directory = fs
+      .readdirSync(lifecycle.runDirectory)
+      .find((name) => name.startsWith("retained-handoff-"))!;
+    const retained = path.join(lifecycle.runDirectory, directory, "worktree");
+    assert.equal(
+      fs.readFileSync(path.join(retained, "amendment.txt"), "utf8"),
+      "residual\n",
+    );
+    assert.equal(git(retained, ["rev-parse", "HEAD"]), checkpoint.commit);
+    lifecycle.assertCleanHandoff(child.id);
+  } finally {
+    process.env.PATH = originalPath;
+    repo.cleanup();
+  }
+});
+
+for (const rootTarget of [false, true]) {
+  test(`scoped checkpoints preserve work and ordered range (root=${rootTarget})`, () => {
+    const repo = fixture();
+    try {
+      const lifecycle = createFeatureTaskWorktreeLifecycle({
+        runId: "checkpoints-12345678",
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+      });
+      const child = rootTarget
+        ? undefined
+        : lifecycle.createChild("root", 1, "task");
+      const target = rootTarget
+        ? createFeatureRootTaskGitTarget(repo.workingDir)
+        : lifecycle.target(child!.id);
+      const cwd = target.worktree;
+      const base = target.head();
+      fs.mkdirSync(path.join(cwd, "node_modules"));
+      fs.writeFileSync(path.join(cwd, "node_modules", "keep"), "environment");
+      fs.writeFileSync(path.join(cwd, "leftover"), "user work");
+      const commits: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        fs.writeFileSync(path.join(cwd, "selected.txt"), `checkpoint ${i}\n`);
+        target.stage!({ action: "stage", paths: ["selected.txt"] });
+        assert.deepEqual(
+          target.stage!({ action: "unstage", paths: ["selected.txt"] }).staged,
+          [],
+        );
+        target.stage!({ action: "stage", paths: ["selected.txt"] });
+        commits.push(target.checkpoint!({ message: `checkpoint ${i}` }).commit);
+        assert.throws(() => target.checkpoint!({ message: "empty" }), /staged/);
+      }
+      assert.deepEqual(target.range!(base), {
+        baseCommit: base,
+        headCommit: commits[2],
+        commits,
+      });
+      assert.deepEqual(target.range!(commits[0]!).commits, commits.slice(1));
+      assert.equal(
+        fs.readFileSync(path.join(cwd, "leftover"), "utf8"),
+        "user work",
+      );
+      assert.equal(
+        fs.readFileSync(path.join(cwd, "node_modules", "keep"), "utf8"),
+        "environment",
+      );
+      assert.throws(() => target.assertCleanHandoff!(), /handoff/);
+      fs.unlinkSync(path.join(cwd, "leftover"));
+      target.assertCleanHandoff!();
+      git(cwd, ["commit", "--allow-empty", "-qm", "foreign"]);
+      assert.throws(() => target.range!(base), /ownership/);
+      assert.throws(
+        () => target.stage!({ action: "stage", paths: [] }),
+        /ownership/,
+      );
+    } finally {
+      repo.cleanup();
+    }
+  });
+}
+
+test("scoped staging rejects unsafe paths and disables hooks", () => {
+  const repo = fixture();
+  try {
+    const target = createFeatureRootTaskGitTarget(repo.workingDir);
+    fs.symlinkSync(repo.external, path.join(repo.workingDir, "escape"));
+    assert.throws(
+      () => target.stage({ action: "stage", paths: ["escape"] }),
+      /symlink/,
+    );
+    assert.throws(
+      () => target.stage({ action: "stage", paths: ["../external"] }),
+      /unsafe/,
+    );
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "changed");
+    const hooks = path.join(repo.root, "hooks");
+    fs.mkdirSync(hooks);
+    fs.writeFileSync(path.join(hooks, "pre-commit"), "#!/bin/sh\nexit 1\n", {
+      mode: 0o755,
+    });
+    git(repo.workingDir, ["config", "core.hooksPath", hooks]);
+    target.stage({ action: "stage", paths: ["selected.txt"] });
+    target.checkpoint({ message: "hooks disabled" });
+    git(repo.workingDir, ["checkout", "-qb", "foreign"]);
+    assert.throws(() => target.checkpoint({ message: "denied" }), /ownership/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("scoped checkpoints continue only controller-owned cherry-picks", () => {
+  const repo = fixture();
+  try {
+    const lifecycle = createFeatureTaskWorktreeLifecycle({
+      runId: "conflict-12345678",
+      workingDir: repo.workingDir,
+      worktreeRoot: repo.worktreeRoot,
+    });
+    const child = lifecycle.createChild("root", 1, "task");
+    const target = lifecycle.target(child.id);
+    fs.writeFileSync(path.join(child.worktree, "selected.txt"), "child\n");
+    target.stage!({ action: "stage", paths: ["selected.txt"] });
+    const source = target.checkpoint!({ message: "child" }).commit;
+    const root = lifecycle.target("root");
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "parent\n");
+    root.stage!({ action: "stage", paths: ["selected.txt"] });
+    const base = root.checkpoint!({ message: "parent" }).commit;
+    assert.equal(lifecycle.cherryPick("root", source).status, "conflict");
+    assert.throws(
+      () => root.checkpoint!({ message: "unresolved" }),
+      /Unresolved/,
+    );
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "resolved\n");
+    root.stage!({ action: "stage", paths: ["selected.txt"] });
+    const commit = root.checkpoint!({ message: "resolved" }).commit;
+    assert.deepEqual(root.range!(base).commits, [commit]);
+    const gitDir = git(repo.workingDir, ["rev-parse", "--absolute-git-dir"]);
+    fs.writeFileSync(path.join(gitDir, "MERGE_HEAD"), source);
+    assert.throws(
+      () => root.stage!({ action: "stage", paths: [] }),
+      /sequencer/,
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("scoped target denies foreign ref movement and staged escaping symlink blobs", () => {
+  const repo = fixture();
+  try {
+    const target = createFeatureRootTaskGitTarget(repo.workingDir);
+    const base = target.head();
+    fs.symlinkSync(repo.external, path.join(repo.workingDir, "link"));
+    git(repo.workingDir, ["add", "link"]);
+    fs.unlinkSync(path.join(repo.workingDir, "link"));
+    fs.writeFileSync(
+      path.join(repo.workingDir, "link"),
+      "innocent working copy",
+    );
+    assert.throws(
+      () => target.checkpoint({ message: "unsafe index" }),
+      /symlink/,
+    );
+    target.stage({ action: "unstage", paths: ["link"] });
+    fs.writeFileSync(path.join(repo.workingDir, "selected.txt"), "change");
+    target.stage({ action: "stage", paths: ["selected.txt"] });
+    target.checkpoint({ message: "checkpoint" });
+    git(repo.workingDir, ["update-ref", `refs/heads/${target.branch}`, base]);
+    assert.throws(() => target.range(base), /ownership/);
+  } finally {
+    repo.cleanup();
+  }
+});
 
 function lines(value: string) {
   return value.split("\n").filter(Boolean).sort();
@@ -89,6 +505,90 @@ function fixture({
       fs.rmSync(root, { recursive: true, force: true });
     },
   };
+}
+
+for (const failure of [
+  "allocation",
+  "identity",
+  "evidence",
+  "post-identity",
+] as const) {
+  test(
+    `allocation boundary preserves ${failure} failure scope`,
+    { skip: process.getuid?.() === 0 },
+    () => {
+      const repo = fixture();
+      const records: CleanupEvidence[] = [];
+      const sinkError = new Error("evidence persistence failed");
+      const lifecycle = createFeatureTaskWorktreeLifecycle({
+        runId: "allocation-12345678",
+        workingDir: repo.workingDir,
+        worktreeRoot: repo.worktreeRoot,
+        cleanupEvidence(record) {
+          if (failure === "evidence") throw sinkError;
+          records.push(record);
+          if (failure === "post-identity" && records.length === 1)
+            git(repo.workingDir, ["checkout", "-qb", "foreign"]);
+        },
+      });
+      try {
+        const parent = lifecycle.createChild("root", 1, "parent");
+        fs.chmodSync(lifecycle.runDirectory, 0o555);
+        if (failure === "identity")
+          git(repo.workingDir, ["checkout", "-qb", "foreign"]);
+        assert.throws(
+          () => lifecycle.createChild(parent.id, 2, "nested"),
+          (error: unknown) => {
+            assert.ok(error instanceof Error);
+            if (failure === "allocation") {
+              assert.ok(error instanceof FeatureSubtreeOperationError);
+              assert.equal(error.operation, "worktree-allocation");
+              assert.ok(error.cause instanceof Error);
+              assert.ok("status" in error.cause);
+              assert.equal(typeof error.cause.status, "number");
+            } else {
+              assert.ok(!(error instanceof FeatureSubtreeOperationError));
+              if (failure === "evidence") assert.equal(error, sinkError);
+            }
+            return true;
+          },
+        );
+        if (failure === "allocation") {
+          lifecycle.verifyOwnership("root");
+          lifecycle.verifyOwnership(parent.id);
+          const reference = `refs/heads/pipi-feature/${lifecycle.runId}/branch-2-nested`;
+          // Git creates the ref before failing to create the worktree directory.
+          assert.equal(
+            git(repo.workingDir, ["rev-parse", reference]),
+            parent.head,
+          );
+          assert.ok(
+            records.some(
+              (record) =>
+                record.resource === reference &&
+                record.disposition === "retained",
+            ),
+          );
+          records.length = 0;
+          lifecycle.recordRetainedResources("failed_run");
+          assert.ok(
+            records.some(
+              (record) =>
+                record.resource === reference &&
+                record.disposition === "retained",
+            ),
+          );
+          fs.chmodSync(lifecycle.runDirectory, 0o755);
+          assert.throws(() => lifecycle.createChild(parent.id, 2, "nested"));
+          const sibling = lifecycle.createChild("root", 3, "sibling");
+          lifecycle.verifyOwnership(sibling.id);
+        }
+      } finally {
+        fs.chmodSync(lifecycle.runDirectory, 0o755);
+        repo.cleanup();
+      }
+    },
+  );
 }
 
 test("task commit paths cannot be expanded by repository pre-commit hooks", () => {
@@ -1230,7 +1730,7 @@ test("failed child allocation never deletes an unowned existing ref", () => {
     process.env.PATH = `${wrapperDirectory}${path.delimiter}${originalPath ?? ""}`;
     assert.throws(
       () => lifecycle.createChild("root", 1, "task-a"),
-      /Unable to create child worktree/,
+      /Owned child branch already exists/,
     );
     process.env.PATH = originalPath;
 

@@ -28,6 +28,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { AgentTreeController } from "../shared/agent-tree/control.ts";
+import {
+  featurePlannerRecoveryDecisionSchema,
+  parseFeaturePlannerRecoveryDecision,
+  type FeaturePlannerRecoveryRequest,
+} from "./feature-planner-recovery.ts";
+import { AgentSessionUnavailableError } from "../shared/agent-tree/domain.ts";
 import type {
   AgentNodeSnapshot,
   TreeEvidenceEvent,
@@ -42,7 +48,6 @@ import {
   FEATURE_PLAN_ROLES,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
   FEATURE_PIPELINE_ID,
-  LUNA_MODEL,
   STATIC_LUNA_AUDIT_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
@@ -121,8 +126,8 @@ import {
 import { validateAndCompileFeatureExecutionGraph } from "./feature-graph.ts";
 import { buildFeatureAuditHandoff } from "./feature-audit-handoff.ts";
 import {
-  verifyPlanningReadinessSource,
-  type PlanningReadinessCheck,
+  diagnosePlanningReadinessSource,
+  type PlanningReadinessDiagnosticCheck as PlanningReadinessCheck,
 } from "./planning-readiness.ts";
 import type { PlanningReadinessResult } from "./domain.ts";
 import { buildPlanningReadinessHandoff } from "./planning-readiness-handoff.ts";
@@ -138,6 +143,7 @@ import {
   type FeatureTaskSessionInput,
   type FeatureTaskSessionOutcome,
   type FeatureTaskToolHost,
+  type FeatureTaskHostLease,
 } from "./feature-runtime.ts";
 import {
   defaultFeatureGitOperations,
@@ -335,6 +341,10 @@ interface MutableRun {
   featureExecutionPromise?: Promise<FeatureGraphExecutionResult>;
   featureReviewRuntime?: FeatureReviewRuntime;
   featureTaskHosts: Map<string, FeatureTaskToolHost>;
+  featureTaskSessions: Map<string, string>;
+  featureTaskLeases: Map<string, FeatureTaskHostLease>;
+  featureTaskSessionLosses: Map<string, "missing" | "disposed">;
+  featureAcceptedTasks: Set<string>;
   featureAbortController?: AbortController;
   featureArtifactDir?: string;
   auditSegment?: AuditSegment;
@@ -433,6 +443,7 @@ export interface PipelineControllerOptions {
     featureTaskHost?: (
       runId: string,
       role: string,
+      sessionId: string,
     ) => FeatureTaskToolHost | undefined,
     artifactTools?: (
       runId: string,
@@ -610,7 +621,32 @@ export class PipelineController {
           this.submitExecutionFinish(runId, role, token, value),
         (runId, role, token, sessionId) =>
           this.registerExecutionSessionToken(runId, role, token, sessionId),
-        (runId, role) => this.runs.get(runId)?.featureTaskHosts.get(role),
+        (runId, role, sessionId) => {
+          const run = this.runs.get(runId);
+          if (!run || !["starting", "running"].includes(run.status))
+            return undefined;
+          if (role === FEATURE_FINALIZER_ROLE)
+            return run.featureTaskHosts.get(role);
+          if (run.status !== "running") return undefined;
+          if (run.featureTaskSessions.get(role) === sessionId)
+            return run.featureTaskLeases.get(sessionId)?.host;
+          const admission = run.featureTaskHosts.get(role);
+          if (!admission) return undefined;
+          const lease = admission.acquireSessionLease?.(sessionId);
+          if (!lease)
+            throw new Error(
+              "Feature task runtime does not support session leases.",
+            );
+          run.featureTaskHosts.delete(role);
+          run.featureTaskLeases.set(sessionId, lease);
+          run.featureTaskSessions.set(role, sessionId);
+          const signal = run.featureAbortController?.signal;
+          signal?.addEventListener("abort", () => lease.revoke(), {
+            once: true,
+          });
+          if (signal?.aborted) lease.revoke();
+          return lease.host;
+        },
         (runId, role) =>
           role === AUDIT_SYNTHESIS_ROLE
             ? this.createRootTools(runId).filter(
@@ -1222,6 +1258,9 @@ export class PipelineController {
         const sessionId = authorize();
         const startedAt = Date.now();
         let sourceHash: string | undefined;
+        let provenance: PlanningReadinessResult["provenance"];
+        let execution: NonNullable<PlanningReadinessResult["execution"]> =
+          "not-run";
         let stdout = "";
         let stderr = "";
         let exitCode: number | null = null;
@@ -1229,11 +1268,12 @@ export class PipelineController {
         try {
           if ((run.planningReadiness?.length ?? 0) >= 12)
             throw new Error("Planning readiness check limit reached.");
-          const verified = await verifyPlanningReadinessSource(
+          const diagnostic = diagnosePlanningReadinessSource(
             run.request.workingDir,
             input,
           );
-          sourceHash = verified.sourceHash;
+          provenance = diagnostic.provenance;
+          sourceHash = provenance.sourceHash;
           if (
             /\b(?:bun|npm|pnpm|yarn|vp)\s+(?:run\s+)?(?:install(?::[\w-]+)?|add|bootstrap|setup)(?:\s|$)/i.test(
               input.command,
@@ -1275,6 +1315,7 @@ export class PipelineController {
             signal,
             run.featureAbortController?.signal,
           ].filter((value): value is AbortSignal => Boolean(value));
+          execution = "unknown";
           const result = await this.readinessCommand({
             workspaceRoot: run.request.workingDir,
             cwd: input.cwd,
@@ -1282,6 +1323,7 @@ export class PipelineController {
             signal: AbortSignal.any(abortSignals),
           });
           ({ stdout, stderr, exitCode } = result);
+          execution = "completed";
           assertCaller();
           if (signal?.aborted || run.featureAbortController?.signal.aborted)
             throw new Error("Planning readiness cancelled.");
@@ -1294,7 +1336,10 @@ export class PipelineController {
         }
         const result: PlanningReadinessResult = {
           ...structuredClone(input),
+          source: { ...input.source, excerpt: input.source.excerpt ?? "" },
           sourceHash,
+          provenance,
+          execution,
           workspaceRoot: run.request.workingDir,
           status: error ? "failed" : "passed",
           exitCode,
@@ -1336,24 +1381,7 @@ export class PipelineController {
           );
         }
         this.notify();
-        if (result.status === "failed") {
-          this.failRun(
-            run,
-            [
-              "Repository readiness failed during discovery; implementation was not started.",
-              `Worktree: ${result.workspaceRoot}`,
-              `Command: ${result.command}`,
-              `Source: ${result.source.path}`,
-              `Exit code: ${result.exitCode ?? "unknown"}`,
-              result.error,
-              result.stderr.slice(0, 4096),
-              "Captured stdout/stderr: pipeline_artifact_read, artifactId planning-readiness.",
-            ]
-              .filter(Boolean)
-              .join("\n"),
-            true,
-          );
-        }
+        // Initial environment failures are repair context, not a discovery veto.
         const clip = (text: string) =>
           text.length > 4096
             ? `${text.slice(0, 4096)}\n[Display truncated; read planning-readiness artifact for captured output.]`
@@ -1638,10 +1666,16 @@ export class PipelineController {
       throw new Error("Feature artifact directory is unavailable.");
     }
     const serialized = `${JSON.stringify(value, null, 2)}\n`;
-    fs.writeFileSync(path.join(run.featureArtifactDir, name), serialized, {
-      encoding: "utf8",
-      flag: "wx",
-    });
+    const descriptor = fs.openSync(
+      path.join(run.featureArtifactDir, name),
+      "wx",
+    );
+    try {
+      fs.writeFileSync(descriptor, serialized, { encoding: "utf8" });
+      fs.fsyncSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
   }
 
   private updateFeaturePlanning(
@@ -1858,6 +1892,10 @@ export class PipelineController {
       ...(featureArtifactDir ? { featureArtifactDir } : {}),
       featureSynthesisChecks: [],
       featureTaskHosts: new Map(),
+      featureTaskSessions: new Map(),
+      featureTaskLeases: new Map(),
+      featureTaskSessionLosses: new Map(),
+      featureAcceptedTasks: new Set(),
       ...(featureCaller
         ? { featureAbortController: new AbortController() }
         : {}),
@@ -2287,47 +2325,139 @@ export class PipelineController {
     parentId: string,
     input: FeatureTaskSessionInput,
   ): Promise<FeatureTaskSessionOutcome> {
-    run.featureTaskHosts.set(input.role, input.tools);
     if (typeof input.capsule !== "string")
       this.evidenceRoleTasks.set(
         `${run.id}:${input.role}`,
         input.capsule.taskId,
       );
     try {
-      const agent = await this.tree.spawn({
-        scopeId: run.id,
-        parentId,
-        role: input.role,
-        attempt: input.attempt,
-        title: scopedSessionTitle(run.id, input.role),
-        model: input.model,
-        thinkingLevel: input.thinkingLevel,
-        cwd: input.cwd,
-        prompt:
-          typeof input.capsule === "string"
-            ? input.capsule
-            : JSON.stringify(input.capsule),
-        shouldStart: () => run.status === "running" && !input.signal.aborted,
-      });
-      const [settled] = await this.tree.wait([agent.id], input.signal);
+      if (run.status !== "running" || input.signal.aborted)
+        return { status: "cancelled" };
+      const prompt =
+        typeof input.capsule === "string"
+          ? input.capsule
+          : JSON.stringify(input.capsule);
+      const existingId = run.featureTaskSessions.get(input.role);
+      const existing = existingId ? this.tree.view.get(existingId) : undefined;
+      if (existing?.status === "cancelled") {
+        if (existingId) run.featureTaskLeases.get(existingId)?.revoke();
+        return { status: "cancelled", sessionId: existingId };
+      }
+      const lossReason = existingId
+        ? run.featureTaskSessionLosses.get(existingId)
+        : undefined;
+      let sessionId: string;
+      if (existingId && !lossReason) {
+        const availability = this.tree.sessionAvailability(existingId);
+        if (availability.kind === "unavailable")
+          throw new AgentSessionUnavailableError(
+            existingId,
+            availability.reason,
+          );
+        sessionId = existingId;
+        await this.tree.send(sessionId, prompt);
+      } else {
+        if (existingId) {
+          const oldLease = run.featureTaskLeases.get(existingId);
+          oldLease?.revoke();
+          try {
+            // Neither SDK disposal nor host cancellation alone proves quiescence.
+            await this.tree.retire(existingId);
+            // Creation can fail before host admission; then no task authority
+            // or host operation was issued to this session.
+            await oldLease?.drain();
+          } catch (error) {
+            run.featureAbortController?.abort();
+            this.recordEvidence(run, {
+              kind: "feature_session_retirement_failed",
+              sessionId: existingId,
+              detail: boundedPipelineError(error),
+            });
+            throw error;
+          }
+        }
+        if (run.status !== "running" || input.signal.aborted)
+          return { status: "cancelled", sessionId: existingId };
+        // The tree assigns the ID before invoking the session factory. Admit
+        // exactly that ID there, rather than predicting or overriding it.
+        run.featureTaskHosts.set(input.role, input.tools);
+        const created = await this.tree.spawn({
+          scopeId: run.id,
+          parentId,
+          role: input.role,
+          attempt: input.attempt,
+          title: scopedSessionTitle(run.id, input.role),
+          model: input.model,
+          thinkingLevel: input.thinkingLevel,
+          cwd: input.cwd,
+          prompt,
+          persistent: true,
+          shouldStart: () => run.status === "running" && !input.signal.aborted,
+        });
+        run.featureTaskHosts.delete(input.role);
+        sessionId = created.id;
+        run.featureTaskSessions.set(input.role, sessionId);
+        if (existingId)
+          this.recordEvidence(run, {
+            kind: "feature_session_replaced",
+            sessionId,
+            facts: {
+              previousSessionId: existingId,
+              reason: lossReason ?? "missing",
+              attempt: input.attempt,
+            },
+          });
+        if (run.status !== "running" || input.signal.aborted) {
+          run.featureTaskLeases.get(sessionId)?.revoke();
+          return { status: "cancelled", sessionId };
+        }
+      }
+      const [settled] = await this.tree.wait([sessionId], input.signal);
+      const availability = this.tree.sessionAvailability(sessionId);
+      if (availability.kind === "unavailable")
+        throw new AgentSessionUnavailableError(sessionId, availability.reason);
       if (!settled || settled.status === "error") {
         return {
           status: "failed",
-          sessionId: agent.id,
+          sessionId,
           error: settled?.error ?? "Feature task session disappeared.",
         };
       }
       if (settled.status === "cancelled") {
-        return { status: "cancelled", sessionId: agent.id };
+        return { status: "cancelled", sessionId };
       }
-      return { status: "settled", sessionId: agent.id };
+      return { status: "settled", sessionId };
     } catch (error) {
-      if (input.signal.aborted || run.status === "cancelled") {
-        return { status: "cancelled" };
-      }
-      return { status: "failed", error: boundedPipelineError(error) };
-    } finally {
       run.featureTaskHosts.delete(input.role);
+      const sessionId = run.featureTaskSessions.get(input.role);
+      if (input.signal.aborted || run.status !== "running") {
+        if (sessionId) run.featureTaskLeases.get(sessionId)?.revoke();
+        return { status: "cancelled", sessionId };
+      }
+      const availability = sessionId
+        ? this.tree.sessionAvailability(sessionId)
+        : undefined;
+      const loss =
+        error instanceof AgentSessionUnavailableError &&
+        error.nodeId === sessionId
+          ? error.reason
+          : availability?.kind === "unavailable"
+            ? availability.reason
+            : undefined;
+      if (sessionId && loss) {
+        run.featureTaskLeases.get(sessionId)?.revoke();
+        run.featureTaskSessionLosses.set(sessionId, loss);
+        this.recordEvidence(run, {
+          kind: "feature_session_unavailable",
+          sessionId,
+          facts: { reason: loss, attempt: input.attempt },
+        });
+      }
+      return {
+        status: "failed",
+        sessionId,
+        error: boundedPipelineError(error),
+      };
     }
   }
 
@@ -2360,26 +2490,6 @@ export class PipelineController {
     return `\n\nController-observed repository readiness (existing checks only; future task checks are separate):\n${JSON.stringify(buildPlanningReadinessHandoff(run.id, run.planningReadiness ?? [], run.planningReadinessArtifactRevision))}`;
   }
 
-  private assertPlanningBaselineChecks(
-    run: MutableRun,
-    graph: FeatureExecutionGraph,
-  ) {
-    for (const check of graph.baselineChecks) {
-      if (
-        !run.planningReadiness?.some(
-          (observed) =>
-            observed.status === "passed" &&
-            observed.command === check.command &&
-            path.normalize(observed.cwd) === path.normalize(check.cwd),
-        )
-      ) {
-        throw new Error(
-          `Baseline ${check.id} was not successfully executed from a confirmed repository source during discovery. Use the exact observed command/cwd; future checks belong after the task that creates them.`,
-        );
-      }
-    }
-  }
-
   private async initializeFeaturePipeline(run: MutableRun) {
     if (
       !run.featureCaller ||
@@ -2393,25 +2503,56 @@ export class PipelineController {
       );
     }
 
+    const activeReviewHost = () => {
+      if (
+        run.status !== "running" ||
+        run.stage !== "review" ||
+        !run.featureReviewRuntime
+      )
+        throw new Error("Final Astra review is not active.");
+      return run.featureReviewRuntime.host;
+    };
     const reviewHostProxy = {
       describe: () => run.featureReviewRuntime?.host.describe?.(),
       diff: (request?: Parameters<FeatureTaskToolHost["diff"]>[0]) => {
         if (!run.featureReviewRuntime) {
           throw new Error("Final Astra review is not active.");
         }
-        return run.featureReviewRuntime.host.diff(request);
+        return activeReviewHost().diff(request);
       },
       check: (request: Parameters<FeatureTaskToolHost["check"]>[0]) => {
         if (!run.featureReviewRuntime) {
           throw new Error("Final Astra review is not active.");
         }
-        return run.featureReviewRuntime.host.check(request);
+        return activeReviewHost().check(request);
+      },
+      prepare: (
+        request: Parameters<NonNullable<FeatureTaskToolHost["prepare"]>>[0],
+      ) => {
+        const host = activeReviewHost();
+        if (!host.prepare) throw new Error("Final Astra review is not active.");
+        return host.prepare(request);
+      },
+      stage: (
+        request: Parameters<NonNullable<FeatureTaskToolHost["stage"]>>[0],
+      ) => {
+        const host = activeReviewHost();
+        if (!host.stage) throw new Error("Final Astra review is not active.");
+        return host.stage(request);
+      },
+      checkpoint: (
+        request: Parameters<NonNullable<FeatureTaskToolHost["checkpoint"]>>[0],
+      ) => {
+        const host = activeReviewHost();
+        if (!host.checkpoint)
+          throw new Error("Final Astra review is not active.");
+        return host.checkpoint(request);
       },
       finalize: (request: Parameters<FeatureTaskToolHost["finalize"]>[0]) => {
         if (!run.featureReviewRuntime) {
           throw new Error("Final Astra review is not active.");
         }
-        return run.featureReviewRuntime.host.finalize(request);
+        return activeReviewHost().finalize(request);
       },
     } satisfies FeatureTaskToolHost;
     run.featureTaskHosts.set(FEATURE_FINALIZER_ROLE, reviewHostProxy);
@@ -2568,7 +2709,6 @@ export class PipelineController {
       correctionKey: "graph",
       parseText: (text) => {
         const graph = parseFeatureExecutionGraphText(text);
-        this.assertPlanningBaselineChecks(run, graph);
         const compiled = validateAndCompileFeatureExecutionGraph(
           canonicalPlan,
           graph,
@@ -2579,7 +2719,6 @@ export class PipelineController {
       },
       parseValue: (value) => {
         const graph = parseFeatureExecutionGraph(value);
-        this.assertPlanningBaselineChecks(run, graph);
         const compiled = validateAndCompileFeatureExecutionGraph(
           canonicalPlan,
           graph,
@@ -2617,6 +2756,99 @@ export class PipelineController {
     }
 
     this.enterStage(run, "build");
+    let plannerQueue = Promise.resolve();
+    let plannerRecoveryOrdinal = 0;
+    let plannerRecoveryFailure: { error: unknown } | undefined;
+    const requestPlannerRecovery = (
+      incoming: FeaturePlannerRecoveryRequest,
+      signal: AbortSignal,
+    ) => {
+      const request = structuredClone(incoming);
+      const operation = plannerQueue
+        .then(async () => {
+          const assertRecoveryActive = () => {
+            if (
+              signal.aborted ||
+              run.featureAbortController?.signal.aborted ||
+              run.status !== "running" ||
+              run.stage !== "build"
+            )
+              throw new Error("Planner recovery authority is closed.");
+          };
+          const persist = (name: string, value: unknown) => {
+            try {
+              this.persistFeatureArtifact(run, name, value);
+            } catch (error) {
+              run.evidence?.markIncomplete(boundedPipelineError(error));
+              throw error;
+            }
+          };
+          assertRecoveryActive();
+          const ordinal = ++plannerRecoveryOrdinal;
+          persist(`planner-recovery-${ordinal}-request.json`, request);
+          this.recordEvidence(run, {
+            kind: "planner_recovery_requested",
+            sessionId: finalizer.id,
+            taskId: request.taskId,
+            facts: { ordinal, attempt: request.attempt },
+          });
+          await this.tree.send(
+            finalizer.id,
+            [
+              "A task exhausted its local no-progress recovery. Consult your existing canonical plan and graph; provide bounded repair advice for the SAME task runtime, or declare it blocked.",
+              "This is a read-only consultation, not final review or permission to mutate tasks. Running siblings may continue. Do not change the graph, dependencies, accepted commits, ownership, requirements or required checks; do not submit a replacement plan/graph. Advice cannot grant acceptance. Reply with only one JSON object matching this schema:",
+              JSON.stringify(featurePlannerRecoveryDecisionSchema),
+              "Controller-observed request:",
+              JSON.stringify(request),
+            ].join("\n\n"),
+          );
+          const [settled] = await this.tree.wait([finalizer.id], signal);
+          assertRecoveryActive();
+          if (
+            !settled ||
+            settled.status === "error" ||
+            settled.status === "cancelled"
+          )
+            throw new Error(
+              settled?.error ??
+                "Planner recovery session did not settle successfully.",
+            );
+          const decision = parseFeaturePlannerRecoveryDecision(
+            JSON.parse(settled.finalText),
+            request,
+          );
+          assertRecoveryActive();
+          persist(`planner-recovery-${ordinal}-decision.json`, decision);
+          this.recordEvidence(run, {
+            kind: "planner_recovery_decided",
+            sessionId: finalizer.id,
+            taskId: request.taskId,
+            facts: {
+              ordinal,
+              attempt: request.attempt,
+              action: decision.action,
+            },
+          });
+          return decision;
+        })
+        .catch((error: unknown) => {
+          if (
+            !signal.aborted &&
+            !run.featureAbortController?.signal.aborted &&
+            run.status === "running"
+          ) {
+            plannerRecoveryFailure ??= { error };
+            // Close authority before this operation settles and releases the queue.
+            run.featureAbortController?.abort();
+          }
+          throw error;
+        });
+      plannerQueue = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      return operation;
+    };
     const executionPromise = this.featureGraphExecutor({
       runId: run.id,
       workingDir: run.request.workingDir,
@@ -2663,8 +2895,27 @@ export class PipelineController {
       signal: run.featureAbortController.signal,
       runSession: (input) =>
         this.runFeatureTaskSession(run, finalizer.id, input),
+      requestPlannerRecovery,
       onSnapshot: (snapshot) => {
         for (const task of snapshot.tasks) {
+          if (
+            (task.status === "validated" ||
+              task.status === "satisfied_without_changes") &&
+            !run.featureAcceptedTasks.has(task.id)
+          ) {
+            try {
+              this.persistFeatureArtifact(
+                run,
+                `accepted-task-${run.featureAcceptedTasks.size + 1}.json`,
+                task,
+              );
+              run.featureAcceptedTasks.add(task.id);
+            } catch (error) {
+              run.evidence?.markIncomplete(boundedPipelineError(error));
+              run.featureAbortController?.abort();
+              throw error;
+            }
+          }
           for (const check of task.checkHistory ?? task.checks) {
             const checkInvocationId =
               check.checkInvocationId ??
@@ -2700,6 +2951,7 @@ export class PipelineController {
     const execution = await executionPromise;
     run.featureExecution = execution;
     this.persistFeatureArtifact(run, "task-results.json", execution);
+    if (plannerRecoveryFailure) throw plannerRecoveryFailure.error;
     if (execution.status !== "completed") {
       throw new Error(
         execution.status === "cancelled"
@@ -2720,6 +2972,7 @@ export class PipelineController {
       diffBaseCommit: run.baseSha,
       knownResidualPaths: execution.rootResidualPaths,
       knownTrackedResiduals: execution.rootTrackedResiduals,
+      knownUntrackedResiduals: execution.rootUntrackedResiduals,
       onSnapshot: (reviewSnapshot) => {
         if (!run.featureGraph) return;
         const projectedReview = {
@@ -2756,6 +3009,8 @@ export class PipelineController {
       branch: task.branch,
       worktree: task.worktree,
       taskBaseCommit: task.taskBaseCommit,
+      commitRange: task.commitRange,
+      checkpointHead: task.checkpointHead,
       provisionalCommit: task.provisionalCommit,
       validatedCommit: task.validatedCommit,
       attempts: task.attempts.map(({ attempt, sessionId, status }) => ({
@@ -2816,33 +3071,53 @@ export class PipelineController {
         maxLines: 8_000,
       },
     );
-    await this.tree.send(
-      finalizer.id,
-      buildFeatureFinalReviewPrompt({
-        request: run.request,
-        canonicalPlan,
-        graph: executionGraph,
-        executionSummary: JSON.stringify({
-          taskManifest,
-          branchManifest,
-          joinManifest,
-          details: boundedExecution.content,
-          detailsTruncated: boundedExecution.truncated,
-        }),
-        gitEvidence: JSON.stringify(this.auditGitIdentity(run)),
-        artifactDir: run.featureArtifactDir,
+    let reviewPrompt = buildFeatureFinalReviewPrompt({
+      request: run.request,
+      canonicalPlan,
+      graph: executionGraph,
+      executionSummary: JSON.stringify({
+        taskManifest,
+        branchManifest,
+        joinManifest,
+        details: boundedExecution.content,
+        detailsTruncated: boundedExecution.truncated,
       }),
-    );
-    const [reviewer] = await this.tree.wait([finalizer.id]);
-    if (
-      !reviewer ||
-      reviewer.status === "error" ||
-      reviewer.status === "cancelled"
-    ) {
-      throw new Error(
-        reviewer?.error ??
-          "Final Astra review session failed before finalization.",
-      );
+      gitEvidence: JSON.stringify(this.auditGitIdentity(run)),
+      artifactDir: run.featureArtifactDir,
+    });
+    let reviewFingerprint = "";
+    let reviewStalls = 0;
+    for (let turn = 0; turn < 12; turn++) {
+      if (run.featureAbortController.signal.aborted || run.status !== "running")
+        throw new Error("Final Astra review cancelled.");
+      await this.tree.send(finalizer.id, reviewPrompt);
+      const [reviewer] = await this.tree.wait([finalizer.id]);
+      const observation = run.featureReviewRuntime.snapshot();
+      if (
+        observation.status === "validated" ||
+        observation.status === "satisfied_without_changes"
+      )
+        break;
+      if (!reviewer || reviewer.status === "cancelled")
+        throw new Error(
+          reviewer?.error ?? "Final Astra review session unavailable.",
+        );
+      const fingerprint = JSON.stringify({
+        head: observation.checkpointHead,
+        checks: observation.checks.map(
+          ({ checkId, status, inputRevision, error }) => ({
+            checkId,
+            status,
+            inputRevision,
+            error,
+          }),
+        ),
+        error: observation.error,
+      });
+      reviewStalls = fingerprint === reviewFingerprint ? reviewStalls + 1 : 0;
+      reviewFingerprint = fingerprint;
+      if (reviewStalls >= 3) break;
+      reviewPrompt = `Final review has not been accepted. Continue in this same session: diagnose the observed problem, repair only necessary files or preparation, explicitly checkpoint changes, run current required checks and submit acceptance. Do not restart the graph. Observation:\n${truncateHead(JSON.stringify(observation), { maxBytes: 48 * 1024, maxLines: 1000 }).content}`;
     }
     const reviewSnapshot = run.featureReviewRuntime.snapshot();
     const review = {
@@ -2875,8 +3150,8 @@ export class PipelineController {
       role: "pipeline-root",
       attempt: 1,
       title: run.id,
-      model: LUNA_MODEL,
-      thinkingLevel: "xhigh",
+      model: ASTRA_MODEL,
+      thinkingLevel: "low",
       cwd: run.request.workingDir,
       prompt: "Controller-deferred post-review audit and remediation root.",
       persistent: true,
@@ -3027,14 +3302,20 @@ export class PipelineController {
     await run.readinessQueue;
     if (run.status !== "running") return [];
     const cleanupWarnings = this.cleanupReadinessRuntime(run);
-    if (cleanupWarnings.length)
-      throw new Error(
-        `Planning readiness cleanup: ${cleanupWarnings.join(" ")}`,
-      );
-    if (!run.planningReadiness?.some((check) => check.status === "passed")) {
-      throw new Error(
-        "Repository readiness was not verified during discovery. No controller-observed source-confirmed check passed; implementation was not started. Inspect repository instructions and report missing or conflicting checks rather than inventing commands.",
-      );
+    for (const warning of cleanupWarnings)
+      this.recordEvidence(run, {
+        kind: "readiness_cleanup_warning",
+        detail: warning.slice(0, 2048),
+      });
+    if (!run.planningReadinessArtifactRevision) {
+      if (!run.evidenceStore)
+        throw new Error("Planning readiness artifact store is unavailable.");
+      const artifact = await run.evidenceStore.writeSnapshot({
+        artifactId: "planning-readiness",
+        schemaVersion: 1,
+        value: run.planningReadiness ?? [],
+      });
+      run.planningReadinessArtifactRevision = artifact.revision;
     }
     run.featureDiscoveryBootstrapped = true;
     this.notify();

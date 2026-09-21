@@ -843,11 +843,14 @@ test("Pi package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
   const lockfile = readBunLock(join(repositoryRoot, "bun.lock"));
 
   assert.equal(validatePipiVersionState(repositoryRoot), runtimePiVersion);
-  assert.equal(manifest.dependencies.typebox, "1.3.7");
-  assert.match(lockfile.packages.typebox[0], /typebox@1\.3\.7$/);
+  assert.equal(manifest.dependencies.typebox, "1.3.27");
+  assert.equal(
+    lockfile.packages.typebox[0],
+    `typebox@${manifest.dependencies.typebox}`,
+  );
   assert.equal(
     lockfile.packages[runtimePiPackage][2].dependencies.typebox,
-    "1.3.7",
+    manifest.dependencies.typebox,
   );
 });
 

@@ -1,0 +1,1458 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Карта субагентов, workflow и четырёх пайплайнов Pipi: модели, этапы, границы и варианты упрощения."
+    />
+    <title>Pipi — кто думает, кто пишет, кто проверяет</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #161616;
+        --paper: #faf9f6;
+        --muted: #595959;
+        --line: #cccac4;
+        --soft: #eeede8;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font:
+          17px/1.65 system-ui,
+          sans-serif;
+      }
+      main,
+      header,
+      footer {
+        max-width: 1160px;
+        margin: auto;
+        padding: 44px 32px;
+      }
+      header {
+        padding-top: 80px;
+        border-bottom: 3px solid var(--ink);
+      }
+      h1 {
+        font-size: clamp(38px, 6vw, 76px);
+        line-height: 1.04;
+        letter-spacing: -0.055em;
+        max-width: 1000px;
+        margin: 20px 0 30px;
+      }
+      h2 {
+        font-size: clamp(27px, 3.5vw, 40px);
+        line-height: 1.18;
+        letter-spacing: -0.03em;
+        margin: 0 0 24px;
+      }
+      h3 {
+        font-size: 21px;
+        line-height: 1.3;
+        margin: 0 0 12px;
+      }
+      p {
+        margin: 12px 0;
+      }
+      a {
+        color: inherit;
+        text-underline-offset: 4px;
+      }
+      a:focus-visible {
+        outline: 3px solid;
+        outline-offset: 4px;
+      }
+      code,
+      .eyebrow,
+      .tag {
+        font-family: ui-monospace, monospace;
+      }
+      code {
+        font-size: 0.86em;
+        overflow-wrap: anywhere;
+      }
+      .eyebrow {
+        font-size: 13px;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+      .lead {
+        font-size: 23px;
+        max-width: 900px;
+      }
+      .muted,
+      small {
+        color: var(--muted);
+      }
+      nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 22px;
+        margin-top: 32px;
+        font-size: 14px;
+      }
+      section {
+        padding: 38px 0 50px;
+        border-bottom: 1px solid var(--line);
+        scroll-margin-top: 20px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .card {
+        border: 1px solid var(--ink);
+        padding: 23px;
+      }
+      .card strong.big {
+        display: block;
+        font-size: 42px;
+        line-height: 1.1;
+        margin: 12px 0;
+      }
+      .dark {
+        background: var(--ink);
+        color: var(--paper);
+        padding: 28px;
+        margin: 25px 0;
+      }
+      .note {
+        border-left: 4px solid var(--ink);
+        padding: 8px 24px;
+        margin: 24px 0;
+        background: var(--soft);
+      }
+      .flow {
+        list-style: none;
+        padding: 0;
+        margin: 24px 0;
+        display: grid;
+        gap: 12px;
+      }
+      .flow > li {
+        border: 1px solid var(--line);
+        padding: 20px 24px;
+        position: relative;
+      }
+      .flow > li + li:before {
+        content: "↓";
+        display: block;
+        position: absolute;
+        top: -22px;
+        left: 22px;
+        background: var(--paper);
+        padding: 0 6px;
+        font-weight: bold;
+      }
+      .flow h3 {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .tag {
+        font-size: 12px;
+        font-weight: 500;
+        border: 1px solid;
+        padding: 3px 8px;
+        align-self: start;
+      }
+      .tracks {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin: 16px 0;
+      }
+      .tracks > div {
+        padding: 14px;
+        background: var(--soft);
+      }
+      .tracks code {
+        display: block;
+        margin-bottom: 5px;
+      }
+      .table-wrap {
+        margin: 24px 0;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 15px;
+        table-layout: fixed;
+      }
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 15px 13px;
+        border-bottom: 1px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+      th {
+        background: var(--ink);
+        color: var(--paper);
+        font-weight: 600;
+      }
+      td:first-child {
+        font-weight: 600;
+      }
+      ul,
+      ol {
+        padding-left: 23px;
+      }
+      li {
+        margin: 7px 0;
+      }
+      .sources {
+        columns: 2;
+        font-size: 14px;
+      }
+      .sources li {
+        break-inside: avoid;
+        padding-bottom: 8px;
+      }
+      .stamp {
+        margin-top: 28px;
+        font-size: 13px;
+      }
+      .summary {
+        font-size: 20px;
+        max-width: 930px;
+      }
+      footer {
+        font-size: 14px;
+        padding-top: 24px;
+        padding-bottom: 60px;
+      }
+      @media (max-width: 760px) {
+        header,
+        main,
+        footer {
+          padding: 30px 18px;
+        }
+        header {
+          padding-top: 45px;
+        }
+        .grid,
+        .tracks {
+          grid-template-columns: 1fr;
+        }
+        .sources {
+          columns: 1;
+        }
+        table,
+        tbody,
+        tr,
+        td {
+          display: block;
+        }
+        thead {
+          display: none;
+        }
+        tr {
+          border: 1px solid var(--line);
+          margin: 14px 0;
+        }
+        td {
+          padding: 10px 14px;
+        }
+        td:before {
+          content: attr(data-label);
+          display: block;
+          font:
+            11px/1.5 ui-monospace,
+            monospace;
+          text-transform: uppercase;
+          color: var(--muted);
+          margin-bottom: 4px;
+        }
+        .lead {
+          font-size: 20px;
+        }
+        .flow > li {
+          padding: 17px;
+        }
+        .dark {
+          padding: 22px;
+        }
+      }
+      @media print {
+        body {
+          background: white;
+          font-size: 11pt;
+        }
+        header,
+        main,
+        footer {
+          max-width: none;
+          padding: 18px 0;
+        }
+        h1 {
+          font-size: 36pt;
+        }
+        h2 {
+          font-size: 23pt;
+        }
+        nav {
+          display: none;
+        }
+        section {
+          padding: 22px 0;
+        }
+        .card,
+        .flow > li,
+        tr,
+        .note {
+          break-inside: avoid;
+        }
+        .dark,
+        th {
+          background: #eee;
+          color: #111;
+        }
+        .sources {
+          columns: 1;
+        }
+        a {
+          text-decoration: none;
+        }
+        html {
+          scroll-behavior: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="eyebrow">
+        Pipi / архитектурная раскладка / 20 сентября 2026
+      </div>
+      <h1>Кто думает.<br />Кто пишет.<br />Кто проверяет.</h1>
+      <p class="lead">
+        Три механизма делегирования, четыре фиксированных пайплайна и довольно
+        дорогая машина вокруг Luna-исполнителей.
+      </p>
+      <p>
+        Снимок исходников <code>e067b9d</code>. Это разбор текущей реализации и
+        предложения для обсуждения, <strong>не выполненная депрекация</strong>.
+        Субагенты и пайплайны для подготовки этой страницы не запускались.
+        Установленный runtime отдельно не сверялся.
+      </p>
+      <nav aria-label="Разделы">
+        <a href="#verdict">Главное</a><a href="#mechanisms">Механизмы</a
+        ><a href="#roles">Модели</a><a href="#feature">Feature</a
+        ><a href="#small">Small feature</a><a href="#plan">Plan</a
+        ><a href="#audit">Audit</a><a href="#limits">Ограничения</a
+        ><a href="#git">Git и очистка</a><a href="#simplify">Что сокращать</a
+        ><a href="#sources">Исходники</a>
+      </nav>
+    </header>
+    <main>
+      <section id="verdict">
+        <div class="eyebrow">01 / короткий вывод</div>
+        <h2>Если Luna больше не кодит — одного feature недостаточно.</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Feature</h3>
+            <strong class="big">Luna пишет</strong>
+            <p>
+              Задачи графа, устранение конфликтов, ремонт интеграции и
+              исправления после аудитов. Astra тоже может править код на
+              финальном review.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Small feature</h3>
+            <strong class="big">Luna пишет</strong>
+            <p>
+              Один постоянный исполнитель делает всю реализацию и затем
+              исправляет замечания четырёх аудиторов.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Plan / Audit</h3>
+            <strong class="big">Можно оставить</strong>
+            <p>
+              Luna собирает материал и проверяет. План синтезирует Astra.
+              Audit-executor запускает проверки, но не должен исправлять
+              исходники.
+            </p>
+          </div>
+        </div>
+        <div class="dark">
+          <strong>Предложение:</strong> остановить новые запуски текущего
+          feature, отдельно решить судьбу small-feature и профиля
+          <code>luna-worker</code>. Сохранить Luna как исследователя и аудитора.
+          Не переписывать старую машину исполнения, если от неё всё равно
+          отказываемся.
+        </div>
+        <p class="muted">
+          Ниже «сейчас» означает поведение и контракты прочитанного кода.
+          «Предлагаю» — изменение, которого ещё нет. Это не полный проверочный
+          аудит всех ветвей контроллера и не доказательство корректности
+          runtime.
+        </p>
+      </section>
+      <section id="mechanisms">
+        <div class="eyebrow">02 / три разных механизма</div>
+        <h2>Субагент ≠ workflow ≠ pipeline</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Механизм</th>
+                <th>Кто строит процесс</th>
+                <th>Как исполняется</th>
+                <th>Что возвращает</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td data-label="Механизм">
+                  Прямой субагент<br /><code>subagent_spawn</code>
+                </td>
+                <td data-label="Оркестрация">
+                  Главный агент задаёт одну задачу, профиль либо harness/model.
+                </td>
+                <td data-label="Исполнение">
+                  Отдельный контекст, Pi / Claude / Codex. Фоновый запуск. Нет
+                  доступа к текущему разговору, рекурсивному делегированию и
+                  вопросам пользователю.
+                </td>
+                <td data-label="Результат">
+                  ID сразу; автоматическое сообщение по завершении. Есть
+                  check/list/cancel. Интеграция результата остаётся у родителя.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Механизм">
+                  Программный workflow<br /><code>workflow</code>
+                </td>
+                <td data-label="Оркестрация">
+                  Главный агент пишет JavaScript: фазы, agent(), parallel(),
+                  ветвления по результатам.
+                </td>
+                <td data-label="Исполнение">
+                  Скрипт в ограниченном процессе; агентам доступны обычные
+                  trust-зависимые ресурсы. Результат agent() — объект с
+                  ok/output/structured/error, а не выброс исключения.
+                </td>
+                <td data-label="Результат">
+                  По умолчанию блокирующий вызов; есть background. Артефакты
+                  сохраняются, возобновления нет.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Механизм">
+                  Фиксированный pipeline<br /><code>pipeline_run</code>
+                </td>
+                <td data-label="Оркестрация">
+                  Контроллер и прописанные роли. В feature Astra дополнительно
+                  строит граф реализации.
+                </td>
+                <td data-label="Исполнение">
+                  Фиксированные модели и права, этапы, проверка отчётов,
+                  контролируемые переходы. Фоновый запуск.
+                </td>
+                <td data-label="Результат">
+                  ID сразу, автоматический итог; check/list/cancel и чтение
+                  артефактов. Состояние привязано к сессии, durable resume нет.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <strong>Важная граница:</strong> sandbox workflow ограничивает
+          управляющий JavaScript, а не автоматически весь shell каждого
+          дочернего агента. Профиль прямого read-only субагента тоже не равен
+          файловой sandbox: в нём запрет изменений задаётся инструкцией при
+          обычном наборе инструментов.
+        </p>
+        <p>
+          У workflow максимум <strong>8</strong> одновременных agent-вызовов и
+          <strong>32</strong> вызова за запуск; первый ответ каждого ожидается
+          до <strong>45 секунд</strong>. Общего дедлайна нет; отдельный
+          инструмент — обычно до трёх минут. Доступ к workflow по инструкции
+          главного агента — только по запросу workflow или слову ultracode.
+        </p>
+      </section>
+      <section id="roles">
+        <div class="eyebrow">03 / модели и прямые профили</div>
+        <h2>Имя модели не определяет её работу.</h2>
+        <p>
+          В коде фиксированы <code>openai-codex/gpt-6-astra</code>,
+          <code>gpt-5.6-sol</code>, <code>gpt-5.6-luna</code> и
+          <code>gpt-5.6-terra</code> того же провайдера. Роль и thinking level
+          назначаются отдельно.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Профиль / модель</th>
+                <th>Назначение</th>
+                <th>Уровень</th>
+                <th>Прямая квота</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td data-label="Профиль">luna-explore</td>
+                <td data-label="Назначение">
+                  Исследование; инструкция запрещает изменения файлов и внешнего
+                  состояния.
+                </td>
+                <td data-label="Уровень">Luna / max</td>
+                <td data-label="Квота">
+                  16 на Luna, вместе с другими прямыми Luna
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Профиль">luna-worker</td>
+                <td data-label="Назначение">
+                  Узкая реализация и тесты. Нельзя коммитить, пушить или менять
+                  внешнее состояние.
+                </td>
+                <td data-label="Уровень">Luna / max</td>
+                <td data-label="Квота">Та же общая квота 16</td>
+              </tr>
+              <tr>
+                <td data-label="Профиль">terra-audit</td>
+                <td data-label="Назначение">
+                  Ручная глубокая read-only эскалация. Автоматически в
+                  пайплайнах не используется.
+                </td>
+                <td data-label="Уровень">Terra / high</td>
+                <td data-label="Квота">8</td>
+              </tr>
+              <tr>
+                <td data-label="Модель">Sol без профиля</td>
+                <td data-label="Назначение">
+                  Явно выбранный прямой агент; Sol не автоматический участник
+                  текущих четырёх пайплайнов.
+                </td>
+                <td data-label="Уровень">По параметру / наследованию</td>
+                <td data-label="Квота">4</td>
+              </tr>
+              <tr>
+                <td data-label="Harness">Claude + Codex</td>
+                <td data-label="Назначение">
+                  Прямые агенты в отдельных harness. Без профиля harness
+                  обязателен.
+                </td>
+                <td data-label="Уровень">По параметру / backend</td>
+                <td data-label="Квота">Общая 4</td>
+              </tr>
+              <tr>
+                <td data-label="Модель">Другой Pi model key, включая Astra</td>
+                <td data-label="Назначение">
+                  Нет отдельной записи в таблице PI_MODEL_QUOTAS.
+                </td>
+                <td data-label="Уровень">По параметру / наследованию</td>
+                <td data-label="Квота">Fallback pi-unresolved: 4</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="note">
+          <strong>Эти квоты не применяются к pipeline.</strong> Его корни,
+          аудиторы и задачи графа не занимают слоты прямых субагентов. Несколько
+          pipeline могут работать параллельно. Лимит workflow — отдельный
+          механизм.
+        </div>
+        <p>
+          Профиль фиксирует harness, model и reasoning; передавать их вместе с
+          профилем нельзя. Прямой <code>luna-worker/max</code> и
+          feature-исполнитель <code>Luna/high</code> — разные конфигурации, хотя
+          модель одна.
+        </p>
+      </section>
+      <section id="feature">
+        <div class="eyebrow">
+          04 / feature-pipeline — текущий, ещё не deprecated
+        </div>
+        <h2>Планирует Astra. Исполняют Luna. Потом ещё два аудита.</h2>
+        <p class="summary">
+          Главная сложность здесь не число публичных параметров. Это собственный
+          runtime ветвей, коммитов, попыток, проверок, слияний и доказательств
+          выполнения.
+        </p>
+        <p>
+          <strong>Вход:</strong> task, pipeline_name, подготовленный linked
+          working_dir, явный git_commit=true, существующий абсолютный
+          worktree_root, явный worktree_prepare. Нужны Linux/bubblewrap, чистые
+          исходники, собственная attached-ветка, стабильный HEAD; ignored
+          зависимости и сборки допустимы.
+        </p>
+        <ol
+          class="flow"
+          aria-label="Последовательность feature; стрелка означает переход после выполнения условий этапа"
+        >
+          <li>
+            <h3>1. Discover <span class="tag">5 × Luna / medium</span></h3>
+            <p>
+              Пять независимых исследователей; все отчёты должны пройти проверку
+              контроллера.
+            </p>
+            <div class="tracks">
+              <div>
+                <code>discover-problem</code>Проблема и контекст задачи;
+                разрешён shell для read-only gh по связанным GitHub задачам.
+              </div>
+              <div>
+                <code>discover-outcome</code>Нужный результат и признаки
+                успешности.
+              </div>
+              <div>
+                <code>discover-context</code>Инструкции репозитория, устройство
+                проекта и существующие команды проверки.
+              </div>
+              <div>
+                <code>discover-user-scenarios</code>Пользовательские сценарии.
+              </div>
+              <div>
+                <code>discover-product-precedents</code>Уже существующие решения
+                и продуктовые образцы.
+              </div>
+            </div>
+            <p>
+              <strong>Readiness gate:</strong> discover-context предъявляет
+              команду и точный источник. Контроллер запускает её в
+              подготовленном worktree. Без успешной проверки или при упавшей
+              команде планирование не начинается.
+            </p>
+          </li>
+          <li>
+            <h3>
+              2. Plan — независимые варианты
+              <span class="tag">2 × Astra / low</span>
+            </h3>
+            <p>
+              <code>feature-plan-minimal</code> ищет минимальное полное решение;
+              <code>feature-plan-robust</code> — устойчивое решение с учётом
+              конкретных рисков. Одинаковые исходные данные, чужой вариант не
+              видят. Нужны оба валидных отчёта.
+            </p>
+          </li>
+          <li>
+            <h3>
+              3. Plan — общий план и граф
+              <span class="tag">1 постоянная Astra / low</span>
+            </h3>
+            <p>
+              <code>feature-plan-finalizer</code> сначала синтезирует canonical
+              plan, следующим ходом — execution graph. До review только читает.
+              Это та же сессия, которая позднее проверит интеграцию.
+            </p>
+            <p>
+              Граф не произвольный DAG: только структурируемые
+              последовательности и fork/join. Перекрёстные зависимости до общего
+              join запрещены. Task IDs задают стабильный порядок; пересечение
+              ожидаемых writePaths само по себе граф не запрещает.
+            </p>
+          </li>
+          <li>
+            <h3>
+              4. Build — задачи и ветви
+              <span class="tag">свежая Luna / high на попытку</span>
+            </h3>
+            <p>
+              Задача получает подробную капсулу: цель, контекст, инварианты,
+              инструкции, эскиз реализации, критерии и команды проверок. Всего
+              до четырёх попыток; следующая сессия продолжает ту же ветку,
+              грязные файлы и provisional commit.
+            </p>
+            <p>
+              Последовательные задачи переиспользуют ветку; fork создаёт
+              дочерние worktrees. Подготовка выполняется один раз для новой
+              ветви, затем baseline-проверки. Сбой подготовки не расходует
+              модельные попытки — он останавливает ветвь.
+            </p>
+            <p>
+              <strong>Git делает контроллер:</strong> агент вызывает
+              diff/check/finalize. Finalize выбирает точные commitPaths, создаёт
+              или amend-ит один provisional task commit, чистит остатки и
+              запускает обязательные проверки. Пустой список может означать
+              проверенное отсутствие нужных изменений, но не разрешает молча
+              выбросить значимые правки.
+            </p>
+          </li>
+          <li>
+            <h3>
+              5. Build — join и ремонт
+              <span class="tag">контроллер + Luna / high при сбое</span>
+            </h3>
+            <p>
+              Контроллер ждёт все дочерние результаты и cherry-pick-ит коммиты в
+              стабильном порядке. Конфликт разрешает отдельная Luna через
+              контролируемую финализацию. После join повторяются baseline
+              checks; семантический сбой создаёт внутреннюю join-repair задачу с
+              четырьмя попытками.
+            </p>
+            <p>
+              Независимые ветви могут продолжаться во время исправимой неудачи.
+              Терминальная ошибка прекращает новые старты, но уже выполняющийся
+              сосед может закончить и сохранить фактический результат.
+            </p>
+          </li>
+          <li>
+            <h3>6. Review <span class="tag">та же Astra / low</span></h3>
+            <p>
+              Astra сверяет объединённый код с собственным canonical plan.
+              Теперь может сама исправлять код через task-инструменты и один
+              review commit. Обязательные review checks должны пройти. Второй
+              граф реализации не создаётся.
+            </p>
+          </li>
+          <li>
+            <h3>
+              7. Audit → audit-resolve
+              <span class="tag">корень Luna / xhigh + 4 × Luna / medium</span>
+            </h3>
+            <p>
+              Создаётся отдельный постоянный корень аудита и исправлений. Он
+              запускает четыре статических трека: результат, логика,
+              функциональность, надёжность. Затем
+              <strong>сам правит код</strong> или аргументированно отклоняет
+              замечания, запускает проверки и может делать обычные remediation
+              commits.
+            </p>
+            <p>
+              Для отказавшего предварительного аудитора допускается один retry
+              той же сессии либо одна замена, только если сессия не была
+              создана.
+            </p>
+          </li>
+          <li>
+            <h3>
+              8. Final-audit
+              <span class="tag"
+                >5 contributors + 1 synthesis / Luna medium</span
+              >
+            </h3>
+            <p>
+              Общий audit segment: четыре статических аудитора, один executor с
+              shell, один постоянный синтезатор. Контекст — требования, текущий
+              diff и проверки; предложения планировщиков, транскрипты задач и
+              история конфликтов скрыты от независимого аудита.
+            </p>
+          </li>
+          <li>
+            <h3>
+              9. Final-resolve → complete
+              <span class="tag">тот же корень Luna / xhigh</span>
+            </h3>
+            <p>
+              Корень исправляет или отклоняет каждое финальное замечание. На
+              каждый finding ID нужен результат fixed/rejected, основания и
+              данные проверки.
+              <strong>После этих исправлений нового аудита нет.</strong>
+              Контроллер добавляет Git-факты и итоговые артефакты. Completion —
+              не разрешение на merge/deploy.
+            </p>
+          </li>
+        </ol>
+        <div class="note">
+          <strong>Цена в сессиях:</strong> по описанному графу без ошибок — 19
+          фиксированных модельных сессий плюс N задач реализации: 5 discovery +
+          2 кандидата + 1 Astra finalizer + 1 Luna remediation root + 4
+          предварительных аудитора + 6 final-audit. Повторные ходы существующей
+          сессии сюда не прибавляются; новые попытки задач и repair-сессии
+          увеличивают число. Это не измерение стоимости или задержки провайдера.
+        </div>
+      </section>
+      <section id="small">
+        <div class="eyebrow">05 / small-feature-pipeline</div>
+        <h2>Простой граф, но тоже Luna-кодер.</h2>
+        <ol class="flow">
+          <li>
+            <h3>
+              Build <span class="tag">корень + исполнитель / Luna medium</span>
+            </h3>
+            <p>
+              Read-only координатор запускает ровно одного постоянного
+              <code>implement-small-feature</code>. Тот исследует репозиторий,
+              пишет код, тестирует и возвращает структурированный отчёт.
+            </p>
+          </li>
+          <li>
+            <h3>Final-audit <span class="tag">4 × Luna / medium</span></h3>
+            <p>
+              Четыре параллельных статических аудитора получают задачу, отчёт
+              исполнителя и Git diff. Отдельного executor и синтезатора нет.
+            </p>
+          </li>
+          <li>
+            <h3>
+              Final-resolve → complete
+              <span class="tag">тот же исполнитель</span>
+            </h3>
+            <p>
+              Все отчёты возвращаются в прежнюю сессию исполнителя. Один проход
+              исправлений или аргументированных отклонений, проверки и
+              фактический итог. Нет повторного аудита, замены исполнителя или
+              повторного запуска аудиторов.
+            </p>
+          </li>
+        </ol>
+        <p>
+          <strong>Итого:</strong> шесть сессий. Вход — подготовленный отдельный
+          linked worktree; разрешение коммитов опционально, по умолчанию
+          выключено. Коммитить может только исполнитель. Дополнительные
+          feature-требования clean HEAD / bubblewrap / внутренних worktrees не
+          применяются как тот же admission-контракт.
+        </p>
+        <p>
+          <strong>Последствие решения:</strong> оставить этот pipeline без
+          изменений и одновременно запретить Luna кодить нельзя. Его нужно тоже
+          отключить либо отдельно изменить модель исполнителя; здесь такая
+          замена не сделана.
+        </p>
+      </section>
+      <section id="plan">
+        <div class="eyebrow">06 / plan-pipeline</div>
+        <h2>Шесть исследователей → один автор плана.</h2>
+        <div class="tracks">
+          <div>
+            <code>discover-requirements-boundaries</code>Требования и границы;
+            read-only gh через bash.
+          </div>
+          <div>
+            <code>discover-architecture-responsibilities</code>Архитектура и
+            разделение ответственности.
+          </div>
+          <div>
+            <code>discover-contracts-invariants</code>Контракты и инварианты.
+          </div>
+          <div>
+            <code>discover-reuse-simplicity</code>Повторное использование и
+            простота.
+          </div>
+          <div>
+            <code>discover-quality-operations</code>Качество, эксплуатация,
+            проверки.
+          </div>
+          <div>
+            <code>discover-external-evidence</code>Внешние источники;
+            единственный plan-трек с web search/fetch.
+          </div>
+        </div>
+        <ol class="flow">
+          <li>
+            <h3>Discover <span class="tag">6 × Luna / medium</span></h3>
+            <p>
+              Контроллер запускает исследования параллельно. Каждый возвращает
+              один отчёт своей роли. До получения всех валидных отчётов синтез
+              не начинается.
+            </p>
+          </li>
+          <li>
+            <h3>Synthesize <span class="tag">1 × Astra / low</span></h3>
+            <p>
+              Astra получает задачу, отчёты и provenance; может читать локальные
+              файлы через read/fd/rg. Нет shell, generic write, оркестрации или
+              аудита. Отдаёт свободный Markdown через
+              <code>pipeline_plan_submit</code>.
+            </p>
+          </li>
+          <li>
+            <h3>Complete <span class="tag">контроллер</span></h3>
+            <p>
+              <code>plan_path: null</code> — полный план в итоговом сообщении,
+              без записи. Путь — атомарная запись внутри working_dir.
+              Существующий обычный файл может быть заменён. Структуру Markdown
+              по заголовкам, волнам или «правильным словам» не валидируют.
+            </p>
+          </li>
+        </ol>
+        <p>
+          <strong>Итого:</strong> семь сессий. Нет реализации, общего audit
+          segment, финального реаудита или Git-решения. Поэтому текущий
+          plan-pipeline нельзя представлять как «план прошёл независимый аудит»
+          только по названию инструмента или старым инструкциям.
+        </p>
+        <div class="note">
+          <strong>Найденный след старой модели:</strong> в
+          <code>controller.ts</code> итоговый checks-текст всё ещё говорит «One
+          Luna/xhigh synthesis session accepted the plan», хотя rootModel и
+          фактический запуск plan — Astra/low. Это несогласованность отчётной
+          строки, не доказательство запуска Luna вместо Astra. В рамках этой
+          раскладки не исправлялась.
+        </div>
+      </section>
+      <section id="audit">
+        <div class="eyebrow">07 / audit-pipeline и общий audit segment</div>
+        <h2>Пять независимых источников. Один накапливающий вывод.</h2>
+        <div class="tracks">
+          <div>
+            <code>audit-feature-outcome</code>Решена ли исходная задача,
+            соблюдены ли критерии.
+          </div>
+          <div>
+            <code>audit-logic-invariants</code>Логика, состояния, инварианты.
+          </div>
+          <div>
+            <code>audit-functional-correctness</code>Корректность поведения и
+            крайние случаи.
+          </div>
+          <div>
+            <code>audit-reliability-regressions</code>Надёжность и регрессии.
+          </div>
+          <div>
+            <code>audit-executor</code>Читает scripts/manifests, запускает
+            существующие безопасные noninteractive проверки, сохраняет
+            фактические результаты.
+          </div>
+          <div>
+            <code>audit-synthesis</code>Получает проверенные отчёты порциями,
+            объединяет корневые причины и сохраняет серьёзные доказанные
+            замечания без голосования большинством.
+          </div>
+        </div>
+        <p>
+          Все шесть — <strong>Luna/medium</strong>. Четыре статических трека не
+          получают bash и инструменты редактирования. Executor получает bash, но
+          контракт запрещает намеренные изменения исходников, install/update,
+          formatter-fix, сетевые мутации и Git-мутации. Shell — доверенная
+          граница, а не абсолютная гарантия отсутствия побочных файлов.
+        </p>
+        <ol class="flow">
+          <li>
+            <h3>Audit: параллельные contributors</h3>
+            <p>
+              Одинаковый ограниченный контекст задачи и Git-состояния. Отчёты
+              изолированы друг от друга. Executor начинает с дешёвых проверок;
+              для standalone и feature final-audit должен затем выполнить
+              объявленные полные noninteractive test suites. Невозможность
+              проверки записывает как unproven, а не выдумывает команду.
+            </p>
+          </li>
+          <li>
+            <h3>Первый валидный отчёт активирует synthesis</h3>
+            <p>
+              Пока синтезатор занят, новые отчёты складываются в очередь. На
+              следующем свободном ходе передаются одним пакетом. Каждый источник
+              интегрируется ровно один раз; занятый синтезатор не прерывают.
+            </p>
+          </li>
+          <li>
+            <h3>Все пять интегрированы → финальный отчёт</h3>
+            <p>
+              Контроллер проверяет структуру, канонизирует данные executor и
+              назначает finding IDs вида AUD-001. Итог содержит findings,
+              конфликты и непроверенное, но не readiness verdict.
+            </p>
+          </li>
+        </ol>
+        <p>
+          <strong>Initial:</strong> задача и optional acceptance_criteria.
+          <strong>Closure:</strong> prior_blockers с условиями закрытия,
+          remediation_diff и touched_invariants; проверяются только заданные
+          блокеры и затронутые инварианты, а не заново весь мир.
+        </p>
+        <p>
+          <strong>Коррекция:</strong> неправильному или отсутствующему отчёту
+          дают до трёх дополнительных ходов в той же сессии. Для синтезатора
+          бюджет общий на все порции. Ошибка провайдера или отмена — не такая
+          коррекция, run завершается с ошибкой. Автоматического исправления кода
+          в standalone audit нет.
+        </p>
+      </section>
+      <section id="limits">
+        <div class="eyebrow">08 / где действительно стоят ограничения</div>
+        <h2>Не всё здесь «параметры». Большая часть — внутренняя политика.</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Публичное поле</th>
+                <th>Сейчас</th>
+                <th>Оценка упрощения</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td data-label="Поле">pipeline_name</td>
+                <td data-label="Сейчас">
+                  Обязательно: 3–5 lowercase kebab-case слов, до 64 символов,
+                  без нормализации. Контроллер добавляет 8 hex символов.
+                </td>
+                <td data-label="Оценка">
+                  Самый очевидный декоративный барьер. Можно генерировать ID и
+                  принимать необязательную произвольную подпись.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Поле">pipeline</td>
+                <td data-label="Сейчас">
+                  Выбор четырёх графов; если не передан, запускается feature.
+                </td>
+                <td data-label="Оценка">
+                  При депрекации обязательно убрать опасный default. Не
+                  перенаправлять молча в другой граф.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Поле">task / working_dir</td>
+                <td data-label="Сейчас">
+                  Смысл задачи и рабочая область. Для implementation нужен
+                  точный подготовленный linked root.
+                </td>
+                <td data-label="Оценка">
+                  Не псевдопараметры. Сохранить явную рабочую область;
+                  автосоздание workspace — отдельное изменение владения.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Поле">git_commit</td>
+                <td data-label="Сейчас">
+                  Feature требует true; small допускает false; plan/audit
+                  отвергают true.
+                </td>
+                <td data-label="Оценка">
+                  В feature это подтверждение права, а не настройка. При новом
+                  API право можно выразить видом операции; просто сделать
+                  implicit true — расширение полномочий.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Поле">worktree_root / worktree_prepare</td>
+                <td data-label="Сейчас">
+                  Обязательны для feature; второй — упорядоченные команды
+                  подготовки детей.
+                </td>
+                <td data-label="Оценка">
+                  Уйдут вместе с внутренней машиной ветвей. В живом старом
+                  feature удалять нельзя без замены подготовки и размещения.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Поле">plan_path</td>
+                <td data-label="Сейчас">
+                  Обязательно у plan; null либо безопасный путь внутри
+                  workspace.
+                </td>
+                <td data-label="Оценка">
+                  Можно default=null. Проверки границ реального пути оставить.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Поле">audit</td>
+                <td data-label="Сейчас">
+                  Только standalone audit; initial/closure и типизированные
+                  сведения о блокерах.
+                </td>
+                <td data-label="Оценка">
+                  Содержательная граница scope, не декоративная формальность.
+                  Особенно полезна против бесконечного повторного аудита.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Поле">wallclock_limit</td>
+                <td data-label="Сейчас">
+                  Опционально, 30s–24h, одно целочисленное обозначение. Без
+                  параметра общего stage deadline нет.
+                </td>
+                <td data-label="Оценка">
+                  Уже выключен по умолчанию. Удаление почти не снимает рабочих
+                  барьеров; важнее честно назвать область действия.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>Время, повторы и завершение</h3>
+        <ul>
+          <li>
+            Stage deadline предупреждает на 80%, на 100% завершает со статусом
+            <code>limited</code>. У feature динамические plan/build/review не
+            имеют этой stage-таймизации; она остаётся у discovery и audit-части.
+          </li>
+          <li>
+            <code>pipeline_child_wait</code> исключён из обычного трёхминутного
+            tool timeout. Отмена и включённый stage deadline продолжают
+            действовать.
+          </li>
+          <li>
+            Discovery / planning / общий audit: начальный ответ + до трёх
+            коррекций контракта. Feature task: четыре попытки, каждая новой
+            Luna-сессией. Это разные бюджеты.
+          </li>
+          <li>
+            <code>completed</code>, <code>failed</code>, <code>cancelled</code>,
+            <code>limited</code> — состояния исполнения. Отдельные
+            implementation/execution acceptance — отчётные проекции, не
+            дополнительные полномочия на merge.
+          </li>
+          <li>
+            Перезапуск или disposal сессии не возобновляет run из артефактов.
+            Сохранившиеся JSON и ветви — диагностика, а не checkpoint для
+            resume.
+          </li>
+        </ul>
+        <h3>Что защищает sandbox feature</h3>
+        <p>
+          Агент и проверки ограничены назначенным worktree, сеть отключена,
+          живая Git-метаинформация закрыта. Подготовка окружения — отдельный
+          режим с сетью и writable package caches. Коммиты, ветки и cherry-pick
+          принадлежат контроллеру. Проверкам доступен подготовленный read-only
+          Git snapshot; точная команда <code>git diff --check</code> имеет
+          отдельный контроллерный маршрут. Это не просто инструкция модели «не
+          трогай Git».
+        </p>
+      </section>
+      <section id="git">
+        <div class="eyebrow">09 / «в гите — готово, остальное удаляем»</div>
+        <h2>
+          Да — как правило сохранения результата.<br />Нет — как доказательство
+          качества.
+        </h2>
+        <p class="summary">
+          Нужно определить «в Git» как <strong>в принятом коммите</strong>, а не
+          tracked/staged и не любой provisional HEAD. Коммит сохраняет байты;
+          прохождение проверок сохраняет основание считать задачу выполненной.
+        </p>
+        <h3>Что уже делает реализация</h3>
+        <p>
+          <code>cleanupAfterCommit</code> восстанавливает невыбранные
+          tracked/staged изменения из HEAD и удаляет незащищённые nonignored
+          untracked пути. Но сохраняет preparation baseline и pending
+          preparation paths, ограничивает удаление 2048 entries, не вычищает
+          вложенные Git repositories/метаданные. Неудалённые остатки
+          превращаются в warnings и residualPaths; tracked residuals
+          дополнительно получают fingerprints.
+        </p>
+        <p>
+          Подготовка может изменить tracked source. Поэтому первый worker обязан
+          явно распределить такие пути по <code>commitPaths</code> или
+          <code>discardPaths</code>. Их отсутствие в ответе сейчас блокирует
+          финализацию, вместо молчаливого удаления. Проверки после provisional
+          commit тоже могут загрязнить tracked файлы и не дать принять
+          результат.
+        </p>
+        <h3>Как выглядел бы более простой контракт — предложение</h3>
+        <ol>
+          <li>
+            <strong>Только disposable worktree, принадлежащий запуску.</strong>
+            Не применять общий delete к checkout пользователя, соседним
+            worktrees и их служебным файлам.
+          </li>
+          <li>
+            <strong
+              >Результат задачи — принятый commit SHA + итог обязательных
+              checks.</strong
+            >
+            Staged и dirty файлы сами по себе результатом не являются;
+            provisional commit ещё не равен accepted.
+          </li>
+          <li>
+            <strong>После приёмки граница чистая.</strong> Не переносить
+            residual state в следующую задачу. Либо привести disposable
+            workspace к принятому коммиту, либо пересоздать его. Ошибка очистки
+            означает проблему workspace, а не ещё один вид наследуемого
+            состояния.
+          </li>
+          <li>
+            <strong>Окружение имеет срок жизни.</strong> node_modules, ignored
+            builds и caches можно сохранять, пока workspace жив, либо удалять
+            вместе с ним и снова готовить. Удалить вообще всё ignored после
+            каждого шага — значит сломать подготовку и платить install/build
+            заново.
+          </li>
+          <li>
+            <strong>При ошибке — явная политика.</strong> Сохранить
+            refs/артефакты диагностики или уничтожить disposable workspace. Не
+            считать случайный последний HEAD успешно законченной задачей.
+          </li>
+        </ol>
+        <div class="note">
+          <strong>Что действительно можно убрать при таком контракте:</strong>
+          перенос tracked residuals между задачами, fingerprints этих остатков,
+          часть preparation commit/discard bookkeeping, отдельную историю их
+          полномочий. <strong>Что останется:</strong> checks, привязка
+          результата к SHA, владение workspace, защита от symlink/path escape и
+          от удаления чужой Git-метаинформации.
+        </div>
+        <p>
+          Резко сократить безопасную очистку проще удалением
+          <em>всего принадлежащего run disposable worktree</em>, чем
+          универсальным «почистим любые файлы». Никакие удаления по этому
+          предложению сейчас не выполнялись.
+        </p>
+      </section>
+      <section id="simplify">
+        <div class="eyebrow">10 / предложения, не выполненные изменения</div>
+        <h2>Что сокращать в первую очередь</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Приоритет</th>
+                <th>Изменение</th>
+                <th>Цена / оговорка</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td data-label="Приоритет">Сначала: продуктовая развилка</td>
+                <td data-label="Изменение">
+                  Закрыть новые запуски старого feature; убрать его как default.
+                  Отдельно остановить Luna-реализацию small-feature и
+                  использование luna-worker.
+                </td>
+                <td data-label="Оговорка">
+                  Существующие run IDs и артефакты ещё должны читаться.
+                  Running-процессы используют загруженный код; изменение
+                  исходников их не переписывает.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Приоритет">Легко: API-косметика</td>
+                <td data-label="Изменение">
+                  Убрать требование 3–5 слов в pipeline_name; сделать plan_path
+                  необязательным с null по умолчанию.
+                </td>
+                <td data-label="Оговорка">
+                  Обновить schema, инструкции и контрактные тесты. Реальный
+                  canonical ID и безопасную запись файла сохранить.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Приоритет">Легко: устаревшая терминология</td>
+                <td data-label="Изменение">
+                  Исправить Luna/xhigh в итоговом отчёте plan; убрать обещание
+                  «аудированного плана», если отдельного аудита нет.
+                </td>
+                <td data-label="Оговорка">
+                  Названия legacy-файлов вроде sol-review.json сами по себе не
+                  означают запуск Sol. Переименование артефактов требует учёта
+                  читателей.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Приоритет">
+                  Средне: меньше разговорных посредников
+                </td>
+                <td data-label="Изменение">
+                  Для нового простого implementation-процесса убрать отдельный
+                  LLM-координатор, если тот лишь последовательно вызывает
+                  фиксированные инструменты.
+                </td>
+                <td data-label="Оговорка">
+                  Так уже устроены части plan/audit. В feature Luna-root ещё и
+                  исправляет код, поэтому это не безболезненное удаление сессии.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Приоритет">
+                  Архитектурно: одна проверка исходной среды
+                </td>
+                <td data-label="Изменение">
+                  Заменить точное совпадение excerpt/command и повторную связь
+                  baselineChecks с readiness на один контроллерный результат
+                  preflight, привязанный к среде и коммиту.
+                </td>
+                <td data-label="Оговорка">
+                  Не отменять сам baseline и повторные checks после изменений.
+                  Подготовленные дети могут отличаться от родительского
+                  окружения.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Приоритет">
+                  Архитектурно: commit-only результат
+                </td>
+                <td data-label="Изменение">
+                  Чистая граница между задачами вместо наследования residuals и
+                  их fingerprints.
+                </td>
+                <td data-label="Оговорка">
+                  Только disposable run-owned workspace; учесть ignored
+                  environment и диагностические данные. Это не маленький флаг.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Приоритет">
+                  Если старый feature всё-таки жить будет
+                </td>
+                <td data-label="Изменение">
+                  Обсудить одного планировщика вместо двух кандидатов + синтеза;
+                  один независимый аудит вместо предварительных четырёх треков +
+                  финальных шести сессий.
+                </td>
+                <td data-label="Оговорка">
+                  Это сокращает избыточность и стоимость, но меняет качество
+                  процесса. После правок нужна ограниченная closure-проверка
+                  затронутого, а не ещё один полный аудит.
+                </td>
+              </tr>
+              <tr>
+                <td data-label="Приоритет">Не делать «по пути»</td>
+                <td data-label="Изменение">
+                  Не снимать sandbox, ownership, path/symlink guards,
+                  cancellation, привязку checks к коду и изоляцию аудиторов.
+                </td>
+                <td data-label="Оговорка">
+                  Эти механизмы защищают состояние и достоверность. Их удаление
+                  не эквивалентно отказу от бюрократии.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>Минимальное направление после депрекации</h3>
+        <div class="dark">
+          <strong
+            >Главный агент → при необходимости plan → выбранный не-Luna
+            исполнитель → audit → исправление главным/исполнителем → узкая
+            closure-проверка при блокерах → решение главного агента.</strong
+          >
+          <p>
+            Это предложенная схема ответственности, не новый зарегистрированный
+            pipeline. Модель исполнителя здесь намеренно не выбрана за
+            пользователя.
+          </p>
+        </div>
+        <p>
+          Если буквально запрещать Luna писать код, одних названий профилей
+          недостаточно: прямой запуск с явным <code>model: gpt-5.6-luna</code> и
+          произвольный workflow тоже могут выдать ей implementation-задачу.
+          Следует решить, нужен ли организационный запрет в маршрутизации или
+          технический read-only режим всех Luna. Последний — отдельная, более
+          широкая работа.
+        </p>
+        <p>
+          <strong>Мой выбор:</strong> не тратить усилия на ослабление
+          внутренностей старого feature перед его отключением. Сначала
+          зафиксировать судьбу двух implementation-пайплайнов; затем сохранить
+          простые read-only plan/audit и убрать только реальные помехи в их API.
+        </p>
+      </section>
+      <section id="sources">
+        <div class="eyebrow">11 / карта исходников</div>
+        <h2>Где менять, когда решение будет принято</h2>
+        <ul class="sources">
+          <li>
+            <a href="../extensions/subagents/src/policy.ts"
+              >subagents/src/policy.ts</a
+            >
+            — прямые профили, reasoning, квоты и fallback.
+          </li>
+          <li>
+            <a href="../extensions/shared/child-session.ts"
+              >shared/child-session.ts</a
+            >
+            — denylist инструментов, trust и завершение детей.
+          </li>
+          <li>
+            <a href="../extensions/workflows/controller.ts"
+              >workflows/controller.ts</a
+            >, <a href="../extensions/workflows/runner.ts">runner.ts</a>,
+            <a href="../extensions/workflows/sandbox.ts">sandbox.ts</a> — лимиты
+            workflow, таймер ответа и граница скрипта.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/domain.ts">pipelines/domain.ts</a>
+            — четыре определения, модели, роли и этапы.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/index.ts">pipelines/index.ts</a> —
+            публичный API;
+            <a href="../extensions/pipelines/pipeline-identity.ts"
+              >pipeline-identity.ts</a
+            >
+            — имена и ID.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/controller.ts"
+              >pipelines/controller.ts</a
+            >
+            — запуск сессий, переходы, итоговые факты; включая устаревший
+            checks-текст plan.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/prompt.ts">pipelines/prompt.ts</a>
+            — контракты ролей и последовательность аудитов/исправлений.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/session.ts"
+              >pipelines/session.ts</a
+            >
+            — инструменты конкретных ролей и session-bound submissions.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/feature-planning.ts"
+              >feature-planning.ts</a
+            >,
+            <a href="../extensions/pipelines/feature-graph.ts"
+              >feature-graph.ts</a
+            >
+            — планы, схема и допустимая форма графа.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/feature-graph-executor.ts"
+              >feature-graph-executor.ts</a
+            >
+            — свежие Luna/high, четыре попытки, ветвление и joins.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/feature-task-runtime.ts"
+              >feature-task-runtime.ts</a
+            >
+            — diff/check/finalize, provisional commit и проверка результата.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/feature-task-worktrees.ts"
+              >feature-task-worktrees.ts</a
+            >
+            — preparation, cleanupAfterCommit, residual fingerprints.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/feature-sandbox.ts"
+              >feature-sandbox.ts</a
+            >
+            — filesystem/Git/network границы.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/planning-readiness.ts"
+              >planning-readiness.ts</a
+            >
+            — проверка готовности до планирования.
+          </li>
+          <li>
+            <a href="../extensions/pipelines/audit-segment.ts"
+              >audit-segment.ts</a
+            >,
+            <a href="../extensions/pipelines/incremental-fan-in.ts"
+              >incremental-fan-in.ts</a
+            >
+            — аудит и последовательное накопление отчётов.
+          </li>
+          <li>
+            <a href="pipelines-v1-design.md">pipelines-v1-design.md</a> —
+            подробный контракт, evidence API, оговорки rollout. Документация не
+            заменяет проверку исполняемого кода.
+          </li>
+        </ul>
+      </section>
+    </main>
+    <footer>
+      <strong>Статус:</strong> создана только объясняющая страница. Поведение,
+      модели, права, Git-файлы и установленные компоненты не изменены. Страница
+      автономна: inline CSS, без JavaScript, шрифтов из сети и внешних
+      библиотек. Относительные ссылки на исходники работают при просмотре рядом
+      с репозиторием.
+    </footer>
+  </body>
+</html>

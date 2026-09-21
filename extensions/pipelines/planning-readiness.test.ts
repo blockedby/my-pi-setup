@@ -16,6 +16,7 @@ import {
   PlanningReadinessVerifiedCheckSchema,
   type PlanningReadinessCheck,
   verifyPlanningReadinessSource,
+  diagnosePlanningReadinessSource,
 } from "./planning-readiness.ts";
 
 function fixture() {
@@ -46,6 +47,69 @@ function check(
     source,
   } satisfies PlanningReadinessCheck;
 }
+
+test("diagnostics preserve uncertain provenance without granting execution or inventing results", () => {
+  const repo = fixture();
+  try {
+    fs.writeFileSync(path.join(repo.root, "README.md"), "bun run check");
+    for (const excerpt of [undefined, "", "different command"]) {
+      const input = {
+        command: "bun run check",
+        cwd: ".",
+        purpose: "Check",
+        source: {
+          path: "README.md",
+          ...(excerpt === undefined ? {} : { excerpt }),
+        },
+      };
+      const result = diagnosePlanningReadinessSource(repo.root, input);
+      assert.deepEqual(result.check, input);
+      assert.equal(result.provenance.status, "uncertain");
+      assert.equal(result.execution, "not-run");
+      assert.equal(result.executionPolicy, "not-evaluated");
+      assert.equal(result.resolvedCwd, fs.realpathSync(repo.root));
+      assert.ok(result.provenance.diagnostic);
+    }
+    const confirmed = diagnosePlanningReadinessSource(
+      repo.root,
+      check({ path: "README.md", excerpt: "bun run check" }),
+    );
+    assert.equal(confirmed.provenance.status, "confirmed");
+    assert.equal(confirmed.provenance.sourceHash, digest("bun run check"));
+    assert.equal(confirmed.execution, "not-run");
+    const missing = diagnosePlanningReadinessSource(
+      repo.root,
+      check({ path: "missing.md", excerpt: "bun run check" }),
+    );
+    assert.equal(missing.provenance.status, "uncertain");
+    for (const cwd of ["../escape", "/tmp", "missing"]) {
+      assert.throws(() =>
+        diagnosePlanningReadinessSource(
+          repo.root,
+          check({ path: "README.md", excerpt: "bun run check" }, { cwd }),
+        ),
+      );
+    }
+    assert.throws(() =>
+      diagnosePlanningReadinessSource(
+        repo.root,
+        check({ path: "../escape", excerpt: "bun run check" }),
+      ),
+    );
+    fs.symlinkSync(os.tmpdir(), path.join(repo.root, "outside"));
+    assert.throws(() =>
+      diagnosePlanningReadinessSource(
+        repo.root,
+        check(
+          { path: "README.md", excerpt: "bun run check" },
+          { cwd: "outside" },
+        ),
+      ),
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
 
 test("verifies a package script body and returns an immutable provenance copy", () => {
   const repo = fixture();

@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
+import { Value } from "typebox/value";
 import {
   AUDIT_SYNTHESIS_REPORT_SCHEMA,
   auditTrackReportSchema,
@@ -54,6 +55,7 @@ import {
   type PipelineLunaAuditRole,
 } from "./domain.ts";
 import {
+  defaultFeaturePlanningNarrative,
   FEATURE_CANDIDATE_PLAN_SUBMISSION,
   FEATURE_CANONICAL_PLAN_SUBMISSION,
   FEATURE_EXECUTION_GRAPH_SUBMISSION,
@@ -68,13 +70,14 @@ import {
 } from "./task-tool-contract.ts";
 import { featureDiscoveryReportSchema } from "./discovery-report.ts";
 import {
-  PlanningReadinessCheckSchema,
-  type PlanningReadinessCheck,
+  PlanningReadinessDiagnosticCheckSchema,
+  type PlanningReadinessDiagnosticCheck as PlanningReadinessCheck,
 } from "./planning-readiness.ts";
 import type { PlanningReadinessResult } from "./domain.ts";
 import { planDiscoveryReportSchema } from "./plan-discovery-report.ts";
 import { FEATURE_DISCOVERY_SYNTHESIS_SCHEMA } from "./feature-best-of-three.ts";
 import { createFeatureToolBoundary } from "./feature-sandbox.ts";
+import { AgentSessionUnavailableError } from "../shared/agent-tree/domain.ts";
 import type {
   AgentNodeSpec,
   AgentTreeSessionEvent,
@@ -139,6 +142,7 @@ interface PipelineSessionFactoryOptions {
   readonly featureTaskHost?: (
     runId: string,
     role: string,
+    sessionId: string,
   ) => FeatureTaskToolHost | undefined;
   /** Controller-owned, session-bound cooperative partial settlement. */
   readonly executionFinish?: (
@@ -190,6 +194,68 @@ async function waitForInterrupt(operation: Promise<unknown>) {
   const result = await Promise.race([completed, timeout]);
   if (timer) clearTimeout(timer);
   return result;
+}
+
+/** Track the underlying execution, not an SDK timeout race around it. */
+export function createOrdinaryToolLeaseFence(authoritySignal?: AbortSignal) {
+  const lifetime = new AbortController();
+  const pending = new Set<Promise<unknown>>();
+  const authority = authoritySignal
+    ? AbortSignal.any([authoritySignal, lifetime.signal])
+    : lifetime.signal;
+  return {
+    wrap(tool: ToolDefinition): ToolDefinition {
+      return {
+        ...tool,
+        async execute(id, params, signal, onUpdate, context) {
+          const combined = signal
+            ? AbortSignal.any([signal, authority])
+            : authority;
+          combined.throwIfAborted();
+          const execution = Promise.resolve().then(async () => {
+            combined.throwIfAborted();
+            const result = await tool.execute(
+              id,
+              params,
+              combined,
+              onUpdate,
+              context,
+            );
+            combined.throwIfAborted();
+            return result;
+          });
+          pending.add(execution);
+          try {
+            return await execution;
+          } finally {
+            pending.delete(execution);
+          }
+        },
+      };
+    },
+    async dispose(timeoutMs = INTERRUPT_TIMEOUT_MS) {
+      lifetime.abort(new Error("Ordinary tool session authority disposed."));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled(pending),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    "Ordinary tool execution did not drain before teardown deadline.",
+                  ),
+                ),
+              timeoutMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+  };
 }
 
 function safeJson(value: unknown) {
@@ -305,6 +371,7 @@ function createTerminatingSubmissionTool(options: {
   readonly description: string;
   readonly parameters: TSchema;
   readonly acceptedText: string;
+  readonly prepareArguments?: (value: unknown) => unknown;
   readonly submit: (value: unknown) => void;
 }) {
   return defineTool({
@@ -312,6 +379,7 @@ function createTerminatingSubmissionTool(options: {
     label: options.label,
     description: options.description,
     parameters: options.parameters,
+    prepareArguments: options.prepareArguments,
     async execute(_toolCallId, params) {
       options.submit(params);
       return {
@@ -384,7 +452,7 @@ export function createPipelineDiscoverySynthesisSubmitTool(
   });
 }
 
-function createFeatureArtifactSubmitTool(
+export function createFeatureArtifactSubmitTool(
   contract:
     | typeof FEATURE_CANDIDATE_PLAN_SUBMISSION
     | typeof FEATURE_CANONICAL_PLAN_SUBMISSION
@@ -396,6 +464,17 @@ function createFeatureArtifactSubmitTool(
     label: "Submit Feature Planning Artifact",
     description: contract.description,
     parameters: contract.parameters,
+    // SDK preparation precedes strict schema validation; never default controls.
+    prepareArguments(value) {
+      const normalized = defaultFeaturePlanningNarrative(value);
+      // Validate before SDK coercion as well as before controller parsing.
+      if (!Value.Check(contract.parameters, normalized)) {
+        throw new Error(
+          "Feature planning artifact does not match its strict schema.",
+        );
+      }
+      return normalized;
+    },
     acceptedText: "Feature planning artifact recorded. Stop this turn.",
     submit,
   });
@@ -433,12 +512,111 @@ export function createFeatureTaskHostTools(
       },
     }),
     defineTool({
+      name: "pipeline_task_prepare",
+      label: "Prepare Feature Task",
+      description:
+        "Run task-scoped preparation through the controller's network-enabled capability with isolated HOME and mounts. Ordinary shell and checks remain offline. To repair an inherited preparation step for later copies, set replacesCommand to its exact command and cwd to '.'; propagation requires successful execution and task acceptance.",
+      parameters: Type.Object(
+        {
+          command: Type.String({ minLength: 1 }),
+          cwd: Type.String({ minLength: 1 }),
+          purpose: Type.String({ minLength: 1 }),
+          replacesCommand: Type.Optional(
+            Type.String({ minLength: 1, maxLength: 32768 }),
+          ),
+        },
+        { additionalProperties: false },
+      ),
+      async execute(_id, params) {
+        const denied = deniedTaskToolError(contractForDispatch, "prepare");
+        if (denied) throw denied;
+        if (!host.prepare)
+          throw new Error(
+            "pipeline_task_prepare unsupported by this host; no bypass is permitted.",
+          );
+        const details = await host.prepare(params);
+        return {
+          content: [{ type: "text", text: safeJson(details) }],
+          details,
+        };
+      },
+    }),
+    defineTool({
+      name: "pipeline_task_stage",
+      label: "Stage Feature Task Paths",
+      description:
+        "Stage or unstage explicit task paths through the controller. This grants no generic Git mutation authority.",
+      parameters: Type.Object(
+        {
+          paths: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {
+            minItems: 1,
+            maxItems: 512,
+            uniqueItems: true,
+          }),
+          action: Type.Union([Type.Literal("stage"), Type.Literal("unstage")]),
+        },
+        { additionalProperties: false },
+      ),
+      async execute(_id, params) {
+        const denied = deniedTaskToolError(contractForDispatch, "stage");
+        if (denied) throw denied;
+        if (!host.stage)
+          throw new Error(
+            "pipeline_task_stage unsupported by this host; no bypass is permitted.",
+          );
+        const details = await host.stage(params);
+        return {
+          content: [{ type: "text", text: safeJson(details) }],
+          details,
+        };
+      },
+    }),
+    defineTool({
+      name: "pipeline_task_checkpoint",
+      label: "Checkpoint Feature Task",
+      description:
+        "Ask the controller to checkpoint staged task changes. Final acceptance remains a separate finalize operation.",
+      parameters: Type.Object(
+        { message: Type.String({ minLength: 1, maxLength: 65536 }) },
+        { additionalProperties: false },
+      ),
+      async execute(_id, params) {
+        const denied = deniedTaskToolError(contractForDispatch, "checkpoint");
+        if (denied) throw denied;
+        if (!host.checkpoint)
+          throw new Error(
+            "pipeline_task_checkpoint unsupported by this host; no bypass is permitted.",
+          );
+        const details = await host.checkpoint(params);
+        return {
+          content: [{ type: "text", text: safeJson(details) }],
+          details,
+        };
+      },
+    }),
+    defineTool({
       name: "pipeline_task_check",
       label: "Run Feature Task Check",
       description:
-        "Run one declared check by its exact ID in the controller-selected worktree and validated relative cwd.",
+        "Run a declared check offline by exact ID. Optionally propose a replacement recipe with a reason and acceptance references for controller validation.",
       parameters: Type.Object(
-        { checkId: Type.String({ minLength: 1, maxLength: 256 }) },
+        {
+          checkId: Type.String({ minLength: 1, maxLength: 256 }),
+          recipe: Type.Optional(
+            Type.Object(
+              {
+                command: Type.String({ minLength: 1 }),
+                cwd: Type.String({ minLength: 1 }),
+                purpose: Type.String({ minLength: 1 }),
+                reason: Type.String({ minLength: 1 }),
+              },
+              { additionalProperties: false },
+            ),
+          ),
+          acceptanceRefs: Type.Optional(
+            Type.Array(Type.String({ minLength: 1 })),
+          ),
+        },
         { additionalProperties: false },
       ),
       async execute(_toolCallId, params) {
@@ -448,7 +626,7 @@ export function createFeatureTaskHostTools(
           params.checkId,
         );
         if (denied) throw denied;
-        const details = await host.check({ checkId: params.checkId });
+        const details = await host.check(params);
         return {
           content: [{ type: "text", text: safeJson(details) }],
           details,
@@ -459,12 +637,13 @@ export function createFeatureTaskHostTools(
       name: "pipeline_task_finalize",
       label: "Finalize Feature Task",
       description:
-        "Ask the controller to create or amend this task's one logical commit and run all required checks. Inspect preparationChanges and the diff first: explicitly include each preparation path in commitPaths or reject it with discardPaths. Omitted preparation paths reject finalization without implicit cleanup. An empty commitPaths list alone never discards preparation output.",
+        "Request final acceptance with summary only, after explicitly running required checks and stage/checkpoint operations. Acceptance validates existing fresh evidence; it does not run checks or stage files. Optional commitPaths/discardPaths are a legacy compatibility adapter, not required for acceptance.",
       parameters: Type.Object(
         {
-          commitPaths: Type.Array(
-            Type.String({ minLength: 1, maxLength: 4 * 1024 }),
-            { maxItems: 512 },
+          commitPaths: Type.Optional(
+            Type.Array(Type.String({ minLength: 1, maxLength: 4 * 1024 }), {
+              maxItems: 512,
+            }),
           ),
           discardPaths: Type.Optional(
             Type.Array(Type.String({ minLength: 1, maxLength: 4 * 1024 }), {
@@ -723,11 +902,18 @@ export function createPipelineSessionFactory(
         (role) => role === spec.role,
       );
       const isFeatureFinalizer = spec.role === FEATURE_FINALIZER_ROLE;
+      const sessionId = spec.id ?? randomUUID();
       const featureTaskHost = options.featureTaskHost?.(
         spec.scopeId ?? "",
         spec.role,
+        sessionId,
       );
-      let mutationEnabled = Boolean(featureTaskHost && !isFeatureFinalizer);
+      const ordinaryFence = createOrdinaryToolLeaseFence(
+        featureTaskHost?.authoritySignal,
+      );
+      let mutationEnabled = Boolean(
+        featureTaskHost && !isFeatureFinalizer && !featurePlanRole,
+      );
       let activeSession: AgentSession | undefined;
       const taskToolContract = () => {
         if (!activeSession)
@@ -898,8 +1084,8 @@ export function createPipelineSessionFactory(
               name: "pipeline_feature_readiness_check",
               label: "Check repository readiness",
               description:
-                "Execute a source-confirmed existing repository check in the implementation worktree sandbox during discovery. Prefer the repository's normal runner: a bare bun/npm/pnpm/yarn run <script> can cite its script definition in cwd's package.json; other commands require an exact source invocation. The supplied command executes unchanged; the controller does not add a runner. Returns controller-observed results; never installs or changes tools to repair a failed check.",
-              parameters: PlanningReadinessCheckSchema,
+                "Execute an existing repository check in the implementation worktree sandbox during discovery. Cite its source path and an excerpt when available; missing or nonmatching excerpts produce provenance uncertainty, not execution authority. Sandbox, workspace and cancellation policy independently govern execution. The supplied command executes unchanged. Returns observed execution and provenance separately; never installs or changes tools to repair a failed check.",
+              parameters: PlanningReadinessDiagnosticCheckSchema,
               async execute(_id, input, signal) {
                 const result = await options.planningReadinessCheck!(
                   spec.scopeId ?? "",
@@ -919,7 +1105,11 @@ export function createPipelineSessionFactory(
         ...(readinessTool ? [readinessTool] : []),
         ...artifactReadTools,
         ...(customTools ?? []),
-        ...(featureBoundary?.tools ?? []),
+        ...(featureBoundary?.tools.map((tool) =>
+          ["read", "write", "edit", "bash", "fd", "rg"].includes(tool.name)
+            ? ordinaryFence.wrap(tool)
+            : tool,
+        ) ?? []),
         ...(discoveryTool ? [discoveryTool] : []),
         ...featureArtifactTools,
         ...featureTaskTools,
@@ -1048,12 +1238,33 @@ export function createPipelineSessionFactory(
         if (event.type === "agent_start") guard.apply(session);
       });
       let disposed = false;
+      let disposal: Promise<void> | undefined;
+      const dispose = () => {
+        if (disposal) return disposal;
+        disposed = true;
+        guardSubscription();
+        disposal = (async () => {
+          // Rejections remain sticky: repeated disposal must not claim quiescence.
+          await Promise.all([
+            ordinaryFence.dispose(),
+            shutdownAndDisposeChildSession(session),
+          ]);
+        })();
+        return disposal;
+      };
+      const assertAvailable = () => {
+        if (disposed)
+          throw new AgentSessionUnavailableError(sessionId, "disposed");
+      };
       const dispatchText = (text: string) =>
         featureTaskHost
           ? attachTaskToolContract(text, taskToolContract())
           : text;
 
       return {
+        get disposed() {
+          return disposed;
+        },
         get executionMetadata() {
           return {
             provider: session.model?.provider ?? model.provider,
@@ -1076,10 +1287,12 @@ export function createPipelineSessionFactory(
             if (normalized) listener(normalized);
           });
         },
-        prompt(text) {
+        async prompt(text) {
+          assertAvailable();
           return session.prompt(dispatchText(text));
         },
-        send(text) {
+        async send(text) {
+          assertAvailable();
           const dispatched = dispatchText(text);
           return session.isStreaming
             ? session.steer(dispatched)
@@ -1099,7 +1312,7 @@ export function createPipelineSessionFactory(
           mutationEnabled = true;
         },
         async interrupt() {
-          if (disposed) return;
+          if (disposed) return disposal;
           try {
             session.clearQueue();
           } catch {
@@ -1107,17 +1320,10 @@ export function createPipelineSessionFactory(
           }
           const stopped = await waitForInterrupt(session.abort());
           if (!stopped) {
-            disposed = true;
-            guardSubscription();
-            await shutdownAndDisposeChildSession(session);
+            await dispose();
           }
         },
-        async dispose() {
-          if (disposed) return;
-          disposed = true;
-          guardSubscription();
-          await shutdownAndDisposeChildSession(session);
-        },
+        dispose,
       };
     },
   };

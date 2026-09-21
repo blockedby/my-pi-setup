@@ -1,4 +1,11 @@
 import type { PlanningReadinessResult } from "./domain.ts";
+import type { PlanningReadinessProvenance } from "./planning-readiness.ts";
+
+/** Additive observations supplied by the execution owner, never inferred from status. */
+export type PlanningReadinessObservedResult = PlanningReadinessResult & {
+  readonly execution?: "not-run" | "completed" | "unknown";
+  readonly provenance?: PlanningReadinessProvenance;
+};
 
 export const PLANNING_READINESS_HANDOFF_MAX_BYTES = 15 * 1024;
 export const PLANNING_READINESS_HANDOFF_ARTIFACT_ID =
@@ -17,6 +24,7 @@ const TEXT_FIELDS = [
   "error",
   "stdout",
   "stderr",
+  "provenanceDiagnostic",
 ] as const;
 type TextField = (typeof TEXT_FIELDS)[number];
 
@@ -30,6 +38,7 @@ const TEXT_WEIGHTS: Record<TextField, number> = {
   error: 1.4,
   stdout: 0.8,
   stderr: 1.5,
+  provenanceDiagnostic: 1.4,
 };
 
 export interface PlanningReadinessArtifactReference {
@@ -40,6 +49,8 @@ export interface PlanningReadinessArtifactReference {
 
 export interface PlanningReadinessHandoffCheck {
   readonly index: number;
+  readonly execution?: PlanningReadinessObservedResult["execution"];
+  readonly provenance?: PlanningReadinessProvenance;
   readonly workspaceRoot: string;
   readonly command: string;
   readonly cwd: string;
@@ -99,7 +110,7 @@ function positiveRevision(value: number) {
   return value;
 }
 
-function normalizeCheck(check: PlanningReadinessResult, index: number) {
+function normalizeCheck(check: PlanningReadinessObservedResult, index: number) {
   if (check === null || typeof check !== "object") {
     throw new TypeError(`check ${index} must be an object.`);
   }
@@ -120,7 +131,52 @@ function normalizeCheck(check: PlanningReadinessResult, index: number) {
     throw new TypeError(`check ${index}.sourceHash must be a string.`);
   }
 
+  if (
+    check.execution !== undefined &&
+    !["not-run", "completed", "unknown"].includes(check.execution)
+  ) {
+    throw new TypeError(`check ${index}.execution is invalid.`);
+  }
+  if (
+    check.execution === "not-run" &&
+    (check.status === "passed" || check.exitCode !== null)
+  ) {
+    throw new TypeError(
+      `check ${index} cannot report a result for an unexecuted command.`,
+    );
+  }
+  if (check.provenance !== undefined) {
+    if (
+      check.provenance === null ||
+      !["confirmed", "uncertain"].includes(check.provenance.status)
+    )
+      throw new TypeError(`check ${index}.provenance is invalid.`);
+    if (check.provenance.diagnostic !== undefined)
+      requiredString(
+        check.provenance.diagnostic,
+        `check ${index}.provenance.diagnostic`,
+      );
+    if (
+      check.provenance.sourceHash !== undefined &&
+      !/^[0-9a-f]{64}$/u.test(check.provenance.sourceHash)
+    )
+      throw new TypeError(`check ${index}.provenance.sourceHash is invalid.`);
+  }
   return {
+    ...(check.execution !== undefined ? { execution: check.execution } : {}),
+    ...(check.provenance !== undefined
+      ? {
+          provenance: {
+            status: check.provenance.status,
+            ...(check.provenance.sourceHash !== undefined
+              ? { sourceHash: check.provenance.sourceHash }
+              : {}),
+            ...(check.provenance.diagnostic !== undefined
+              ? { diagnostic: check.provenance.diagnostic }
+              : {}),
+          },
+        }
+      : {}),
     workspaceRoot: requiredString(
       check.workspaceRoot,
       `check ${index}.workspaceRoot`,
@@ -182,6 +238,7 @@ function boundedCheck(check: NormalizedCheck, index: number, factor: number) {
     error: check.error ?? "",
     stdout: check.stdout,
     stderr: check.stderr,
+    provenanceDiagnostic: check.provenance?.diagnostic ?? "",
   };
   const bounded = {
     workspaceRoot: boundedText(
@@ -201,6 +258,11 @@ function boundedCheck(check: NormalizedCheck, index: number, factor: number) {
     error: boundedText(raw.error, factor, TEXT_WEIGHTS.error),
     stdout: boundedText(raw.stdout, factor, TEXT_WEIGHTS.stdout),
     stderr: boundedText(raw.stderr, factor, TEXT_WEIGHTS.stderr),
+    provenanceDiagnostic: boundedText(
+      raw.provenanceDiagnostic,
+      factor,
+      TEXT_WEIGHTS.provenanceDiagnostic,
+    ),
   };
   const truncatedFields = TEXT_FIELDS.filter(
     (field) =>
@@ -210,6 +272,17 @@ function boundedCheck(check: NormalizedCheck, index: number, factor: number) {
 
   return {
     index,
+    ...(check.execution !== undefined ? { execution: check.execution } : {}),
+    ...(check.provenance !== undefined
+      ? {
+          provenance: {
+            ...check.provenance,
+            ...(check.provenance.diagnostic !== undefined
+              ? { diagnostic: bounded.provenanceDiagnostic }
+              : {}),
+          },
+        }
+      : {}),
     workspaceRoot: bounded.workspaceRoot,
     command: bounded.command,
     cwd: bounded.cwd,
@@ -323,7 +396,7 @@ function fitProjection(
 
 export function buildPlanningReadinessHandoff(
   runId: string,
-  checks: ReadonlyArray<PlanningReadinessResult>,
+  checks: ReadonlyArray<PlanningReadinessObservedResult>,
   revision: number,
 ) {
   if (typeof runId !== "string" || runId.length === 0) {

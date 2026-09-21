@@ -53,7 +53,11 @@ class PendingSession implements AgentTreeSession {
   readonly sessionFile = undefined;
   isStreaming = false;
   interrupted = 0;
-  disposed = 0;
+  disposeCount = 0;
+
+  get disposed() {
+    return this.disposeCount > 0;
+  }
 
   constructor(readonly spec: AgentNodeSpec) {}
 
@@ -76,7 +80,7 @@ class PendingSession implements AgentTreeSession {
   }
 
   dispose() {
-    this.disposed++;
+    this.disposeCount++;
   }
 }
 

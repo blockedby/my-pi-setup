@@ -24,7 +24,7 @@ test("pipeline slash commands dispatch the selected pipeline as a follow-up turn
   >();
   const messages: Parameters<ExtensionAPI["sendUserMessage"]>[] = [];
   const api = {
-    on: () => {},
+    on: () => () => {},
     registerTool: () => {},
     registerMessageRenderer: () => {},
     registerCommand: (name, command) => commands.set(name, command),

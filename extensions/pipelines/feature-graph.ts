@@ -6,6 +6,7 @@ import {
   isSafeRepositoryRelativePath,
   parseFeatureExecutionGraph,
   validateFeatureExecutionGraphSchema,
+  validateFeatureExecutionCheckReferences,
 } from "./feature-planning.ts";
 
 export type ExecutionTree =
@@ -41,6 +42,12 @@ function validateGraphSemantics(
   issues.push(...uniqueIssues("task", taskIds));
   const knownTasks = new Set(taskIds);
   const acceptanceIds = new Set(canonicalPlan.acceptance.map(({ id }) => id));
+  issues.push(
+    ...validateFeatureExecutionCheckReferences(
+      [...graph.baselineChecks, ...graph.reviewChecks],
+      [...acceptanceIds],
+    ),
+  );
 
   issues.push(
     ...uniqueIssues(

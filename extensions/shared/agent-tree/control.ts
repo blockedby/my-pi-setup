@@ -1,4 +1,6 @@
+import { AgentSessionUnavailableError } from "./domain.ts";
 import type {
+  AgentSessionAvailability,
   AgentNodeSnapshot,
   AgentNodeSpec,
   AgentTreeReadModel,
@@ -61,6 +63,9 @@ interface Entry {
   unsubscribe?: () => void;
   cancellation?: Promise<AgentNodeSnapshot>;
   sessionDisposed?: boolean;
+  sessionDisposal?: Promise<void>;
+  retired?: boolean;
+  retirement?: Promise<void>;
   dispatchAwaitingStart?: boolean;
   runStarted?: boolean;
 }
@@ -181,13 +186,15 @@ export class AgentTreeController {
   }
 
   private async disposeSession(entry: Entry) {
-    if (!entry.session || entry.sessionDisposed) return;
+    if (entry.sessionDisposal) return entry.sessionDisposal;
+    if (!entry.session) return;
     entry.sessionDisposed = true;
-    try {
-      await entry.session.dispose();
-    } finally {
-      this.evidence(entry, { type: "disposed" });
-    }
+    const session = entry.session;
+    entry.sessionDisposal = Promise.resolve()
+      .then(() => session.dispose())
+      .then(() => this.evidence(entry, { type: "disposed" }));
+    // Preserve a rejection as well as success: fencing is not proof of cleanup.
+    return entry.sessionDisposal;
   }
 
   private notify(id?: string) {
@@ -407,7 +414,7 @@ export class AgentTreeController {
 
     try {
       const session = await this.factory.create({ ...spec, id });
-      if (this.disposed) {
+      if (this.disposed || entry.retired) {
         await session.dispose();
         throw new Error("Agent tree was disposed while creating a session.");
       }
@@ -533,6 +540,40 @@ export class AgentTreeController {
     this.notify(id);
   }
 
+  sessionAvailability(id: string): AgentSessionAvailability {
+    const entry = this.entries.get(id);
+    if (this.disposed || entry?.retired || entry?.sessionDisposed) {
+      return { kind: "unavailable", reason: "disposed" };
+    }
+    if (!entry?.session) return { kind: "unavailable", reason: "missing" };
+    return entry.session.disposed === true
+      ? { kind: "unavailable", reason: "disposed" }
+      : { kind: "available" };
+  }
+
+  async retire(id: string) {
+    const entry = this.entries.get(id);
+    if (!entry) return;
+    if (entry.retirement) return entry.retirement;
+    entry.retired = true;
+    const retirement = (async () => {
+      if (entry.cancellation) {
+        await entry.cancellation;
+        return;
+      }
+      if (!entry.session) return;
+      if (entry.node.status === "starting" || entry.node.status === "running") {
+        await this.cancel(entry.node.id);
+        return;
+      }
+      entry.unsubscribe?.();
+      entry.unsubscribe = undefined;
+      await this.disposeSession(entry);
+    })();
+    entry.retirement = retirement;
+    return retirement;
+  }
+
   async send(id: string, text: string) {
     return this.sendInternal(id, text, "send");
   }
@@ -542,9 +583,13 @@ export class AgentTreeController {
     text: string,
     kind: "send" | "deferred",
   ) {
+    const availability = this.sessionAvailability(id);
+    if (availability.kind === "unavailable") {
+      throw new AgentSessionUnavailableError(id, availability.reason);
+    }
     if (!text.trim()) throw new Error("Steering text must not be empty.");
-    const entry = this.entries.get(id);
-    if (!entry?.session) throw new Error(`Unknown agent id "${id}".`);
+    const entry = this.entries.get(id)!;
+    const session = entry.session!;
     if (entry.node.deferredPrompt && kind !== "deferred") {
       throw new Error(`Agent "${id}" is waiting for controller bootstrap.`);
     }
@@ -567,7 +612,7 @@ export class AgentTreeController {
     this.notify(id);
     this.beginDispatch(entry, kind);
     try {
-      await entry.session.send(text);
+      await session.send(text);
     } catch (error) {
       entry.dispatchAwaitingStart = previousDispatchAwaitingStart;
       entry.runStarted = previousRunStarted;
@@ -609,21 +654,27 @@ export class AgentTreeController {
 
   private async cancelEntry(entry: Entry) {
     let failure: unknown;
+    let failed = false;
     this.evidence(entry, { type: "cancelled" });
     if (entry.node.status !== "idle") {
       try {
         await entry.session!.interrupt();
       } catch (error) {
         failure = error;
+        failed = true;
       }
     }
     entry.unsubscribe?.();
     entry.unsubscribe = undefined;
+    let disposalCompleted = false;
     try {
       await this.disposeSession(entry);
+      disposalCompleted = true;
     } catch (error) {
-      failure ??= error;
+      if (!failed) failure = error;
+      failed = true;
     }
+    if (failed && !disposalCompleted) throw failure;
     if (
       entry.node.status === "idle" ||
       entry.node.status === "starting" ||
@@ -634,7 +685,9 @@ export class AgentTreeController {
         outcome: { type: "cancelled", finalText: entry.node.finalText },
       });
     }
-    if (failure) throw failure;
+    // A completed disposal closes the node even if interrupt reported an
+    // error; still propagate that error rather than claiming clean teardown.
+    if (failed) throw failure;
     return entry.node as AgentNodeSnapshot;
   }
 

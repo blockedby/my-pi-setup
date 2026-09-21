@@ -11,6 +11,15 @@ import {
   type CleanupEvidenceSink,
 } from "./cleanup-evidence.ts";
 
+import { FeatureSubtreeOperationError } from "./feature-execution-contract.ts";
+import type {
+  FeatureStageRequest,
+  FeatureStageResult,
+  FeatureCheckpointRequest,
+  FeatureCheckpointResult,
+  FeatureCommitRange,
+} from "./feature-execution-contract.ts";
+
 const GIT_OUTPUT_LIMIT = 2 * 1024 * 1024;
 const DIAGNOSTIC_LIMIT = 8 * 1024;
 const PATH_LIMIT = 512;
@@ -39,6 +48,7 @@ export interface FeatureTaskBranch {
   readonly preparationChanges?: ReadonlyArray<FeatureTrackedResidualState>;
   readonly trackedResidualPaths: ReadonlyArray<string>;
   readonly trackedResiduals: ReadonlyArray<FeatureTrackedResidualState>;
+  readonly untrackedResiduals?: ReadonlyArray<FeatureTrackedResidualState>;
 }
 
 export interface FeatureTrackedResidualState {
@@ -77,6 +87,10 @@ export interface FeatureTaskGitTarget {
   readonly branchId: string;
   readonly branch: string;
   readonly worktree: string;
+  stage?(request: FeatureStageRequest): FeatureStageResult;
+  checkpoint?(request: FeatureCheckpointRequest): FeatureCheckpointResult;
+  range?(baseCommit: string): FeatureCommitRange;
+  assertCleanHandoff?(): void;
   head(): string;
   inspect(
     baseCommit: string,
@@ -84,6 +98,7 @@ export interface FeatureTaskGitTarget {
     request?: FeatureDiffPageRequest,
   ): FeatureTaskGitDiff;
   trackedResidualPaths?(): ReadonlyArray<string>;
+  untrackedResidualPaths?(): ReadonlyArray<string>;
   preparationChanges?(): ReadonlyArray<FeatureTrackedResidualState>;
   prepareFinalization?(
     commitPaths: ReadonlyArray<string>,
@@ -120,6 +135,9 @@ export interface FeatureTaskWorktreeLifecycle {
   branch(branchId: string): FeatureTaskBranch;
   target(branchId: string): FeatureTaskGitTarget;
   branches(): ReadonlyArray<FeatureTaskBranch>;
+  verifyOwnership?(branchId: string): FeatureTaskBranch;
+  recreateForHandoff?(branchId: string): FeatureTaskBranch;
+  assertCleanHandoff?(branchId: string): void;
   verify(branchId: string, expectedHead?: string): FeatureTaskBranch;
   createChild(
     parentBranchId: string,
@@ -173,8 +191,11 @@ interface MutableBranch {
   preparationBaseline: string[];
   preparationChanges: Map<string, string>;
   trackedResiduals: Map<string, string>;
+  untrackedResiduals?: Map<string, string>;
   removed: boolean;
   refRemoved: boolean;
+  retired?: boolean;
+  checkpointParents?: Map<string, string>;
   cherryPickSource?: string;
 }
 
@@ -183,6 +204,7 @@ interface TrackedResidualOwner {
   readonly worktree: string;
   readonly preparationChanges?: ReadonlyMap<string, string>;
   trackedResiduals: Map<string, string>;
+  untrackedResiduals?: Map<string, string>;
 }
 
 function diagnostic(error: unknown) {
@@ -191,17 +213,78 @@ function diagnostic(error: unknown) {
     .slice(0, DIAGNOSTIC_LIMIT);
 }
 
-function gitRaw(cwd: string, args: ReadonlyArray<string>) {
-  return execFileSync(
+function gitEnvironment() {
+  return {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+    ),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_EDITOR: "true",
+  };
+}
+
+const HOST_GIT = [
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "commit.gpgSign=false",
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "credential.helper=",
+];
+
+function hostGitArguments(cwd: string, args: ReadonlyArray<string>) {
+  const configured = spawnSync(
     "git",
-    ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args],
+    [
+      ...HOST_GIT,
+      "config",
+      "--name-only",
+      "--get-regexp",
+      "^filter\\..*\\.(clean|smudge|process|required)$",
+    ],
     {
       cwd,
+      env: gitEnvironment(),
       encoding: "utf8",
       maxBuffer: GIT_OUTPUT_LIMIT,
-      stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  if (configured.error || (configured.status !== 0 && configured.status !== 1))
+    throw new Error("Unable to inspect Git helper configuration.");
+  const filters = new Set(
+    (configured.stdout ?? "")
+      .split("\n")
+      .filter(Boolean)
+      .map((key) => key.slice(0, key.lastIndexOf("."))),
+  );
+  return [
+    ...HOST_GIT,
+    ...[...filters].flatMap((filter) => [
+      "-c",
+      `${filter}.clean=`,
+      "-c",
+      `${filter}.smudge=`,
+      "-c",
+      `${filter}.process=`,
+      "-c",
+      `${filter}.required=false`,
+    ]),
+    ...args,
+  ];
+}
+
+function gitRaw(cwd: string, args: ReadonlyArray<string>) {
+  return execFileSync("git", hostGitArguments(cwd, args), {
+    cwd,
+    env: gitEnvironment(),
+    encoding: "utf8",
+    maxBuffer: GIT_OUTPUT_LIMIT,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 function git(cwd: string, args: ReadonlyArray<string>) {
@@ -212,7 +295,7 @@ function requireGit(cwd: string, args: ReadonlyArray<string>, label: string) {
   try {
     return git(cwd, args);
   } catch (error) {
-    throw new Error(`${label}: ${diagnostic(error)}`);
+    throw new Error(`${label}: ${diagnostic(error)}`, { cause: error });
   }
 }
 
@@ -356,6 +439,11 @@ function toSnapshot(branch: MutableBranch): FeatureTaskBranch {
     prepared: branch.prepared,
     preparationBaseline: [...branch.preparationBaseline],
     ...(preparationChanges.length > 0 ? { preparationChanges } : {}),
+    untrackedResiduals: Object.freeze(
+      preparationChangeSnapshots(branch.untrackedResiduals ?? new Map()).map(
+        (record) => Object.freeze(record),
+      ),
+    ),
     trackedResidualPaths: [...branch.trackedResiduals.keys()].sort(),
     trackedResiduals: [...branch.trackedResiduals]
       .sort(([left], [right]) => left.localeCompare(right))
@@ -491,7 +579,10 @@ function assertNoEscapingSymlink(cwd: string, filePath: string) {
       );
     seen.add(current);
     const target = path.resolve(path.dirname(current), link);
-    if (!isInside(target, root))
+    if (
+      !isInside(target, root) ||
+      path.relative(root, target).split(path.sep).includes(".git")
+    )
       throw new Error(
         `commitPaths path crosses a symlink outside the assigned worktree: ${JSON.stringify(filePath)}.`,
       );
@@ -573,16 +664,13 @@ function boundedGitOutput(
   const outputPath = path.join(directory, "diff");
   const output = fs.openSync(outputPath, "wx+");
   try {
-    const result = spawnSync(
-      "git",
-      ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", ...args],
-      {
-        cwd,
-        encoding: "utf8",
-        maxBuffer: GIT_OUTPUT_LIMIT,
-        stdio: ["ignore", output, "pipe"],
-      },
-    );
+    const result = spawnSync("git", hostGitArguments(cwd, args), {
+      cwd,
+      env: gitEnvironment(),
+      encoding: "utf8",
+      maxBuffer: GIT_OUTPUT_LIMIT,
+      stdio: ["ignore", output, "pipe"],
+    });
     if (result.error || result.status !== 0) {
       const detail = result.error
         ? diagnostic(result.error)
@@ -684,7 +772,53 @@ function trackedPathFingerprint(cwd: string, filePath: string) {
     .digest("hex");
 }
 
-function recordTrackedResiduals(branch: TrackedResidualOwner) {
+function untrackedPathFingerprint(cwd: string, filePath: string): string {
+  const absolute = path.resolve(cwd, filePath);
+  const root = canonical(cwd);
+  if (
+    !isInside(absolute, root) ||
+    absolute === root ||
+    !isInside(canonical(path.dirname(absolute)), root)
+  )
+    throw new Error(`Unsafe cleanup residual: ${filePath}.`);
+  const hash = createHash("sha256");
+  const stats = fs.lstatSync(absolute);
+  hash.update(String(stats.mode)).update("\0");
+  if (stats.isSymbolicLink()) hash.update(fs.readlinkSync(absolute));
+  else if (stats.isFile()) hash.update(fs.readFileSync(absolute));
+  else if (stats.isDirectory()) {
+    for (const name of fs.readdirSync(absolute).sort())
+      hash
+        .update(name)
+        .update("\0")
+        .update(
+          untrackedPathFingerprint(
+            cwd,
+            `${filePath.replace(/\/$/, "")}/${name}`,
+          ),
+        );
+  } else throw new Error(`Unsupported cleanup residual: ${filePath}.`);
+  return hash.digest("hex");
+}
+
+function recordTrackedResiduals(
+  branch: TrackedResidualOwner,
+  residualPaths?: ReadonlyArray<string>,
+) {
+  if (residualPaths) {
+    const retained = new Set([
+      ...residualPaths,
+      ...(branch.untrackedResiduals?.keys() ?? []),
+    ]);
+    branch.untrackedResiduals = new Map(
+      readUntracked(branch.worktree)
+        .filter((filePath) => retained.has(filePath))
+        .map((filePath) => [
+          filePath,
+          untrackedPathFingerprint(branch.worktree, filePath),
+        ]),
+    );
+  }
   const preparationPaths = branch.preparationChanges;
   branch.trackedResiduals = new Map(
     currentTrackedPaths(branch.worktree)
@@ -700,6 +834,17 @@ function assertRecordedResidualsUnchanged(
   branch: TrackedResidualOwner,
   excludedPaths: ReadonlySet<string> = new Set(),
 ) {
+  const untracked = new Set(readUntracked(branch.worktree));
+  for (const [filePath, fingerprint] of branch.untrackedResiduals ?? []) {
+    if (excludedPaths.has(filePath)) continue;
+    if (
+      !untracked.has(filePath) ||
+      untrackedPathFingerprint(branch.worktree, filePath) !== fingerprint
+    )
+      throw new Error(
+        `Recorded cleanup residual changed outside controller ownership: ${filePath}.`,
+      );
+  }
   const actual = new Set(currentTrackedPaths(branch.worktree));
   for (const [filePath, fingerprint] of branch.trackedResiduals) {
     if (excludedPaths.has(filePath)) continue;
@@ -1189,6 +1334,176 @@ function recordCleanupDecision(
   recorder.outcome(outcome);
 }
 
+function scopedCheckpoints(owner: {
+  worktree: string;
+  branch: string;
+  head: string;
+  cherryPickSource?: string;
+  retired?: boolean;
+  checkpointParents?: Map<string, string>;
+}) {
+  const cwd = owner.worktree;
+  const identity = () =>
+    [
+      canonical(cwd),
+      canonical(git(cwd, ["rev-parse", "--absolute-git-dir"])),
+      canonical(path.resolve(cwd, git(cwd, ["rev-parse", "--git-common-dir"]))),
+    ].join("\0");
+  const originalIdentity = identity();
+  const checkpoints = (owner.checkpointParents ??= new Map<string, string>());
+  const gitPath = (name: string) =>
+    path.resolve(cwd, git(cwd, ["rev-parse", "--git-path", name]));
+  const verifyOwnership = () => {
+    if (
+      owner.retired ||
+      identity() !== originalIdentity ||
+      readBranch(cwd) !== owner.branch ||
+      readHead(cwd) !== owner.head
+    )
+      throw new Error(
+        "Git identity, branch or HEAD changed outside controller ownership.",
+      );
+    for (const name of [
+      "MERGE_HEAD",
+      "REBASE_HEAD",
+      "rebase-merge",
+      "rebase-apply",
+      "sequencer",
+      "REVERT_HEAD",
+      "BISECT_LOG",
+    ]) {
+      if (fs.existsSync(gitPath(name)))
+        throw new Error(`Unknown Git sequencer: ${name}.`);
+    }
+    const picking = fs.existsSync(gitPath("CHERRY_PICK_HEAD"));
+    if (
+      picking !== Boolean(owner.cherryPickSource) ||
+      (picking &&
+        git(cwd, ["rev-parse", "CHERRY_PICK_HEAD"]) !== owner.cherryPickSource)
+    )
+      throw new Error("Cherry-pick changed outside controller ownership.");
+  };
+  return {
+    verifyOwnership,
+    assertCleanHandoff() {
+      verifyOwnership();
+      if (
+        owner.cherryPickSource ||
+        readConflicts(cwd).length ||
+        currentTrackedPaths(cwd).length ||
+        readUntracked(cwd).length
+      )
+        throw new Error(
+          "Clean source handoff required; uncommitted work was retained.",
+        );
+    },
+    stage(request: FeatureStageRequest): FeatureStageResult {
+      verifyOwnership();
+      if (request.action !== "stage" && request.action !== "unstage")
+        throw new Error("Unknown stage action.");
+      const eligible =
+        request.action === "unstage"
+          ? [...readStaged(cwd), ...readConflicts(cwd)]
+          : [
+              ...currentTrackedPaths(cwd),
+              ...readUntracked(cwd),
+              ...readConflicts(cwd),
+            ];
+      assertSafeCommitPaths(cwd, request.paths, new Set(eligible));
+      if (
+        request.action === "stage" &&
+        request.paths.some((filePath) =>
+          exactPathStats(cwd, filePath)?.isDirectory(),
+        )
+      )
+        throw new Error("Stage requires exact files, not directories.");
+      if (request.paths.length)
+        requireGit(
+          cwd,
+          [
+            "--literal-pathspecs",
+            ...(request.action === "stage" ? ["add"] : ["restore", "--staged"]),
+            "--",
+            ...request.paths,
+          ],
+          "Unable to stage exact paths",
+        );
+      return { staged: readStaged(cwd) };
+    },
+    checkpoint(request: FeatureCheckpointRequest): FeatureCheckpointResult {
+      verifyOwnership();
+      if (!request.message.trim() || request.message.includes("\0"))
+        throw new Error("Checkpoint requires a valid message.");
+      if (readConflicts(cwd).length)
+        throw new Error("Unresolved conflict paths remain.");
+      const staged = readStaged(cwd);
+      assertSafePathList(cwd, staged, "staged paths");
+      // Validate index blobs too: the worktree may have changed after staging.
+      for (const filePath of staged) {
+        const entry = gitRaw(cwd, [
+          "--literal-pathspecs",
+          "ls-files",
+          "--stage",
+          "-z",
+          "--",
+          filePath,
+        ]).split("\0")[0];
+        const metadata = entry?.split("\t")[0]?.split(" ");
+        if (metadata?.[0] === "120000" && metadata[1]) {
+          const link = gitRaw(cwd, ["cat-file", "blob", metadata[1]]);
+          const destination = path.resolve(cwd, path.dirname(filePath), link);
+          const relative = path.relative(cwd, destination);
+          if (
+            !isInside(destination, cwd) ||
+            relative.split(path.sep).includes(".git")
+          )
+            throw new Error("Staged symlink escapes source boundary.");
+          if (relative) assertNoEscapingSymlink(cwd, relative);
+        }
+      }
+      if (!staged.length)
+        throw new Error("Checkpoint requires staged changes.");
+      const base = owner.head;
+      requireGit(
+        cwd,
+        owner.cherryPickSource
+          ? ["cherry-pick", "--continue"]
+          : ["commit", "-q", "-m", request.message],
+        "Unable to create checkpoint",
+      );
+      const commit = readHead(cwd);
+      if (git(cwd, ["rev-parse", `${commit}^`]) !== base)
+        throw new Error("Checkpoint parent changed.");
+      checkpoints.set(commit, base);
+      owner.head = commit;
+      owner.cherryPickSource = undefined;
+      return {
+        commit,
+        changedPaths: changedBetween(cwd, base, commit),
+        warnings: [],
+        residualPaths: [
+          ...new Set([...currentTrackedPaths(cwd), ...readUntracked(cwd)]),
+        ].sort(),
+      };
+    },
+    range(baseCommit: string): FeatureCommitRange {
+      verifyOwnership();
+      const commits: string[] = [];
+      let cursor = owner.head;
+      while (cursor !== baseCommit) {
+        const parent = checkpoints.get(cursor);
+        if (!parent)
+          throw new Error(
+            "Range contains a commit not recorded as a controller checkpoint.",
+          );
+        commits.unshift(cursor);
+        cursor = parent;
+      }
+      return { baseCommit, headCommit: owner.head, commits };
+    },
+  };
+}
+
 class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
   readonly runId: string;
   readonly runDirectory: string;
@@ -1196,6 +1511,21 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
   private readonly mutableBranches = new Map<string, MutableBranch>();
   private readonly namespace: string;
   private readonly cleanupEvidence?: CleanupEvidenceSink;
+  private readonly checkpointTargets = new Map<
+    string,
+    ReturnType<typeof scopedCheckpoints>
+  >();
+  // Allocation candidates are retained even if Git only created a ref or metadata.
+  // They are never handed to normal joined-worktree deletion.
+  private readonly partialAllocations = new Map<
+    string,
+    { worktree: string; reference: string; head: string }
+  >();
+  private readonly retainedHandoffs = new Map<
+    string,
+    { head: string; reference?: string }
+  >();
+  private readonly blockedHandoffs = new Set<string>();
   private completedCleanup = false;
   private runDirectoryRemoved = false;
 
@@ -1254,10 +1584,15 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       throw new Error("Feature graph requires a clean tracked root worktree.");
     }
     this.mutableBranches.set(root.id, root);
+    this.checkpointTargets.set(root.id, scopedCheckpoints(root));
     this.root = toSnapshot(root);
   }
 
   private mutable(branchId: string) {
+    if (this.blockedHandoffs.has(branchId))
+      throw new Error(
+        `Feature handoff ${branchId} failed; retained recovery evidence requires manual recovery.`,
+      );
     const branch = this.mutableBranches.get(branchId);
     if (!branch) throw new Error(`Unknown feature graph branch ${branchId}.`);
     if (branch.removed)
@@ -1271,7 +1606,13 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
 
   target(branchId: string): FeatureTaskGitTarget {
     const branch = this.mutable(branchId);
+    let scoped = this.checkpointTargets.get(branchId);
+    if (!scoped) {
+      scoped = scopedCheckpoints(branch);
+      this.checkpointTargets.set(branchId, scoped);
+    }
     return {
+      ...scoped,
       branchId,
       branch: branch.branch,
       worktree: branch.worktree,
@@ -1283,6 +1624,8 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       inspect: (baseCommit, maxBytes, request) =>
         this.inspect(branchId, baseCommit, maxBytes, request),
       trackedResidualPaths: () => [...branch.trackedResiduals.keys()].sort(),
+      untrackedResidualPaths: () =>
+        [...(branch.untrackedResiduals?.keys() ?? [])].sort(),
       preparationChanges: () =>
         preparationChangeSnapshots(branch.preparationChanges),
       prepareFinalization: (commitPaths, discardPaths) => {
@@ -1309,6 +1652,169 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       .map(toSnapshot);
   }
 
+  verifyOwnership(branchId: string) {
+    this.mutable(branchId);
+    this.checkpointTargets.get(branchId)!.verifyOwnership();
+    return this.branch(branchId);
+  }
+
+  assertCleanHandoff(branchId: string) {
+    this.mutable(branchId);
+    this.checkpointTargets.get(branchId)!.assertCleanHandoff();
+  }
+
+  recreateForHandoff(branchId: string) {
+    if (this.completedCleanup)
+      throw new Error("Feature graph worktree lifecycle is closed.");
+    const branch = this.mutable(branchId);
+    const validate = () => {
+      this.verifyOwnership(branchId);
+      if (branch.cherryPickSource || readConflicts(branch.worktree).length)
+        throw new Error("Active conflicts prevent clean workspace handoff.");
+      const tracked = currentTrackedPaths(branch.worktree);
+      const untracked = readUntracked(branch.worktree);
+      if (!tracked.length && !untracked.length) return false;
+      if (!branch.owned)
+        throw new Error(
+          "Dirty caller-owned root cannot be recreated for handoff; caller must provide a clean workspace.",
+        );
+      if (readStaged(branch.worktree).length || branch.preparationChanges.size)
+        throw new Error(
+          "Staged or unresolved preparation changes prevent handoff.",
+        );
+      if (branch.head === branch.baseCommit)
+        throw new Error(
+          "Handoff recreation requires an accepted committed HEAD.",
+        );
+      for (const filePath of tracked) {
+        if (
+          branch.trackedResiduals.get(filePath) !==
+          trackedPathFingerprint(branch.worktree, filePath)
+        )
+          throw new Error(
+            `Untrusted or changed handoff residual: ${filePath}.`,
+          );
+      }
+      for (const filePath of untracked) {
+        if (
+          branch.untrackedResiduals?.get(filePath) !==
+          untrackedPathFingerprint(branch.worktree, filePath)
+        )
+          throw new Error(
+            `Untrusted or changed handoff residual: ${filePath}.`,
+          );
+      }
+      return true;
+    };
+    if (!validate()) return toSnapshot(branch);
+    if (
+      canonical(this.runDirectory) !== this.runDirectory ||
+      canonical(branch.worktree) !== branch.worktree ||
+      path.dirname(branch.worktree) !== this.runDirectory
+    )
+      throw new Error("Owned handoff allocation boundary changed.");
+    const directory = fs.mkdtempSync(
+      path.join(this.runDirectory, "retained-handoff-"),
+    );
+    // Git cannot move worktrees containing submodules. Retain those in place
+    // and allocate a fresh owned ref/path instead of moving dependency metadata.
+    const retainInPlace = fs.existsSync(
+      path.join(branch.worktree, ".gitmodules"),
+    );
+    const suffix = path.basename(directory);
+    const retained = retainInPlace
+      ? branch.worktree
+      : path.join(directory, "worktree");
+    const replacementPath = retainInPlace
+      ? path.join(this.runDirectory, `${branch.id}-${suffix}`)
+      : branch.worktree;
+    const replacementBranch = retainInPlace
+      ? `${this.namespace}/${branch.id}-${suffix}`
+      : branch.branch;
+    const evidence = {
+      branch: toSnapshot(branch),
+      retained,
+      replacement: replacementPath,
+      replacementBranch,
+      reason: "clean-workspace-handoff",
+      status: "retention-before-mutation",
+    };
+    // Durable, exclusive evidence is mandatory, unlike observational cleanup sinks.
+    const evidencePath = path.join(directory, "retention.json");
+    const fd = fs.openSync(evidencePath, "wx", 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(evidence, null, 2));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    this.partialAllocations.set(directory, {
+      worktree: retainInPlace ? replacementPath : retained,
+      reference: `refs/heads/${replacementBranch}`,
+      head: branch.head,
+    });
+    validate();
+    this.blockedHandoffs.add(branchId);
+    branch.retired = true;
+    try {
+      if (!retainInPlace) {
+        requireGit(
+          this.root.worktree,
+          ["worktree", "move", branch.worktree, retained],
+          "Unable to retain dirty handoff worktree",
+        );
+        // Detaching at the identical commit preserves the index and all local bytes.
+        requireGit(
+          retained,
+          ["checkout", "--detach", branch.head],
+          "Unable to detach retained worktree",
+        );
+      }
+      requireGit(
+        this.root.worktree,
+        retainInPlace
+          ? [
+              "worktree",
+              "add",
+              "-b",
+              replacementBranch,
+              replacementPath,
+              branch.head,
+            ]
+          : ["worktree", "add", replacementPath, replacementBranch],
+        "Unable to allocate clean handoff replacement",
+      );
+      const replacement: MutableBranch = {
+        ...branch,
+        worktree: replacementPath,
+        branch: replacementBranch,
+        retired: false,
+        prepared: false,
+        preparationBaseline: [],
+        preparationChanges: new Map(),
+        trackedResiduals: new Map(),
+        untrackedResiduals: new Map(),
+      };
+      const scoped = scopedCheckpoints(replacement);
+      scoped.assertCleanHandoff();
+      this.mutableBranches.set(branchId, replacement);
+      this.checkpointTargets.set(branchId, scoped);
+      this.retainedHandoffs.set(retained, {
+        head: branch.head,
+        ...(retainInPlace ? { reference: `refs/heads/${branch.branch}` } : {}),
+      });
+      this.partialAllocations.delete(directory);
+      this.blockedHandoffs.delete(branchId);
+      return toSnapshot(replacement);
+    } catch (cause) {
+      throw new Error(
+        `Clean workspace handoff failed; recovery evidence retained at ${evidencePath}: ${diagnostic(cause)}`,
+        { cause },
+      );
+    }
+  }
+
+  // Legacy residual-aware verification; new recovery callers use ownership then handoff.
   verify(branchId: string, expectedHead?: string) {
     const branch = this.mutable(branchId);
     const actualBranch = readBranch(branch.worktree);
@@ -1318,6 +1824,8 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
         `Feature graph branch drift: expected ${branch.branch}, found ${actualBranch}.`,
       );
     }
+    if (expectedHead !== undefined && expectedHead !== branch.head)
+      throw new Error("Expected HEAD is not controller-owned.");
     const requiredHead = expectedHead ?? branch.head;
     if (actualHead !== requiredHead) {
       throw new Error(
@@ -1334,8 +1842,25 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       throw new Error("Feature graph worktree lifecycle is closed.");
     const parent = this.mutable(parentBranchId);
     this.verify(parentBranchId);
+    const verifySharedOwnership = () => {
+      for (const branch of this.mutableBranches.values()) {
+        if (!branch.removed) this.verifyOwnership(branch.id);
+      }
+    };
+    verifySharedOwnership();
+    const directoryIdentity = fs.statSync(this.runDirectory);
+    const verifyAllocationBoundary = () => {
+      verifySharedOwnership();
+      const current = fs.statSync(this.runDirectory);
+      if (
+        canonical(this.runDirectory) !== this.runDirectory ||
+        current.dev !== directoryIdentity.dev ||
+        current.ino !== directoryIdentity.ino
+      )
+        throw new Error("Worktree allocation directory identity changed.");
+    };
     const id = `branch-${number}-${safeSlug(firstTaskId)}`;
-    if (this.mutableBranches.has(id)) {
+    if (this.mutableBranches.has(id) || this.partialAllocations.has(id)) {
       throw new Error(
         `Feature graph branch number ${number} is already owned.`,
       );
@@ -1345,26 +1870,83 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
     if (fs.existsSync(worktree)) {
       throw new Error(`Owned child worktree path already exists: ${worktree}.`);
     }
-    try {
-      execFileSync(
-        "git",
-        ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`],
-        { cwd: parent.worktree, stdio: "ignore" },
-      );
-      throw new Error(`Owned child branch already exists: ${branchName}.`);
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message === `Owned child branch already exists: ${branchName}.`
-      ) {
-        throw error;
-      }
-    }
-    requireGit(
-      parent.worktree,
-      ["worktree", "add", "-q", "-b", branchName, worktree, parent.head],
-      `Unable to create child worktree ${id}`,
+    const reference = `refs/heads/${branchName}`;
+    const existing = spawnSync(
+      "git",
+      hostGitArguments(parent.worktree, [
+        "show-ref",
+        "--verify",
+        "--quiet",
+        reference,
+      ]),
+      {
+        cwd: parent.worktree,
+        env: gitEnvironment(),
+        encoding: "utf8",
+      },
     );
+    if (existing.error) throw existing.error;
+    if (existing.status === 0)
+      throw new Error(`Owned child branch already exists: ${branchName}.`);
+    if (existing.status !== 1)
+      throw new Error("Unable to establish child ref absence.");
+    // Helper inspection and all callbacks stay outside the operation catch.
+    const args = hostGitArguments(parent.worktree, [
+      "worktree",
+      "add",
+      "-q",
+      "-b",
+      branchName,
+      worktree,
+      parent.head,
+    ]);
+    this.partialAllocations.set(id, { worktree, reference, head: parent.head });
+    try {
+      execFileSync("git", args, {
+        cwd: parent.worktree,
+        env: gitEnvironment(),
+        encoding: "utf8",
+        maxBuffer: GIT_OUTPUT_LIMIT,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (cause) {
+      // Only an observed command exit is an allocation failure. Unknown JS,
+      // spawn, signal and buffer failures do not grant subtree-local authority.
+      if (
+        !(cause instanceof Error) ||
+        !("status" in cause) ||
+        typeof cause.status !== "number" ||
+        cause.status === 0
+      )
+        throw cause;
+      verifyAllocationBoundary();
+      for (const [resourceType, resource] of [
+        ["worktree", worktree],
+        ["ref", reference],
+      ] as const) {
+        const recorder = createCleanupRecorder(this.cleanupEvidence, {
+          resourceId: cleanupResource(resourceType, resource),
+          resourceType,
+          resource,
+          ownership: "controller",
+          phase: "feature-worktree-allocation",
+          expectedIdentity: parent.head,
+        });
+        recorder.intent();
+        recorder.outcome({
+          disposition: "retained",
+          operationStatus: "not_attempted",
+          reasonCode: "partial_allocation_retained",
+        });
+      }
+      verifyAllocationBoundary();
+      throw new FeatureSubtreeOperationError(
+        `Unable to create child worktree ${id}: ${diagnostic(cause)}`,
+        "worktree-allocation",
+        { cause },
+      );
+    }
+    verifyAllocationBoundary();
     const child: MutableBranch = {
       id,
       parentId: parent.id,
@@ -1384,6 +1966,8 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       refRemoved: false,
     };
     this.mutableBranches.set(id, child);
+    this.checkpointTargets.set(id, scopedCheckpoints(child));
+    this.partialAllocations.delete(id);
     return toSnapshot(child);
   }
 
@@ -1548,7 +2132,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       commit,
       new Set(branch.preparationChanges.keys()),
     );
-    recordTrackedResiduals(branch);
+    recordTrackedResiduals(branch, cleanup.residualPaths);
     return { commit, changedPaths, ...cleanup };
   }
 
@@ -1710,7 +2294,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
       commit,
       new Set(parent.preparationChanges.keys()),
     );
-    recordTrackedResiduals(parent);
+    recordTrackedResiduals(parent, cleanup.residualPaths);
     return {
       commit,
       changedPaths,
@@ -1760,6 +2344,8 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
   removeJoinedWorktree(branchId: string) {
     const branch = this.mutableBranches.get(branchId);
     if (!branch || !branch.owned) return [];
+    if (this.blockedHandoffs.has(branchId))
+      return [`Retained failed handoff resources for ${branchId}.`];
     const recorder = cleanupRecorder(this.cleanupEvidence, {
       resourceId: cleanupResource("worktree", branch.worktree),
       resourceType: "worktree",
@@ -1817,6 +2403,7 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
     for (const branch of [...this.mutableBranches.values()]
       .filter(({ owned }) => owned)
       .sort((left, right) => right.number - left.number)) {
+      if (this.blockedHandoffs.has(branch.id)) continue;
       const reference = `refs/heads/${branch.branch}`;
       const recorder = cleanupRecorder(this.cleanupEvidence, {
         resourceId: cleanupResource("ref", reference),
@@ -1917,6 +2504,66 @@ class GitFeatureTaskWorktreeLifecycle implements FeatureTaskWorktreeLifecycle {
   recordRetainedResources(reason: string) {
     const phase = "feature-worktree-lifecycle-cleanup";
     this.recordCallerOwnedRoot(reason, phase);
+    for (const [worktree, { head, reference }] of this.retainedHandoffs) {
+      if (reference)
+        recordCleanupDecision(
+          this.cleanupEvidence,
+          {
+            resourceId: cleanupResource("ref", reference),
+            resourceType: "ref",
+            resource: reference,
+            ownership: "controller",
+            phase,
+            expectedIdentity: head,
+          },
+          {
+            disposition: "retained",
+            operationStatus: "not_attempted",
+            reasonCode: "handoff_diagnostics_retained",
+            detail: reason,
+          },
+        );
+      recordCleanupDecision(
+        this.cleanupEvidence,
+        {
+          resourceId: cleanupResource("worktree", worktree),
+          resourceType: "worktree",
+          resource: worktree,
+          ownership: "controller",
+          phase,
+          expectedIdentity: head,
+        },
+        {
+          disposition: "retained",
+          operationStatus: "not_attempted",
+          reasonCode: "handoff_diagnostics_retained",
+          detail: reason,
+        },
+      );
+    }
+    for (const allocation of this.partialAllocations.values()) {
+      for (const [resourceType, resource] of [
+        ["worktree", allocation.worktree],
+        ["ref", allocation.reference],
+      ] as const) {
+        recordCleanupDecision(
+          this.cleanupEvidence,
+          {
+            resourceId: cleanupResource(resourceType, resource),
+            resourceType,
+            resource,
+            ownership: "controller",
+            phase,
+            expectedIdentity: allocation.head,
+          },
+          {
+            disposition: "retained",
+            operationStatus: "not_attempted",
+            reasonCode: reason,
+          },
+        );
+      }
+    }
     for (const branch of [...this.mutableBranches.values()]
       .filter(({ owned }) => owned)
       .sort((left, right) => right.number - left.number)) {
@@ -2003,6 +2650,7 @@ export function createFeatureRootTaskGitTarget(
   knownResidualPaths: ReadonlyArray<string> = [],
   knownTrackedResiduals: ReadonlyArray<FeatureTrackedResidualState> = [],
   cleanupEvidence?: CleanupEvidenceSink,
+  knownUntrackedResiduals: ReadonlyArray<FeatureTrackedResidualState> = [],
 ) {
   const worktree = canonical(workingDir);
   const branch = readBranch(worktree);
@@ -2017,12 +2665,28 @@ export function createFeatureRootTaskGitTarget(
     id: "root-review",
     worktree,
     trackedResiduals: new Map(suppliedTrackedResiduals),
+    untrackedResiduals: new Map(
+      knownUntrackedResiduals.map(({ path, fingerprint }) => [
+        path,
+        fingerprint,
+      ]),
+    ),
   };
   verifyTrackedResiduals(residualOwner);
   const preparationBaseline = [
     ...readUntracked(worktree),
     ...readIgnored(worktree),
   ];
+  const scoped = scopedCheckpoints({
+    worktree,
+    branch,
+    get head() {
+      return expectedHead;
+    },
+    set head(value: string) {
+      expectedHead = value;
+    },
+  });
   const isolateRecordedStaging = (commitPaths: ReadonlyArray<string>) => {
     const selected = new Set(commitPaths);
     assertRecordedResidualsUnchanged(residualOwner, selected);
@@ -2046,6 +2710,7 @@ export function createFeatureRootTaskGitTarget(
     return { selected, stagedBefore: readStaged(worktree) };
   };
   return {
+    ...scoped,
     branchId: "root",
     branch,
     worktree,
@@ -2071,6 +2736,8 @@ export function createFeatureRootTaskGitTarget(
     }),
     trackedResidualPaths: () =>
       [...residualOwner.trackedResiduals.keys()].sort(),
+    untrackedResidualPaths: () =>
+      [...(residualOwner.untrackedResiduals?.keys() ?? [])].sort(),
     preparationChanges: () => [],
     prepareFinalization: (commitPaths, discardPaths) => {
       const changed = new Set([
@@ -2150,7 +2817,7 @@ export function createFeatureRootTaskGitTarget(
         cleanupEvidence,
         commit,
       );
-      recordTrackedResiduals(residualOwner);
+      recordTrackedResiduals(residualOwner, cleanup.residualPaths);
       return {
         commit,
         changedPaths: changedBetween(worktree, baseCommit, commit),
@@ -2211,7 +2878,7 @@ export function createFeatureRootTaskGitTarget(
         cleanupEvidence,
         commit,
       );
-      recordTrackedResiduals(residualOwner);
+      recordTrackedResiduals(residualOwner, cleanup.residualPaths);
       return {
         commit,
         changedPaths: changedBetween(worktree, parent, commit),

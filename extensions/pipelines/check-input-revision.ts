@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isSafeRepositoryRelativePath } from "./feature-planning.ts";
@@ -20,6 +21,7 @@ export interface CheckInputRevision {
   readonly fingerprint: string;
   readonly paths: ReadonlyArray<string>;
   readonly bytes: number;
+  readonly contentByPath: Readonly<Record<string, string>>;
 }
 
 export interface CheckInputRevisionOptions {
@@ -112,9 +114,7 @@ function assertReadableDirectory(stats: fs.Stats, filePath: string) {
 }
 
 function statToken(stats: fs.Stats) {
-  return [stats.mode & 0xffff, stats.size, stats.mtimeMs, stats.ctimeMs].join(
-    ":",
-  );
+  return [stats.mode & 0o111, stats.size].join(":");
 }
 
 function sameFileStats(before: fs.Stats, after: fs.Stats) {
@@ -175,9 +175,8 @@ export function captureCheckInputRevision(options: CheckInputRevisionOptions) {
     ["conflictPaths", options.evidence.conflictPaths],
   ] as const;
   const paths = new Set<string>();
-  const fieldPaths = new Map<string, ReadonlyArray<string>>();
+  const contentByPath: Record<string, string> = {};
   for (const [field, values] of fields) {
-    const normalized: string[] = [];
     for (const filePath of values) {
       if (typeof filePath !== "string") {
         throw new Error(`Check input ${field} contains a non-string path.`);
@@ -191,27 +190,37 @@ export function captureCheckInputRevision(options: CheckInputRevisionOptions) {
         );
       }
       if (excludedPath(filePath)) continue;
-      normalized.push(filePath);
       paths.add(filePath);
     }
-    fieldPaths.set(field, [...new Set(normalized)].sort());
+    // Git categories are not content identity.
+  }
+  if (fs.existsSync(path.join(root, ".git"))) {
+    const tracked = execFileSync(
+      "git",
+      [
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+      ],
+      { cwd: root, maxBuffer: maxPaths * maxPathBytes },
+    )
+      .toString()
+      .split("\0")
+      .filter(Boolean);
+    for (const filePath of tracked) {
+      if (!isSafeRepositoryRelativePath(filePath))
+        throw new Error("Unsafe Git input path.");
+      if (!excludedPath(filePath)) paths.add(filePath);
+    }
   }
   if (paths.size > maxPaths) {
     throw new Error(
       `Check input path count exceeds the ${maxPaths}-path limit.`,
     );
-  }
-
-  const hash = createHash("sha256");
-  hash.update("pipi-check-input-revision-v1\0");
-  hash.update(`head\0${options.head}\0`);
-  hash.update(`diff\0${options.evidence.fingerprint}\0`);
-  for (const [field] of fields) {
-    hash.update(`${field}\0`);
-    for (const filePath of fieldPaths.get(field)!) {
-      hash.update(`${filePath}\0`);
-    }
-    hash.update("\0");
   }
 
   let bytes = 0;
@@ -251,7 +260,7 @@ export function captureCheckInputRevision(options: CheckInputRevisionOptions) {
       );
     }
 
-    hash.update(`file\0${filePath}\0${statToken(stats)}\0`);
+    const fileHash = createHash("sha256").update(statToken(stats));
     let file;
     try {
       file = fs.openSync(
@@ -280,7 +289,7 @@ export function captureCheckInputRevision(options: CheckInputRevisionOptions) {
         if (count === 0) {
           throw new Error(`Check input file ended early: ${filePath}.`);
         }
-        hash.update(chunk.subarray(0, count));
+        fileHash.update(chunk.subarray(0, count));
         offset += count;
       }
       let after;
@@ -294,8 +303,8 @@ export function captureCheckInputRevision(options: CheckInputRevisionOptions) {
           `Check input file changed while fingerprinting: ${filePath}.`,
         );
       }
-      hash.update("\0");
       bytes += stats.size;
+      contentByPath[filePath] = fileHash.digest("hex");
     } finally {
       fs.closeSync(file);
     }
@@ -305,16 +314,12 @@ export function captureCheckInputRevision(options: CheckInputRevisionOptions) {
     if (excludedPath(filePath)) return;
     countRecord(filePath);
     const stats = statPath(absolute);
-    if (!stats) {
-      hash.update(`missing\0${filePath}\0`);
-      return;
-    }
+    if (!stats) return;
     if (stats.isSymbolicLink()) {
       throw new Error(`Check input path is a symlink: ${filePath}.`);
     }
     if (stats.isDirectory()) {
       assertReadableDirectory(stats, filePath);
-      hash.update(`directory\0${filePath}\0${statToken(stats)}\0`);
       let directory;
       try {
         directory = fs.opendirSync(absolute);
@@ -349,7 +354,6 @@ export function captureCheckInputRevision(options: CheckInputRevisionOptions) {
         if (excludedPath(child)) continue;
         visit(child, path.join(absolute, name));
       }
-      hash.update("\0");
       return;
     }
     readFile(filePath, absolute, stats);
@@ -378,15 +382,21 @@ export function captureCheckInputRevision(options: CheckInputRevisionOptions) {
     }
     if (parentMissing) {
       countRecord(filePath);
-      hash.update(`missing\0${filePath}\0`);
       continue;
     }
     visit(filePath, absolute);
   }
 
   return {
-    fingerprint: hash.digest("hex"),
+    fingerprint: createHash("sha256")
+      .update(
+        JSON.stringify(
+          Object.entries(contentByPath).sort(([a], [b]) => a.localeCompare(b)),
+        ),
+      )
+      .digest("hex"),
     paths: [...paths].sort(),
     bytes,
+    contentByPath,
   } satisfies CheckInputRevision;
 }

@@ -21,7 +21,10 @@ import {
 } from "./controller.ts";
 import { inspectPipeline, PIPELINE_CHECK_MAX_BYTES } from "./inspection.ts";
 import { executeFeatureGraph } from "./feature-graph-executor.ts";
-import { createFeatureReviewRuntime } from "./feature-task-runtime.ts";
+import {
+  createFeatureReviewRuntime,
+  type FeatureTaskToolHost,
+} from "./feature-task-runtime.ts";
 import { pipelineSessionToolPolicy, pipelineThinkingLevel } from "./session.ts";
 import { buildPipelineRows, cancelPipelineRow } from "./dashboard.ts";
 import {
@@ -132,7 +135,10 @@ class FakePipelineSession implements AgentTreeSession {
   readonly sessionFile: string;
   isStreaming = false;
   interrupted = 0;
-  disposed = 0;
+  disposeCount = 0;
+  get disposed() {
+    return this.disposeCount > 0;
+  }
   mutationEnabled = 0;
   interruptError: Error | undefined;
 
@@ -218,7 +224,7 @@ class FakePipelineSession implements AgentTreeSession {
   }
 
   dispose() {
-    this.disposed++;
+    this.disposeCount++;
   }
 }
 
@@ -494,6 +500,19 @@ function harness(
     autoCompleteFeatureDiscovery?: boolean;
     autoCompleteFeaturePlanning?: boolean;
     realFeatureExecution?: boolean;
+    recoverFeatureFirstTurn?: boolean;
+    plannerRecoveryMode?:
+      | "retry"
+      | "blocked"
+      | "invalid"
+      | "invalid-json"
+      | "send-error"
+      | "settled-error"
+      | "request-write-error"
+      | "decision-write-error"
+      | "cancel";
+    loseFeatureSessionOnce?: boolean;
+    failFeatureReplacementAfterAdmissionOnce?: boolean;
     malformedFeatureCandidateOnce?: boolean;
     malformedFeatureGraphOnce?: boolean;
     autoCompleteDiscoverySynthesis?: boolean;
@@ -524,6 +543,16 @@ function harness(
   const handoffs: PipelineHandoff[] = [];
   const lifecycles: FakeFeatureLifecycle[] = [];
   const featureExecutionSignals: AbortSignal[] = [];
+  const lostFeatureRoles = new Set<string>();
+  const plannerAdvisedRoles = new Set<string>();
+  let plannerRecoveryTurns = 0;
+  const revokedHostProbes: Array<() => Promise<unknown>> = [];
+  const lostCheckpoints: string[] = [];
+  const failedReplacementCandidates: Array<{
+    spec: AgentNodeSpec;
+    host: FeatureTaskToolHost;
+    checkpoint: string;
+  }> = [];
   const featureReviewSignals: AbortSignal[] = [];
   const featureReviewDiffBases: Array<string | undefined> = [];
   const featureReviewKnownResidualPaths: ReadonlyArray<string>[] = [];
@@ -779,12 +808,74 @@ function harness(
             session.interruptError = new Error("root cancellation rejected");
           }
           if (options.realFeatureExecution) {
+            const failedCandidate = failedReplacementCandidates.find(
+              ({ spec: failed }) => failed.role === spec.role,
+            );
+            if (failedCandidate) {
+              // The failed factory's authority must already be revoked before
+              // the next candidate is admitted, with its checkpoint intact.
+              assert.equal(failedCandidate.host.authoritySignal?.aborted, true);
+              await assert.rejects(
+                () => failedCandidate.host.diff(),
+                /revoked|authority|lease/i,
+              );
+              assert.equal(
+                execFileSync("git", ["rev-parse", "HEAD"], {
+                  cwd: spec.cwd,
+                  encoding: "utf8",
+                }).trim(),
+                failedCandidate.checkpoint,
+              );
+            }
+            const admittedHost = featureTaskHost?.(
+              spec.scopeId!,
+              spec.role,
+              spec.id!,
+            );
+            if (
+              options.failFeatureReplacementAfterAdmissionOnce &&
+              lostFeatureRoles.has(spec.role) &&
+              !failedReplacementCandidates.some(
+                ({ spec: failed }) => failed.role === spec.role,
+              )
+            ) {
+              assert.ok(admittedHost);
+              assert.equal(admittedHost.authoritySignal?.aborted, false);
+              failedReplacementCandidates.push({
+                spec,
+                host: admittedHost,
+                checkpoint: execFileSync("git", ["rev-parse", "HEAD"], {
+                  cwd: spec.cwd,
+                  encoding: "utf8",
+                }).trim(),
+              });
+              throw new Error(
+                "Synthetic replacement factory failure after admission",
+              );
+            }
             const originalPrompt = session.prompt.bind(session);
             const originalSend = session.send.bind(session);
+            let executionTurns = 0;
             const finishRealTask = async () => {
               session.isStreaming = true;
+              executionTurns++;
+              if (
+                (options.recoverFeatureFirstTurn && executionTurns === 1) ||
+                (options.plannerRecoveryMode &&
+                  spec.role.startsWith("feature-task-") &&
+                  !plannerAdvisedRoles.has(spec.role))
+              ) {
+                session.emit({
+                  type: "settled",
+                  outcome: {
+                    type: "completed",
+                    finalText: "Need a repair continuation before acceptance.",
+                  },
+                });
+                return;
+              }
               try {
-                const host = featureTaskHost?.(spec.scopeId!, spec.role);
+                const host = admittedHost;
                 assert.ok(host);
                 const worker = spec.role.startsWith("feature-task-");
                 const file = `output-${spec.role.slice("feature-task-".length)}.txt`;
@@ -793,8 +884,45 @@ function harness(
                     path.join(spec.cwd, file),
                     "verified output\n",
                   );
+                if (
+                  worker &&
+                  options.loseFeatureSessionOnce &&
+                  !lostFeatureRoles.has(spec.role)
+                ) {
+                  lostFeatureRoles.add(spec.role);
+                  assert.ok(host.stage);
+                  assert.ok(host.checkpoint);
+                  await host.stage({ action: "stage", paths: [file] });
+                  await host.checkpoint({
+                    message: "Checkpoint before technical session loss",
+                  });
+                  lostCheckpoints.push(
+                    execFileSync("git", ["rev-parse", "HEAD"], {
+                      cwd: spec.cwd,
+                      encoding: "utf8",
+                    }).trim(),
+                  );
+                  revokedHostProbes.push(() => host.diff());
+                  session.dispose();
+                  session.emit({
+                    type: "settled",
+                    outcome: {
+                      type: "failed",
+                      error: "Synthetic adapter disposal",
+                    },
+                  });
+                  return;
+                }
+                const resumedCheckpoint =
+                  worker && lostFeatureRoles.has(spec.role);
+                if (resumedCheckpoint)
+                  await host.check({
+                    checkId: `${spec.role.slice("feature-task-".length)}-output`,
+                  });
                 const result = await host.finalize({
-                  commitPaths: worker ? [file] : [],
+                  ...(resumedCheckpoint
+                    ? {}
+                    : { commitPaths: worker ? [file] : [] }),
                   summary:
                     "Synthetic session finalized through real controller task tools.",
                 });
@@ -823,10 +951,91 @@ function harness(
                 await finishRealTask();
               } else await originalPrompt(text);
             };
+            if (
+              options.plannerRecoveryMode === "request-write-error" &&
+              spec.role.startsWith("feature-task-")
+            ) {
+              fs.mkdirSync(
+                path.join(
+                  artifactRoot,
+                  spec.scopeId!,
+                  "planner-recovery-1-request.json",
+                ),
+                { recursive: true },
+              );
+            }
             session.send = async (text) => {
               if (
+                options.plannerRecoveryMode &&
                 spec.role === FEATURE_FINALIZER_ROLE &&
-                session.mutationEnabled > 0
+                controller.get(spec.scopeId!)?.stage === "build"
+              ) {
+                plannerRecoveryTurns++;
+                const recoveryRequest = JSON.parse(
+                  fs.readFileSync(
+                    path.join(
+                      artifactRoot,
+                      spec.scopeId!,
+                      `planner-recovery-${plannerRecoveryTurns}-request.json`,
+                    ),
+                    "utf8",
+                  ),
+                );
+                plannerAdvisedRoles.add(recoveryRequest.role);
+                session.sends.push(text);
+                if (options.plannerRecoveryMode === "cancel") {
+                  void controller.cancelRun(spec.scopeId!);
+                  throw new Error("Planner send interrupted by cancellation");
+                }
+                if (options.plannerRecoveryMode === "decision-write-error") {
+                  fs.mkdirSync(
+                    path.join(
+                      artifactRoot,
+                      spec.scopeId!,
+                      "planner-recovery-1-decision.json",
+                    ),
+                  );
+                }
+                if (options.plannerRecoveryMode === "send-error")
+                  throw new Error("Injected planner send failure");
+                session.emit({ type: "run_started" });
+                if (options.plannerRecoveryMode === "settled-error") {
+                  session.emit({
+                    type: "settled",
+                    outcome: {
+                      type: "failed",
+                      error: "Injected planner settlement failure",
+                    },
+                  });
+                  return;
+                }
+                session.emit({
+                  type: "settled",
+                  outcome: {
+                    type: "completed",
+                    finalText:
+                      options.plannerRecoveryMode === "invalid-json"
+                        ? "{"
+                        : JSON.stringify({
+                            schemaVersion: 1,
+                            taskId: recoveryRequest.taskId,
+                            attempt: recoveryRequest.attempt,
+                            action:
+                              options.plannerRecoveryMode ===
+                              "decision-write-error"
+                                ? "retry"
+                                : options.plannerRecoveryMode,
+                            message:
+                              "Revisit the existing implementation sketch and repair the workspace; all checks remain required.",
+                          }),
+                  },
+                });
+                return;
+              }
+              if (
+                spec.role.startsWith("feature-task-") ||
+                (spec.role === FEATURE_FINALIZER_ROLE &&
+                  session.mutationEnabled > 0)
               ) {
                 session.sends.push(text);
                 session.emit({ type: "run_started" });
@@ -900,6 +1109,9 @@ function harness(
         warnings: [],
         residualPaths: ["child-only-residual.log"],
         rootResidualPaths: ["root-review-residual.log"],
+        rootUntrackedResiduals: [
+          { path: "retained-untracked.log", fingerprint: "b".repeat(64) },
+        ],
         rootTrackedResiduals: [
           {
             path: "root-review-residual.log",
@@ -923,6 +1135,9 @@ function harness(
       featureReviewDiffBases.push(input.diffBaseCommit);
       featureReviewKnownResidualPaths.push([
         ...(input.knownResidualPaths ?? []),
+      ]);
+      assert.deepEqual(input.knownUntrackedResiduals, [
+        { path: "retained-untracked.log", fingerprint: "b".repeat(64) },
       ]);
       assert.deepEqual(input.knownTrackedResiduals, [
         {
@@ -1017,6 +1232,11 @@ function harness(
     featureReviewDiffBases,
     featureReviewKnownResidualPaths,
     featureGraphBaselineChecks,
+    revokedHostProbes,
+    plannerAdvisedRoles,
+    plannerRecoveryTurns: () => plannerRecoveryTurns,
+    lostCheckpoints,
+    failedReplacementCandidates,
     readinessCalls,
     get planningReadinessCheck() {
       return planningReadinessCheckCallback;
@@ -2310,11 +2530,315 @@ test("cancelled production runs preserve diagnostic refs and completed implement
   }
 });
 
-test("production controller completes real Git and sandbox execution through review, audit handoff and cleanup", async () => {
+for (const failReplacement of [false, true])
+  test(
+    `production controller replaces disposed task sessions without losing checkpoints or old-session fencing${failReplacement ? " after replacement factory throws following host admission" : ""}`,
+    { timeout: 20_000 },
+    async () => {
+      const fixture = createLinkedWorktreeFixture("controller-lost-feature-");
+      const worktreeRoot = path.join(fixture.root, "task-worktrees");
+      fs.mkdirSync(worktreeRoot);
+      const run = harness({
+        realFeatureExecution: true,
+        loseFeatureSessionOnce: true,
+        failFeatureReplacementAfterAdmissionOnce: failReplacement,
+      });
+      try {
+        const runId = run.controller.start({
+          ...request(fixture.linked),
+          worktreeRoot,
+        });
+        await waitForRealAudit(run, runId);
+        const workers = run.sessions.filter(({ spec }) =>
+          spec.role.startsWith("feature-task-"),
+        );
+        assert.equal(workers.length, 4);
+        for (const role of new Set(workers.map(({ spec }) => spec.role))) {
+          const attempts = workers.filter(({ spec }) => spec.role === role);
+          assert.equal(attempts.length, 2);
+          assert.notEqual(attempts[0]!.spec.id, attempts[1]!.spec.id);
+          assert.equal(attempts[0]!.sends.length, 0);
+          assert.equal(attempts[1]!.prompts.length, 1);
+        }
+        assert.equal(
+          run.failedReplacementCandidates.length,
+          failReplacement ? 2 : 0,
+        );
+        for (const {
+          spec,
+          host,
+          checkpoint,
+        } of run.failedReplacementCandidates) {
+          const attempts = workers.filter(
+            ({ spec: worker }) => worker.role === spec.role,
+          );
+          assert.ok(spec.id);
+          assert.ok(
+            attempts.every(({ spec: worker }) => worker.id !== spec.id),
+          );
+          assert.equal(spec.cwd, attempts[0]!.spec.cwd);
+          assert.equal(spec.cwd, attempts[1]!.spec.cwd);
+          assert.equal(host.authoritySignal?.aborted, true);
+          assert.ok(host.prepare);
+          assert.ok(host.stage);
+          assert.ok(host.checkpoint);
+          const file = `output-${spec.role.slice("feature-task-".length)}.txt`;
+          // Task worktrees have been retired by the audit boundary.
+          const head = execFileSync("git", ["rev-parse", "HEAD"], {
+            cwd: fixture.linked,
+            encoding: "utf8",
+          }).trim();
+          assert.ok(run.lostCheckpoints.includes(checkpoint));
+          const probes = [
+            () => host.diff(),
+            () =>
+              host.check({
+                checkId: `${spec.role.slice("feature-task-".length)}-output`,
+              }),
+            () =>
+              host.prepare!({
+                command: "touch forbidden-prepare",
+                cwd: ".",
+                purpose: "Probe revoked authority",
+              }),
+            () => host.stage!({ action: "stage", paths: [file] }),
+            () => host.stage!({ action: "unstage", paths: [file] }),
+            () => host.checkpoint!({ message: "Forbidden stale checkpoint" }),
+            () =>
+              host.finalize({
+                commitPaths: [file],
+                summary: "Forbidden stale acceptance",
+              }),
+          ];
+          for (const probe of probes)
+            await assert.rejects(probe, /revoked|authority|lease/i);
+          assert.equal(
+            fs.existsSync(path.join(spec.cwd, "forbidden-prepare")),
+            false,
+          );
+          assert.equal(
+            execFileSync("git", ["rev-parse", "HEAD"], {
+              cwd: fixture.linked,
+              encoding: "utf8",
+            }).trim(),
+            head,
+          );
+          assert.equal(
+            execFileSync("git", ["status", "--porcelain"], {
+              cwd: fixture.linked,
+              encoding: "utf8",
+            }).trim(),
+            "",
+          );
+        }
+        assert.equal(run.lostCheckpoints.length, 2);
+        assert.equal(run.revokedHostProbes.length, 2);
+        for (const probe of run.revokedHostProbes) await assert.rejects(probe);
+        const tasks = run.controller
+          .get(runId)!
+          .featureGraph!.tasks.filter(({ kind }) => kind === "task");
+        assert.equal(tasks.length, 2);
+        for (const task of tasks) {
+          assert.equal(task.status, "validated");
+          assert.ok(task.commitRange);
+          assert.ok(run.lostCheckpoints.includes(task.commitRange.headCommit));
+        }
+      } finally {
+        await run.controller.dispose();
+        fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+test(
+  "production controller consults its read-only planner and persists decisions before task recovery",
+  { timeout: 20_000 },
+  async () => {
+    const fixture = createLinkedWorktreeFixture("controller-planner-recovery-");
+    const worktreeRoot = path.join(fixture.root, "task-worktrees");
+    fs.mkdirSync(worktreeRoot);
+    const run = harness({
+      realFeatureExecution: true,
+      plannerRecoveryMode: "retry",
+    });
+    try {
+      const runId = run.controller.start({
+        ...request(fixture.linked),
+        worktreeRoot,
+      });
+      await waitForRealAudit(run, runId);
+      assert.equal(run.plannerRecoveryTurns(), 2);
+      const workers = run.sessions.filter(({ spec }) =>
+        spec.role.startsWith("feature-task-"),
+      );
+      assert.equal(workers.length, 2);
+      for (const worker of workers) {
+        assert.equal(worker.prompts.length, 1);
+        assert.equal(worker.sends.length, 3);
+      }
+      for (const ordinal of [1, 2]) {
+        const directory = path.join(run.artifactRoot, runId);
+        const request = JSON.parse(
+          fs.readFileSync(
+            path.join(directory, `planner-recovery-${ordinal}-request.json`),
+            "utf8",
+          ),
+        );
+        const decision = JSON.parse(
+          fs.readFileSync(
+            path.join(directory, `planner-recovery-${ordinal}-decision.json`),
+            "utf8",
+          ),
+        );
+        assert.equal(decision.action, "retry");
+        assert.equal(decision.taskId, request.taskId);
+        assert.equal(decision.attempt, request.attempt);
+        assert.equal(request.attempt, 3);
+      }
+      assert.ok(
+        run.controller
+          .get(runId)!
+          .featureGraph!.tasks.every(({ status }) => status === "validated"),
+      );
+      assert.equal(
+        run.sessions.filter(({ spec }) => spec.role === FEATURE_FINALIZER_ROLE)
+          .length,
+        1,
+      );
+    } finally {
+      await run.controller.dispose();
+      fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+for (const plannerRecoveryMode of [
+  "blocked",
+  "invalid",
+  "invalid-json",
+  "send-error",
+  "settled-error",
+  "request-write-error",
+  "decision-write-error",
+  "cancel",
+] as const) {
+  test(
+    `production controller cannot turn ${plannerRecoveryMode} planner advice into acceptance`,
+    { timeout: 20_000 },
+    async () => {
+      const fixture = createLinkedWorktreeFixture(
+        `controller-planner-${plannerRecoveryMode}-`,
+      );
+      const worktreeRoot = path.join(fixture.root, "task-worktrees");
+      fs.mkdirSync(worktreeRoot);
+      const run = harness({ realFeatureExecution: true, plannerRecoveryMode });
+      try {
+        const runId = run.controller.start({
+          ...request(fixture.linked),
+          worktreeRoot,
+        });
+        const handoff = await waitForHandoff(run, runId);
+        assert.equal(
+          run.controller.get(runId)?.status,
+          plannerRecoveryMode === "cancel" ? "cancelled" : "failed",
+        );
+        const blocked = plannerRecoveryMode === "blocked";
+        const requestWriteFailure =
+          plannerRecoveryMode === "request-write-error";
+        const decisionWriteFailure =
+          plannerRecoveryMode === "decision-write-error";
+        assert.equal(
+          handoff.evidenceIncomplete,
+          requestWriteFailure || decisionWriteFailure,
+        );
+        assert.equal(
+          run.plannerRecoveryTurns(),
+          blocked ? 2 : requestWriteFailure ? 0 : 1,
+        );
+        if (plannerRecoveryMode === "send-error")
+          assert.match(handoff.error ?? "", /Injected planner send failure/);
+        if (plannerRecoveryMode === "settled-error")
+          assert.match(
+            handoff.error ?? "",
+            /Injected planner settlement failure/,
+          );
+        const directory = path.join(run.artifactRoot, runId);
+        assert.ok(
+          fs.existsSync(
+            path.join(directory, "planner-recovery-1-request.json"),
+          ),
+        );
+        if (!requestWriteFailure) {
+          const persistedRequest = JSON.parse(
+            fs.readFileSync(
+              path.join(directory, "planner-recovery-1-request.json"),
+              "utf8",
+            ),
+          );
+          assert.equal(persistedRequest.attempt, 3);
+          assert.equal(typeof persistedRequest.taskId, "string");
+        }
+        if (!blocked) {
+          const decisionPath = path.join(
+            directory,
+            "planner-recovery-1-decision.json",
+          );
+          assert.equal(
+            fs.existsSync(decisionPath) && fs.statSync(decisionPath).isFile(),
+            false,
+          );
+          assert.equal(
+            fs.existsSync(
+              path.join(directory, "planner-recovery-2-request.json"),
+            ),
+            false,
+          );
+        }
+        for (const ordinal of blocked ? [1, 2] : []) {
+          const decision = JSON.parse(
+            fs.readFileSync(
+              path.join(
+                run.artifactRoot,
+                runId,
+                `planner-recovery-${ordinal}-decision.json`,
+              ),
+              "utf8",
+            ),
+          );
+          assert.equal(decision.action, "blocked");
+        }
+        const tasks = run.controller
+          .get(runId)!
+          .featureGraph!.tasks.filter(({ kind }) => kind === "task");
+        assert.equal(tasks.length, 2);
+        for (const task of tasks) {
+          if (blocked) {
+            assert.equal(task.status, "failed");
+            assert.equal(task.attempt, 3);
+          } else {
+            assert.ok(["cancelled", "failed"].includes(task.status));
+          }
+          assert.equal(task.validatedCommit, undefined);
+        }
+      } finally {
+        await run.controller.dispose();
+        fs.rmSync(run.artifactRoot, { recursive: true, force: true });
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+}
+
+test("production controller reuses task and review sessions during real Git recovery, audit and cleanup", async () => {
   const fixture = createLinkedWorktreeFixture("controller-real-feature-");
   const worktreeRoot = path.join(fixture.root, "task-worktrees");
   fs.mkdirSync(worktreeRoot);
-  const run = harness({ realFeatureExecution: true });
+  const run = harness({
+    realFeatureExecution: true,
+    recoverFeatureFirstTurn: true,
+  });
   try {
     const runId = run.controller.start({
       ...request(fixture.linked),
@@ -2322,6 +2846,22 @@ test("production controller completes real Git and sandbox execution through rev
     });
     await waitForRealAudit(run, runId);
     const reviewed = run.controller.get(runId)!;
+    const workers = run.sessions.filter(({ spec }) =>
+      spec.role.startsWith("feature-task-"),
+    );
+    assert.equal(workers.length, 2);
+    for (const worker of workers) {
+      assert.equal(worker.prompts.length, 1);
+      assert.equal(worker.sends.length, 1);
+    }
+    for (const { spec } of workers) {
+      assert.equal(spec.model, ASTRA_MODEL);
+      assert.equal(spec.thinkingLevel, "low");
+      assert.equal(
+        pipelineThinkingLevel(spec.model, spec.thinkingLevel),
+        "low",
+      );
+    }
     assert.equal(reviewed.featureGraph?.planning.review, "accepted");
     assert.equal(
       reviewed.featureGraph?.tasks.filter(({ kind }) => kind === "task").length,
@@ -2487,6 +3027,7 @@ test("feature controller accepts corrected Astra plans, persists artifacts, exec
     .filter((name) => name !== "artifacts" && name !== "manifest.json")
     .sort();
   assert.deepEqual(featureArtifacts, [
+    "accepted-task-1.json",
     "candidate-minimal.json",
     "candidate-robust.json",
     "canonical-plan.json",
@@ -2667,7 +3208,7 @@ test("concurrent feature cancellation is coalesced and isolates another run", as
     (session) => session.spec.scopeId === runId && !session.spec.parentId,
   );
   assert.equal(rootSession?.interrupted, 0);
-  assert.equal(rootSession?.disposed, 1);
+  assert.equal(rootSession?.disposeCount, 1);
   assert.equal(run.handoffs.length, 1);
   assert.equal(run.controller.get(unrelatedId)?.status, "running");
   assert.deepEqual(
@@ -2698,7 +3239,7 @@ test("root cancellation rejection still cleans and hands off exactly once", asyn
     (session) => session.spec.scopeId === runId && session.spec.id === rootId,
   );
   assert.equal(rootSession?.interrupted, 1);
-  assert.equal(rootSession?.disposed, 1);
+  assert.equal(rootSession?.disposeCount, 1);
   assert.equal(
     run.controller
       .get(runId)
@@ -2870,7 +3411,7 @@ test("feature discovery submission scope is fixed to active feature discovery ro
   }
 });
 
-test("failed planning readiness retains both streams in a readable artifact and stops implementation admission", async () => {
+test("failed planning readiness retains both streams and reaches implementation recovery", async () => {
   const stdout = "readiness stdout diagnostic\n";
   const stderr = "readiness stderr diagnostic\n";
   const run = harness({
@@ -2878,10 +3419,9 @@ test("failed planning readiness retains both streams in a readable artifact and 
   });
   const runId = run.controller.start(request());
   try {
-    await waitForHandoff(run, runId);
+    await waitForControllerState(run, runId, featureAuditReady);
     const snapshot = run.controller.get(runId);
-    assert.equal(snapshot?.status, "failed");
-    assert.equal(snapshot?.stage, "discover");
+    assert.equal(snapshot?.status, "running");
     const readiness = snapshot?.planningReadiness?.[0];
     assert.ok(readiness);
     assert.equal(readiness.status, "failed");
@@ -2893,10 +3433,10 @@ test("failed planning readiness retains both streams in a readable artifact and 
       run.sessions.some((session) =>
         FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
       ),
-      false,
+      true,
     );
-    assert.equal(run.featureGraphBaselineChecks.length, 0);
-    assert.equal(run.featureExecutionSignals.length, 0);
+    assert.equal(run.featureGraphBaselineChecks.length, 1);
+    assert.equal(run.featureExecutionSignals.length, 1);
 
     const manifest = await run.controller.readArtifact(runId);
     if (!Array.isArray(manifest))
@@ -2979,27 +3519,27 @@ test("planning readiness rejects wrong roles and tokens before and after discove
   }
 });
 
-test("unverified planning readiness source fails before invoking the command runner or planners", async () => {
+test("unconfirmed readiness provenance is recorded separately from sandboxed execution", async () => {
   const run = harness({ readinessMode: "unverified" });
   const runId = run.controller.start(request());
   try {
-    await waitForHandoff(run, runId);
+    await waitForControllerState(run, runId, featureAuditReady);
     const snapshot = run.controller.get(runId);
-    assert.equal(snapshot?.status, "failed");
-    assert.equal(snapshot?.stage, "discover");
+    assert.equal(snapshot?.status, "running");
     const readiness = snapshot?.planningReadiness?.[0];
     assert.ok(readiness);
-    assert.equal(readiness.status, "failed");
+    assert.equal(readiness.status, "passed");
     assert.equal(readiness.sourceHash, undefined);
-    assert.match(readiness.error ?? "", /does not contain the exact excerpt/);
-    assert.equal(run.readinessCalls.length, 0);
+    assert.equal(readiness.provenance?.status, "uncertain");
+    assert.equal(readiness.execution, "completed");
+    assert.equal(run.readinessCalls.length, 1);
     assert.equal(
       run.sessions.some((session) =>
         FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
       ),
-      false,
+      true,
     );
-    assert.equal(run.featureExecutionSignals.length, 0);
+    assert.equal(run.featureExecutionSignals.length, 1);
   } finally {
     await run.controller.dispose();
     fs.rmSync(run.artifactRoot, { recursive: true, force: true });
@@ -3080,24 +3620,23 @@ test("a passed source-confirmed readiness result admits planners and the graph w
   }
 });
 
-test("feature planning fails before planners when discovery records no readiness check", async () => {
+test("missing readiness observations remain unproven without preventing execution", async () => {
   const run = harness({ readinessMode: "none" });
   const runId = run.controller.start(request());
   try {
-    await waitForHandoff(run, runId);
+    await waitForControllerState(run, runId, featureAuditReady);
     const snapshot = run.controller.get(runId);
-    assert.equal(snapshot?.status, "failed");
-    assert.equal(snapshot?.stage, "discover");
+    assert.equal(snapshot?.status, "running");
     assert.deepEqual(snapshot?.planningReadiness ?? [], []);
     assert.equal(run.readinessCalls.length, 0);
     assert.equal(
       run.sessions.some((session) =>
         FEATURE_PLAN_ROLES.some((role) => role === session.spec.role),
       ),
-      false,
+      true,
     );
-    assert.equal(run.featureGraphBaselineChecks.length, 0);
-    assert.equal(run.featureExecutionSignals.length, 0);
+    assert.equal(run.featureGraphBaselineChecks.length, 1);
+    assert.equal(run.featureExecutionSignals.length, 1);
   } finally {
     await run.controller.dispose();
     fs.rmSync(run.artifactRoot, { recursive: true, force: true });
@@ -3148,7 +3687,7 @@ test("planning readiness cancellation aborts the injected command before planner
   }
 });
 
-test("feature graph corrects an unknown baseline to the passed readiness command and cwd", async () => {
+test("feature graph accepts a new baseline recipe without matching readiness commands", async () => {
   const run = harness({
     readinessGraphBaseline: true,
     unknownGraphBaselineOnce: true,
@@ -3160,13 +3699,13 @@ test("feature graph corrects an unknown baseline to the passed readiness command
     assert.equal(snapshot?.status, "running");
     assert.equal(snapshot?.stage, "audit");
     assert.deepEqual(run.featureGraphBaselineChecks, [
-      [{ command: PLANNING_READINESS_COMMAND, cwd: "." }],
+      [{ command: unknownReadinessBaselineCheck().command, cwd: "." }],
     ]);
     const finalizer = run.sessions.find(
       (session) => session.spec.role === FEATURE_FINALIZER_ROLE,
     );
     assert.ok(finalizer);
-    assert.equal(finalizer.sends.length, 4);
+    assert.equal(finalizer.sends.length, 3);
     assert.equal(run.featureExecutionSignals.length, 1);
   } finally {
     await run.controller.dispose();
@@ -3174,25 +3713,24 @@ test("feature graph corrects an unknown baseline to the passed readiness command
   }
 });
 
-test("feature graph rejects an unknown baseline after the existing correction budget", async () => {
+test("new baseline recipes do not consume planning correction turns", async () => {
   const run = harness({
     readinessGraphBaseline: true,
     unknownGraphBaselineAlways: true,
   });
   const runId = run.controller.start(request());
   try {
-    await waitForHandoff(run, runId);
+    await waitForControllerState(run, runId, featureAuditReady);
     const snapshot = run.controller.get(runId);
-    assert.equal(snapshot?.status, "failed");
-    assert.equal(snapshot?.stage, "plan");
-    assert.match(snapshot?.error ?? "", /rejected settled turn 4/);
+    assert.equal(snapshot?.status, "running");
+    assert.equal(snapshot?.stage, "audit");
     const finalizer = run.sessions.find(
       (session) => session.spec.role === FEATURE_FINALIZER_ROLE,
     );
     assert.ok(finalizer);
-    assert.equal(finalizer.sends.length, 5);
-    assert.equal(run.featureGraphBaselineChecks.length, 0);
-    assert.equal(run.featureExecutionSignals.length, 0);
+    assert.equal(finalizer.sends.length, 3);
+    assert.equal(run.featureGraphBaselineChecks.length, 1);
+    assert.equal(run.featureExecutionSignals.length, 1);
   } finally {
     await run.controller.dispose();
     fs.rmSync(run.artifactRoot, { recursive: true, force: true });
@@ -3360,7 +3898,7 @@ test("dashboard cancellation of a starting run prevents its root prompt", async 
 
   assert.equal(run.sessions.length, 1);
   assert.equal(run.sessions[0]?.prompts.length, 0);
-  assert.equal(run.sessions[0]?.disposed, 1);
+  assert.equal(run.sessions[0]?.disposeCount, 1);
   assert.equal(run.controller.get(runId)?.rootId, "node-1");
   assert.equal(run.controller.get(runId)?.agents[0]?.status, "cancelled");
   assert.equal(
@@ -3898,6 +4436,30 @@ test("roles select fixed models, remain direct root children, and record attempt
   });
   assert.equal(first.model, LUNA_MODEL);
   assert.equal(retry.model, LUNA_MODEL);
+  const lunaRoles = new Set<string>([
+    ...FEATURE_PIPELINE_DISCOVERY_ROLES,
+    ...STATIC_LUNA_AUDIT_ROLES,
+    ...AUDIT_SEGMENT_LUNA_ROLES,
+    "audit-synthesis",
+  ]);
+  for (const session of run.sessions.filter(({ spec }) =>
+    lunaRoles.has(spec.role),
+  )) {
+    assert.equal(session.spec.model, LUNA_MODEL);
+    assert.equal(
+      pipelineThinkingLevel(session.spec.model, session.spec.thinkingLevel),
+      "medium",
+    );
+  }
+  for (const agent of [first, retry, ...finalAgents]) {
+    const session = run.sessions.find(({ spec }) => spec.id === agent.id);
+    assert.ok(session);
+    assert.equal(session.spec.model, LUNA_MODEL);
+    assert.equal(
+      pipelineThinkingLevel(session.spec.model, session.spec.thinkingLevel),
+      "medium",
+    );
+  }
   assert.equal(
     finalAgents.every((agent) => agent.model === LUNA_MODEL),
     true,
@@ -3910,8 +4472,8 @@ test("roles select fixed models, remain direct root children, and record attempt
   );
   assert.equal(first.attempt, 1);
   assert.equal(retry.attempt, 2);
-  assert.equal(run.controller.getAgent(runId, rootId).model, LUNA_MODEL);
-  assert.equal(run.controller.getAgent(runId, rootId).thinkingLevel, "xhigh");
+  assert.equal(run.controller.getAgent(runId, rootId).model, ASTRA_MODEL);
+  assert.equal(run.controller.getAgent(runId, rootId).thinkingLevel, "low");
   assert.equal(pipelineThinkingLevel(SOL_MODEL), "high");
   assert.equal(pipelineThinkingLevel(TERRA_MODEL), "high");
   assert.equal(pipelineThinkingLevel(LUNA_MODEL, "xhigh"), "xhigh");
@@ -4586,7 +5148,7 @@ test("a settled child can be retried in its existing session", async () => {
   await run.controller.dispose();
 });
 
-test("persistent Luna session survives idle remediation turns", async () => {
+test("persistent Astra low root survives audit and same-session final remediation", async () => {
   const run = harness();
   const runId = run.controller.start(request());
   await waitForControllerState(run, runId, featureAuditReady);
@@ -4600,6 +5162,12 @@ test("persistent Luna session survives idle remediation turns", async () => {
     outcome: { type: "completed", finalText: "implementation turn" },
   });
   assert.equal(run.controller.agentView.get(rootId)?.status, "idle");
+  assert.equal(rootSession.spec.model, ASTRA_MODEL);
+  assert.equal(rootSession.spec.thinkingLevel, "low");
+  assert.equal(rootSession.spec.persistent, true);
+  await finishEmbeddedAudit(run, runId, true, [finalAuditFinding()]);
+  assert.equal(run.controller.get(runId)?.rootId, rootId);
+  assert.equal(run.controller.get(runId)?.stage, "final-resolve");
 
   run.controller.agentView.requestSend(rootId, "Resolve the audit reports");
   await waitForControllerState(
@@ -5202,7 +5770,7 @@ test("unknown IDs fail closed and cancellation/disposal stop active sessions", a
   assert.equal(run.handoffs.length, 1);
   await run.controller.dispose();
   assert.equal(
-    run.sessions.every((session) => session.disposed === 1),
+    run.sessions.every((session) => session.disposeCount === 1),
     true,
   );
 });

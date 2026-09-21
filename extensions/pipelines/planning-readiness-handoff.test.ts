@@ -28,6 +28,44 @@ function readinessResult(overrides: Partial<PlanningReadinessResult> = {}) {
   } satisfies PlanningReadinessResult;
 }
 
+test("projects bounded provenance and explicit nonexecution without changing legacy status", () => {
+  const input = {
+    ...readinessResult({
+      status: "failed",
+      exitCode: null,
+      sourceHash: undefined,
+    }),
+    execution: "not-run" as const,
+    provenance: {
+      status: "uncertain" as const,
+      diagnostic: "測試🙂".repeat(20_000),
+    },
+  };
+  const handoff = buildPlanningReadinessHandoff("run-123", [input], 2);
+  assert.equal(handoff.checks[0]?.execution, "not-run");
+  assert.equal(handoff.checks[0]?.status, "failed");
+  assert.equal(handoff.checks[0]?.exitCode, null);
+  assert.equal(handoff.checks[0]?.provenance?.status, "uncertain");
+  assert.ok(
+    handoff.checks[0]?.truncatedFields.includes("provenanceDiagnostic"),
+  );
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(handoff)) <=
+      PLANNING_READINESS_HANDOFF_MAX_BYTES,
+  );
+  assert.throws(() =>
+    buildPlanningReadinessHandoff(
+      "run-123",
+      [{ ...input, status: "passed" }],
+      2,
+    ),
+  );
+  assert.throws(() =>
+    buildPlanningReadinessHandoff("run-123", [{ ...input, exitCode: 0 }], 2),
+  );
+  assert.equal(input.provenance.diagnostic.length, "測試🙂".length * 20_000);
+});
+
 test("preserves factual check evidence and the immutable artifact reference", () => {
   const input = readinessResult({
     stdout:

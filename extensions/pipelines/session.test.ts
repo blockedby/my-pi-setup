@@ -4,9 +4,24 @@ import * as path from "node:path";
 import test from "node:test";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
+import { validateToolArguments, type JsonObject } from "@earendil-works/pi-ai";
+import {
+  defaultFeaturePlanningNarrative,
+  FEATURE_CANDIDATE_PLAN_SUBMISSION,
+  FEATURE_CANONICAL_PLAN_SUBMISSION,
+  FEATURE_EXECUTION_GRAPH_SUBMISSION,
+} from "./feature-planning.ts";
+import {
+  candidatePlan,
+  canonicalPlan,
+  executionGraph,
+} from "./feature-planning.test.ts";
 import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   defineTool,
+  createBashToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
   SessionManager,
   type AgentSession,
   type ExtensionContext,
@@ -26,14 +41,188 @@ import {
   type PipelineDefinitionId,
   ASTRA_MODEL,
 } from "./domain.ts";
+import { AgentSessionUnavailableError } from "../shared/agent-tree/domain.ts";
 import { ToolCallTimeoutError } from "../shared/tool-call-timeout.ts";
 import {
+  createOrdinaryToolLeaseFence,
+  createFeatureArtifactSubmitTool,
   createPipelineSessionFactory,
   TaskToolContractError,
 } from "./session.ts";
 
+for (const [contract, fixture] of [
+  [FEATURE_CANDIDATE_PLAN_SUBMISSION, candidatePlan],
+  [FEATURE_CANONICAL_PLAN_SUBMISSION, canonicalPlan],
+  [FEATURE_EXECUTION_GRAPH_SUBMISSION, executionGraph],
+] as const) {
+  test(`feature narrative preparation accepts and forwards normalized ${contract.name}`, async () => {
+    const submitted: unknown[] = [];
+    const tool = createFeatureArtifactSubmitTool(contract, (value) => {
+      submitted.push(value);
+    });
+    // Omit exactly the presentation fields supported by the adapter, at every level.
+    const raw = JSON.parse(
+      JSON.stringify(fixture(), (key, value) =>
+        [
+          "summary",
+          "finalRationale",
+          "purpose",
+          "branchGoal",
+          "implementationSketch",
+        ].includes(key)
+          ? undefined
+          : value,
+      ),
+    );
+    const original = structuredClone(raw);
+    assert.equal(Value.Check(tool.parameters, raw), false);
+    assert.ok(tool.prepareArguments);
+    const args = validateToolArguments(tool, {
+      type: "toolCall",
+      id: "planning-submit",
+      name: tool.name,
+      arguments: tool.prepareArguments(raw) as JsonObject,
+    });
+    const result = await tool.execute(
+      "planning-submit",
+      args,
+      undefined,
+      undefined,
+      {} as ExtensionContext,
+    );
+    assert.equal(result.terminate, true);
+    assert.deepEqual(submitted, [defaultFeaturePlanningNarrative(raw)]);
+    assert.deepEqual(result.details, submitted[0]);
+    assert.deepEqual(raw, original);
+    assert.deepEqual(tool.prepareArguments(fixture()), fixture());
+
+    // No control, version, identity, requirement, or evidence is repaired.
+    for (const mutate of [
+      (value: Record<string, unknown>) => {
+        delete value.reportType;
+      },
+      (value: Record<string, unknown>) => {
+        value.reportType = "unsupported-v2";
+      },
+      (value: Record<string, unknown>) => {
+        value.summary = null;
+      },
+      (value: Record<string, unknown>) => {
+        value.unexpected = true;
+      },
+    ]) {
+      const invalid = structuredClone(raw);
+      mutate(invalid);
+      assert.throws(() =>
+        validateToolArguments(tool, {
+          type: "toolCall",
+          id: "invalid",
+          name: tool.name,
+          arguments: tool.prepareArguments!(invalid) as JsonObject,
+        }),
+      );
+    }
+    for (const field of [
+      "id",
+      "required",
+      "command",
+      "acceptance",
+      "acceptanceRefs",
+      "evidence",
+    ]) {
+      const invalid = JSON.parse(
+        JSON.stringify(raw, (key, value) =>
+          key === field ? undefined : value,
+        ),
+      );
+      if (JSON.stringify(invalid) === JSON.stringify(raw)) continue;
+      assert.throws(() =>
+        validateToolArguments(tool, {
+          type: "toolCall",
+          id: "missing-control",
+          name: tool.name,
+          arguments: tool.prepareArguments!(invalid) as JsonObject,
+        }),
+      );
+    }
+    assert.equal(submitted.length, 1);
+  });
+}
+
+test("ordinary native tools fence revoked authority and drain an aborted command", async () => {
+  const fixture = await createFixture();
+  const authority = new AbortController();
+  const fence = createOrdinaryToolLeaseFence(authority.signal);
+  const context = { cwd: fixture.cwd } as ExtensionContext;
+  const invoke = (
+    tool: ReturnType<typeof defineTool>,
+    args: Record<string, unknown>,
+  ) =>
+    fence.wrap(tool).execute("lease-test", args, undefined, undefined, context);
+  try {
+    const running = invoke(defineTool(createBashToolDefinition(fixture.cwd)), {
+      command: "sleep 30",
+    });
+    const rejected = assert.rejects(running);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    authority.abort(new Error("lease revoked"));
+    await fence.dispose();
+    await rejected;
+    await assert.rejects(
+      invoke(defineTool(createWriteToolDefinition(fixture.cwd)), {
+        path: "denied.txt",
+        content: "no",
+      }),
+    );
+    await assert.rejects(
+      invoke(defineTool(createReadToolDefinition(fixture.cwd)), {
+        path: "denied.txt",
+      }),
+      /lease revoked/,
+    );
+  } finally {
+    await fence.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("ordinary teardown fails closed when execution ignores cancellation", async () => {
+  const fence = createOrdinaryToolLeaseFence();
+  let finish = () => {};
+  const tool = fence.wrap(
+    defineTool({
+      name: "read",
+      label: "fixture",
+      description: "fixture",
+      parameters: Type.Object({}),
+      async execute() {
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return { content: [], details: {} };
+      },
+    }),
+  );
+  const pending = tool.execute(
+    "stalled",
+    {},
+    undefined,
+    undefined,
+    {} as ExtensionContext,
+  );
+  const rejected = assert.rejects(pending);
+  await Promise.resolve();
+  await assert.rejects(fence.dispose(10), /did not drain/);
+  finish();
+  await rejected;
+  await fence.dispose();
+});
+
 const FEATURE_TASK_TOOL_NAMES = [
   "pipeline_task_diff",
+  "pipeline_task_prepare",
+  "pipeline_task_stage",
+  "pipeline_task_checkpoint",
   "pipeline_task_check",
   "pipeline_task_finalize",
 ];
@@ -60,6 +249,24 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
   const diffRequests: unknown[] = [];
   const checkRequests: string[] = [];
   const finalizeRequests: unknown[] = [];
+  const recoveryRequests: unknown[] = [];
+  const recipeRequests: unknown[] = [];
+  const recoveryCalls = [
+    {
+      name: "pipeline_task_prepare",
+      args: {
+        command: "bun install",
+        cwd: ".",
+        purpose: "Restore dependencies",
+        replacesCommand: "bun install --frozen-lockfile",
+      },
+    },
+    {
+      name: "pipeline_task_stage",
+      args: { paths: ["src/task.ts"], action: "stage" },
+    },
+    { name: "pipeline_task_checkpoint", args: { message: "Implement task" } },
+  ];
 
   try {
     const skillDir = path.join(fixture.agentDir, "skills", "fixture");
@@ -151,7 +358,32 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
             checkIds: ["review-check"],
           };
         },
-        async check({ checkId }) {
+        async prepare(request) {
+          recoveryRequests.push(request);
+          return {
+            ...request,
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            status: "passed" as const,
+          };
+        },
+        async stage(request) {
+          recoveryRequests.push(request);
+          return { staged: request.paths };
+        },
+        async checkpoint(request) {
+          recoveryRequests.push(request);
+          return {
+            commit: "checkpoint",
+            changedPaths: ["src/task.ts"],
+            warnings: [],
+            residualPaths: [],
+          };
+        },
+        async check(request) {
+          recipeRequests.push(request);
+          const { checkId } = request;
           checkRequests.push(checkId);
           return {
             checkId,
@@ -240,6 +472,21 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
     for (const tool of FEATURE_TASK_TOOL_NAMES) {
       assert.ok(sdkSession.getToolDefinition(tool));
     }
+
+    for (const { name, args } of recoveryCalls) {
+      const tool = sdkSession.getToolDefinition(name);
+      assert.ok(tool);
+      assert.equal(Value.Check(tool.parameters, args), true);
+      assert.equal(Value.Check(tool.parameters, {}), false);
+      await assert.rejects(
+        tool.execute(name, args, undefined, undefined, {
+          cwd: fixture.cwd,
+        } as unknown as ExtensionContext),
+        (error: unknown) =>
+          error instanceof TaskToolContractError && error.code === "read-only",
+      );
+    }
+    assert.deepEqual(recoveryRequests, []);
 
     const unavailableCheck = sdkSession.getToolDefinition(
       "pipeline_task_check",
@@ -342,26 +589,25 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
 
     const unknownCheck = sdkSession.getToolDefinition("pipeline_task_check");
     assert.ok(unknownCheck);
-    await assert.rejects(
-      unknownCheck.execute(
-        "feature-finalizer-unknown-check",
-        { checkId: "not-declared" },
-        undefined,
-        undefined,
-        { cwd: fixture.cwd } as unknown as ExtensionContext,
-      ),
-      (error: unknown) => {
-        assert.ok(error instanceof TaskToolContractError);
-        assert.equal(error.code, "unknown-check-id");
-        assert.equal(error.reason.length > 0, true);
-        assert.deepEqual(error.allowedAlternative, {
-          tool: "pipeline_task_check",
-          exampleArgs: { checkId: "review-check" },
-        });
-        return true;
+    // Supplementary recipes reach the host; runtime owns obligation validation.
+    const supplementaryRequest = {
+      checkId: "supplementary",
+      recipe: {
+        command: "bun test",
+        cwd: ".",
+        purpose: "Additional regression coverage",
       },
+      acceptanceRefs: ["acceptance-1"],
+      reason: "Add regression coverage without replacing the original check",
+    };
+    await unknownCheck.execute(
+      "feature-finalizer-supplementary-check",
+      supplementaryRequest,
+      undefined,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
     );
-    assert.deepEqual(checkRequests, []);
+    assert.deepEqual(checkRequests, ["supplementary"]);
 
     const diff = sdkSession.getToolDefinition("pipeline_task_diff");
     assert.ok(diff);
@@ -386,10 +632,48 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
     );
     assert.deepEqual(diffRequests, [pageRequest]);
 
+    for (const { name, args } of recoveryCalls) {
+      const tool: ReturnType<AgentSession["getToolDefinition"]> =
+        sdkSession.getToolDefinition(name);
+      assert.ok(tool);
+      await tool.execute(name, args, undefined, undefined, {
+        cwd: fixture.cwd,
+      } as unknown as ExtensionContext);
+    }
+    assert.deepEqual(
+      recoveryRequests,
+      recoveryCalls.map(({ args }) => args),
+    );
+    const recipeUpdate = {
+      checkId: "review-check",
+      recipe: {
+        command: "bun run test:offline",
+        cwd: ".",
+        purpose: "Verify behavior",
+        reason: "Use repository offline runner",
+      },
+      acceptanceRefs: ["acceptance-1"],
+    };
+    assert.equal(Value.Check(unknownCheck.parameters, recipeUpdate), true);
+    assert.equal(
+      Value.Check(unknownCheck.parameters, {
+        ...recipeUpdate,
+        recipe: { command: "test" },
+      }),
+      false,
+    );
+    await unknownCheck.execute(
+      "recipe-update",
+      recipeUpdate,
+      undefined,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
+    );
+    assert.deepEqual(recipeRequests, [supplementaryRequest, recipeUpdate]);
+
     const finalize = sdkSession.getToolDefinition("pipeline_task_finalize");
     assert.ok(finalize);
     const omittedDiscardPaths = {
-      commitPaths: [],
       summary: "The accepted feature needs no changes.",
     };
     const emptyDiscardPaths = {
@@ -470,7 +754,7 @@ test("feature workers expose task finalization but not the unrelated execution-f
     provider: "feature-task-finish-test-provider",
     models: [
       {
-        id: "gpt-5.6-luna",
+        id: "gpt-6-astra",
         name: "Task tool test",
         reasoning: true,
         input: ["text"],
@@ -482,8 +766,14 @@ test("feature workers expose task finalization but not the unrelated execution-f
   });
   let sdkSession: AgentSession | undefined;
   let registered = 0;
+  const diffError = new Error("Task host diff reached");
   const factory = createPipelineSessionFactory({
-    modelRegistry: { find: () => provider.getModel() },
+    modelRegistry: {
+      find(modelProvider, id) {
+        assert.equal(`${modelProvider}/${id}`, ASTRA_MODEL);
+        return provider.getModel();
+      },
+    },
     parentCwd: fixture.root,
     parentTrusted: false,
     agentDir: fixture.agentDir,
@@ -501,7 +791,7 @@ test("feature workers expose task finalization but not the unrelated execution-f
     },
     featureTaskHost: () => ({
       async diff() {
-        throw new Error("Not invoked");
+        throw diffError;
       },
       async check() {
         throw new Error("Not invoked");
@@ -518,24 +808,68 @@ test("feature workers expose task finalization but not the unrelated execution-f
       role: "feature-task-docs",
       attempt: 1,
       title: "Task",
-      model: LUNA_MODEL,
-      thinkingLevel: "high",
+      model: ASTRA_MODEL,
+      thinkingLevel: "low",
       cwd: fixture.cwd,
       prompt: "",
       deferPrompt: true,
     });
     try {
+      assert.ok(sdkSession);
+      assert.equal(sdkSession.model, provider.getModel());
+      assert.equal(sdkSession.model.id, "gpt-6-astra");
+      assert.equal(sdkSession.thinkingLevel, "low");
+      assert.deepEqual(session.executionMetadata, {
+        provider: provider.getModel().provider,
+        model: "gpt-6-astra",
+        thinkingLevel: "low",
+      });
       assert.equal(registered, 0);
       assert.equal(
         session.activeTools.includes("pipeline_execution_finish"),
         false,
       );
       assert.equal(
-        sdkSession!.getToolDefinition("pipeline_execution_finish"),
+        sdkSession.getToolDefinition("pipeline_execution_finish"),
         undefined,
       );
-      for (const name of FEATURE_TASK_TOOL_NAMES)
+      assert.deepEqual(session.activeTools, sdkSession.getActiveToolNames());
+      for (const name of [
+        "read",
+        "bash",
+        "edit",
+        "write",
+        ...FEATURE_TASK_TOOL_NAMES,
+      ]) {
         assert.equal(session.activeTools.includes(name), true);
+        assert.ok(sdkSession.getToolDefinition(name));
+      }
+      for (const [name, args] of [
+        [
+          "pipeline_task_prepare",
+          { command: "bun install", cwd: ".", purpose: "dependencies" },
+        ],
+        ["pipeline_task_stage", { paths: ["file.ts"], action: "unstage" }],
+        ["pipeline_task_checkpoint", { message: "checkpoint" }],
+      ] as const) {
+        const tool = sdkSession.getToolDefinition(name);
+        assert.ok(tool);
+        assert.equal(Value.Check(tool.parameters, args), true);
+        await assert.rejects(
+          tool.execute(name, args, undefined, undefined, {
+            cwd: fixture.cwd,
+          } as unknown as ExtensionContext),
+          /unsupported by this host/,
+        );
+      }
+      const diff = sdkSession.getToolDefinition("pipeline_task_diff");
+      assert.ok(diff);
+      await assert.rejects(
+        diff.execute("task-host-diff", {}, undefined, undefined, {
+          cwd: fixture.cwd,
+        } as unknown as ExtensionContext),
+        (error: unknown) => error === diffError,
+      );
     } finally {
       await session.dispose();
     }
@@ -552,7 +886,7 @@ test("feature task dispatch attaches the live host contract to the task input", 
     provider: "feature-task-contract-dispatch-test-provider",
     models: [
       {
-        id: "gpt-5.6-luna",
+        id: "gpt-6-astra",
         name: "Task contract dispatch test",
         reasoning: true,
         input: ["text"],
@@ -588,7 +922,12 @@ test("feature task dispatch attaches the live host contract to the task input", 
 
   try {
     const factory = createPipelineSessionFactory({
-      modelRegistry: { find: () => provider.getModel() },
+      modelRegistry: {
+        find(modelProvider, id) {
+          assert.equal(`${modelProvider}/${id}`, ASTRA_MODEL);
+          return provider.getModel();
+        },
+      },
       parentCwd: fixture.root,
       parentTrusted: false,
       agentDir: fixture.agentDir,
@@ -606,15 +945,22 @@ test("feature task dispatch attaches the live host contract to the task input", 
       role: "feature-task-contract",
       attempt: 1,
       title: "Task contract dispatch test",
-      model: LUNA_MODEL,
-      thinkingLevel: "high",
+      model: ASTRA_MODEL,
+      thinkingLevel: "low",
       cwd: fixture.cwd,
       prompt: "",
       deferPrompt: true,
     });
 
     assert.ok(sdkSession);
-    const activeAtDispatch = [...session.activeTools];
+    assert.equal(sdkSession.model, provider.getModel());
+    assert.equal(sdkSession.model.id, "gpt-6-astra");
+    assert.equal(sdkSession.thinkingLevel, "low");
+    const activeAtDispatch = sdkSession.getActiveToolNames();
+    for (const name of FEATURE_TASK_TOOL_NAMES) {
+      assert.equal(activeAtDispatch.includes(name), true);
+      assert.ok(sdkSession.getToolDefinition(name));
+    }
     let dispatchedText = "";
     const originalPrompt = sdkSession.prompt;
     sdkSession.prompt = async (text) => {
@@ -640,6 +986,23 @@ test("feature task dispatch attaches the live host contract to the task input", 
       "check-types",
       "check-tests",
     ]);
+    const failure = new Error("local failed turn");
+    sdkSession.prompt = async () => {
+      throw failure;
+    };
+    await assert.rejects(session.prompt("fail"), (error) => error === failure);
+    assert.equal(session.disposed, false);
+    sdkSession.prompt = async () => {};
+    await session.send("retry");
+    await session.dispose();
+    assert.equal(session.disposed, true);
+    for (const dispatch of [
+      () => session!.prompt("late"),
+      () => session!.send("late"),
+    ]) {
+      await assert.rejects(dispatch(), AgentSessionUnavailableError);
+    }
+    sdkSession.prompt = originalPrompt;
   } finally {
     await session?.dispose();
     provider.unregister();
@@ -1179,6 +1542,16 @@ test("authorized context discovery exposes a usable readiness callback tool", as
       .map((part) => part.text)
       .join("");
     assert.deepEqual(JSON.parse(resultText), fixtureFacts);
+    const withoutExcerpt = { ...input, source: { path: input.source.path } };
+    assert.equal(Value.Check(readiness.parameters, withoutExcerpt), true);
+    await readiness.execute(
+      "readiness-no-excerpt",
+      withoutExcerpt,
+      undefined,
+      undefined,
+      { cwd: fixture.cwd } as unknown as ExtensionContext,
+    );
+    assert.deepEqual(callbackCalls.at(-1)?.input, withoutExcerpt);
   } finally {
     await session?.dispose();
     provider.unregister();

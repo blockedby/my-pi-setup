@@ -1,4 +1,18 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import type {
+  FeatureCheckRequest,
+  FeaturePreparationRequest,
+  FeaturePreparationResult,
+  FeatureStageRequest,
+  FeatureStageResult,
+  FeatureCheckpointRequest,
+  FeatureCheckpointResult,
+  FeatureAcceptanceRequest,
+  FeatureCommitRange,
+} from "./feature-execution-contract.ts";
+import type { ASTRA_MODEL } from "./domain.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -25,6 +39,7 @@ import {
 
 const TASK_CAPSULE_LIMIT = 192 * 1024;
 const TASK_SUMMARY_LIMIT = 64 * 1024;
+const SESSION_DRAIN_TIMEOUT_MS = 5_000;
 
 function boundedText(text: string, maxBytes: number) {
   const bytes = Buffer.from(text, "utf8");
@@ -71,6 +86,11 @@ export interface FeatureTaskAttemptSnapshot {
 export interface FeatureCheckResult {
   readonly checkId: string;
   readonly checkInvocationId?: string;
+  readonly inputRevision?: CheckInputRevision;
+  readonly outputRevision?: CheckInputRevision;
+  readonly recipeRevision?: number;
+  readonly recipeReason?: string;
+  readonly acceptanceRefs?: ReadonlyArray<string>;
   readonly command: string;
   readonly cwd: string;
   readonly purpose: string;
@@ -116,6 +136,7 @@ export interface FeatureTaskCapsule {
     }>;
     readonly knownResidualPaths: ReadonlyArray<string>;
     readonly preparationBaseline: ReadonlyArray<string>;
+    readonly preparationCommands?: ReadonlyArray<string>;
     readonly preparationChanges?: ReadonlyArray<FeatureTrackedResidualState>;
     readonly previousFailure: string | null;
     readonly provisionalCommit: string | null;
@@ -159,6 +180,8 @@ export interface FeatureTaskDiffResult {
 
 export interface FeatureTaskFinalizeResult {
   readonly validated: boolean;
+  readonly commitRange?: FeatureCommitRange;
+  readonly checkpointHead?: string;
   readonly status: FeatureTaskStatus;
   readonly commit?: string;
   readonly changedPaths: ReadonlyArray<string>;
@@ -173,16 +196,34 @@ export interface FeatureTaskToolHostDescription {
   readonly checkIds: ReadonlyArray<string>;
 }
 
+export interface FeatureTaskHostLease {
+  readonly host: FeatureTaskToolHost;
+  readonly signal: AbortSignal;
+  /** Permanently fence this session before any asynchronous teardown. */
+  revoke(): void;
+  /** Reject if outstanding host work cannot be drained safely. */
+  drain(): Promise<void>;
+}
+
 export interface FeatureTaskToolHost {
+  /** Controller-only admission; tool adapters must never expose this as an agent tool. */
+  readonly acquireSessionLease?: (sessionId: string) => FeatureTaskHostLease;
+  /** Present only on a session-bound host; also fences ordinary sandbox tools. */
+  readonly authoritySignal?: AbortSignal;
   /** Describe controller-owned task authority without exposing task ACL claims. */
   readonly describe?: () => FeatureTaskToolHostDescription | undefined;
   diff(request?: FeatureDiffPageRequest): Promise<FeatureTaskDiffResult>;
-  check(request: { readonly checkId: string }): Promise<FeatureCheckResult>;
-  finalize(request: {
-    readonly commitPaths: ReadonlyArray<string>;
-    readonly discardPaths?: ReadonlyArray<string>;
-    readonly summary: string;
-  }): Promise<FeatureTaskFinalizeResult>;
+  check(request: FeatureCheckRequest): Promise<FeatureCheckResult>;
+  prepare?(
+    request: FeaturePreparationRequest,
+  ): Promise<FeaturePreparationResult>;
+  stage?(request: FeatureStageRequest): Promise<FeatureStageResult>;
+  checkpoint?(
+    request: FeatureCheckpointRequest,
+  ): Promise<FeatureCheckpointResult>;
+  finalize(
+    request: FeatureAcceptanceRequest,
+  ): Promise<FeatureTaskFinalizeResult>;
 }
 
 export interface FeatureTaskSnapshot {
@@ -196,6 +237,9 @@ export interface FeatureTaskSnapshot {
   readonly branch: string;
   readonly worktree: string;
   readonly taskBaseCommit?: string;
+  readonly commitRange?: FeatureCommitRange;
+  readonly checkpointHead?: string;
+  readonly preparations?: ReadonlyArray<FeaturePreparationResult>;
   readonly provisionalCommit?: string;
   readonly validatedCommit?: string;
   readonly summary?: string;
@@ -229,8 +273,8 @@ export type FeatureCheckRunner = (
 export interface FeatureTaskSessionInput {
   readonly kind: Exclude<FeatureTaskKind, "final-review">;
   readonly role: string;
-  readonly model: "openai-codex/gpt-5.6-luna";
-  readonly thinkingLevel: "high";
+  readonly model: typeof ASTRA_MODEL;
+  readonly thinkingLevel: "low";
   readonly task?: FeatureExecutionTask;
   readonly capsule: FeatureTaskCapsule;
   readonly cwd: string;
@@ -478,7 +522,6 @@ function currentMeaningfulPaths(
   target: FeatureTaskGitTarget,
   baseCommit: string,
   preparationBaseline: ReadonlySet<string>,
-  residualPaths: ReadonlySet<string>,
 ) {
   target.assertRecordedResidualsUnchanged?.();
   const diff = target.inspect(baseCommit);
@@ -489,9 +532,10 @@ function currentMeaningfulPaths(
   const tracked = diff.tracked.filter(
     (filePath) => !trackedResidualPaths.has(filePath),
   );
+  const trustedUntracked = new Set(target.untrackedResidualPaths?.() ?? []);
   const untracked = diff.untracked.filter(
     (filePath) =>
-      !preparationBaseline.has(filePath) && !residualPaths.has(filePath),
+      !preparationBaseline.has(filePath) && !trustedUntracked.has(filePath),
   );
   return [...new Set([...staged, ...tracked, ...untracked])].sort();
 }
@@ -554,6 +598,7 @@ export function createFeatureTaskRuntime(options: {
   }>;
   readonly checks?: ReadonlyArray<FeatureExecutionCheck>;
   readonly preparationBaseline?: ReadonlyArray<string>;
+  readonly preparationCommands?: ReadonlyArray<string>;
   readonly knownResidualPaths?: ReadonlyArray<string>;
   readonly runCheck?: FeatureCheckRunner;
   readonly signal: AbortSignal;
@@ -575,6 +620,40 @@ export function createFeatureTaskRuntime(options: {
   if (checksById.size !== effectiveChecks.length) {
     throw new Error(`Task ${task.id} has duplicate effective check IDs.`);
   }
+  const recipes = new Map(
+    effectiveChecks.map((check) => [
+      check.id,
+      { revision: 1, reason: "Original planned obligation" },
+    ]),
+  );
+  const allowedRefs = new Set(task.acceptanceRefs);
+  const validateRefs = (refs: ReadonlyArray<string>) => {
+    for (const ref of refs) {
+      if (!allowedRefs.has(ref))
+        throw new Error(
+          `Unknown task acceptance reference ${JSON.stringify(ref)}.`,
+        );
+    }
+  };
+  const coverage = new Map(
+    effectiveChecks.map((check) => {
+      const refs = check.acceptanceRefs ?? task.acceptanceRefs;
+      validateRefs(refs);
+      return [check.id, new Set(refs)];
+    }),
+  );
+  const currentChecks = () =>
+    [...checksById.values()].map((check) => ({
+      ...check,
+      acceptanceRefs: [...(coverage.get(check.id) ?? [])],
+    }));
+  const preparationCommands = Object.freeze([
+    ...(options.preparationCommands ?? []),
+  ]);
+  const preparations: FeaturePreparationResult[] = [];
+  let checkpointHead: string | undefined;
+  let commitRange: FeatureCommitRange | undefined;
+  let preparing = false;
   const preparationBaseline = new Set(options.preparationBaseline ?? []);
   const state: MutableTaskState = {
     status: "waiting",
@@ -591,13 +670,21 @@ export function createFeatureTaskRuntime(options: {
   let activeOperation: ActiveOperation | undefined;
   let operationSequence = 0;
   const nextOperationId = (kind: "check" | "finalize") =>
-    `${kind}-${++operationSequence}`;
+    `${kind}-${randomUUID()}-${++operationSequence}`;
+  const authority = new AsyncLocalStorage<AbortSignal>();
+  const operationSignal = () => authority.getStore() ?? options.signal;
+  const assertAuthority = () => {
+    if (authority.getStore()?.aborted)
+      throw new Error(`Task ${task.id} session authority is revoked.`);
+  };
   const assertActive = () => {
+    assertAuthority();
     if (!state.active)
       throw new Error(`Task ${task.id} tool authority is closed.`);
     if (options.signal.aborted)
       throw new Error(`Task ${task.id} was cancelled.`);
-    const expectedHead = state.provisionalCommit ?? options.taskBaseCommit;
+    const expectedHead =
+      checkpointHead ?? state.provisionalCommit ?? options.taskBaseCommit;
     if (options.target.head() !== expectedHead)
       throw new Error(
         `Task ${task.id} HEAD drifted outside controller ownership.`,
@@ -654,6 +741,9 @@ export function createFeatureTaskRuntime(options: {
 
   const snapshot = (): FeatureTaskSnapshot => ({
     id: task.id,
+    checkpointHead,
+    commitRange,
+    preparations: preparations.map((result) => ({ ...result })),
     kind: options.kind,
     objective: task.objective,
     status: state.status,
@@ -738,7 +828,7 @@ export function createFeatureTaskRuntime(options: {
       );
     }
     const cwd = resolveCheckCwd(options.target.worktree, definition.cwd);
-    const beforeTracked = new Set([...before.staged, ...before.tracked]);
+    void before;
     let commandResult: FeatureCheckCommandResult;
     let commandError: string | undefined;
     try {
@@ -748,42 +838,75 @@ export function createFeatureTaskRuntime(options: {
         command: definition.command,
         workspaceRoot: options.target.worktree,
         cwd,
-        signal: options.signal,
+        signal: operationSignal(),
       });
     } catch (error) {
       commandError = boundedError(error);
       commandResult = { exitCode: null, stdout: "", stderr: commandError };
+    }
+    if (
+      !state.active ||
+      operationSignal().aborted ||
+      operation.attempt !== state.attempt
+    ) {
+      state.checkHistory.push({
+        checkId: definition.id,
+        checkInvocationId: operation.checkInvocationId,
+        command: definition.command,
+        cwd: definition.cwd,
+        purpose: definition.purpose,
+        required: definition.required,
+        status: commandResult.exitCode === 0 ? "passed" : "failed",
+        exitCode: commandResult.exitCode,
+        stdout: boundedText(commandResult.stdout, 16 * 1024),
+        stderr: boundedText(commandResult.stderr, 16 * 1024),
+        changedPaths: [],
+        inputRevision: operation.inputRevision,
+        recipeRevision: recipes.get(definition.id)?.revision,
+        recipeReason: recipes.get(definition.id)?.reason,
+        acceptanceRefs: [...(coverage.get(definition.id) ?? [])],
+        startedAt: operation.startedAt,
+        finishedAt: Date.now(),
+        error:
+          "Operation authority ended; output revision was not verified and this evidence cannot satisfy acceptance.",
+      });
+      state.checkHistory.splice(
+        0,
+        Math.max(0, state.checkHistory.length - 100),
+      );
     }
     assertActive();
     assertCurrentCheckAttempt(operation);
     if (!isActiveCheck(operation)) {
       throw new Error(`Task ${task.id} check operation is no longer active.`);
     }
-    const after = options.target.inspect(options.taskBaseCommit);
-    const trackedChanged =
-      before.fingerprint !== after.fingerprint ||
-      before.staged.join("\0") !== after.staged.join("\0") ||
-      before.tracked.join("\0") !== after.tracked.join("\0");
+    const { revision: outputRevision } = captureInputRevision();
+    const inputRevision = operation.inputRevision;
     const changedPaths = [
       ...new Set([
-        ...after.staged,
-        ...after.tracked,
-        ...(trackedChanged ? beforeTracked : []),
+        ...Object.keys(inputRevision.contentByPath),
+        ...Object.keys(outputRevision.contentByPath),
       ]),
     ]
-      .filter((filePath) => trackedChanged || !beforeTracked.has(filePath))
+      .filter(
+        (filePath) =>
+          inputRevision.contentByPath[filePath] !==
+          outputRevision.contentByPath[filePath],
+      )
       .sort();
     const result: FeatureCheckResult = {
       checkId: definition.id,
       checkInvocationId: operation.checkInvocationId,
+      inputRevision,
+      outputRevision,
+      recipeRevision: recipes.get(definition.id)?.revision,
+      recipeReason: recipes.get(definition.id)?.reason,
+      acceptanceRefs: [...(coverage.get(definition.id) ?? [])],
       command: definition.command,
       cwd: definition.cwd,
       purpose: definition.purpose,
       required: definition.required,
-      status:
-        commandResult.exitCode === 0 && changedPaths.length === 0
-          ? "passed"
-          : "failed",
+      status: commandResult.exitCode === 0 ? "passed" : "failed",
       exitCode: commandResult.exitCode,
       stdout: boundedText(commandResult.stdout, 16 * 1024),
       stderr: boundedText(commandResult.stderr, 16 * 1024),
@@ -804,8 +927,10 @@ export function createFeatureTaskRuntime(options: {
   const launchCheckOperation = (
     request: { readonly checkId: string },
     parent?: ActiveFinalizeOperation,
+    capturedInput?: ReturnType<typeof captureInputRevision>,
   ) => {
-    const { revision: inputRevision, evidence } = captureInputRevision();
+    const { revision: inputRevision, evidence } =
+      capturedInput ?? captureInputRevision();
     const deferred = createDeferred<FeatureCheckResult>();
     const operationId = nextOperationId("check");
     const operation: ActiveCheckOperation = {
@@ -842,9 +967,87 @@ export function createFeatureTaskRuntime(options: {
     return deferred.promise;
   };
 
-  const check = (request: { readonly checkId: string }) => {
+  const check = (request: FeatureCheckRequest) => {
     try {
       assertActive();
+      if (preparing) throw new Error("Preparation is already running.");
+      let capturedInput: ReturnType<typeof captureInputRevision> | undefined;
+      if (request.recipe || request.acceptanceRefs) {
+        if (activeOperation)
+          throw new Error("Cannot revise an in-flight check.");
+        const original = checksById.get(request.checkId);
+        if (
+          !original &&
+          (!request.recipe ||
+            !request.acceptanceRefs?.length ||
+            !request.checkId.trim())
+        )
+          throw new Error(
+            "Additional checks require an ID, recipe and explicit acceptance references.",
+          );
+        validateRefs(request.acceptanceRefs ?? []);
+        if (request.recipe) {
+          const recipe = request.recipe;
+          if (
+            ![recipe.command, recipe.cwd, recipe.purpose, recipe.reason].every(
+              (value) => value.trim(),
+            )
+          )
+            throw new Error(
+              "Recipe fields and revision reason must be nonempty.",
+            );
+          resolveCheckCwd(options.target.worktree, recipe.cwd);
+        }
+        // Prove the input before committing revisions, so rejected requests are atomic.
+        capturedInput = captureInputRevision();
+        const refs = new Set([
+          ...(coverage.get(request.checkId) ?? []),
+          ...(request.acceptanceRefs ?? []),
+        ]);
+        const recipe = request.recipe;
+        const definition = original ?? {
+          id: request.checkId,
+          command: recipe!.command,
+          cwd: recipe!.cwd,
+          purpose: recipe!.purpose,
+          required: true,
+        };
+        // A worker may add executable evidence, but cannot replace an existing
+        // obligation. Keep its definition, result and coverage independently.
+        const previous = recipes.get(request.checkId);
+        const revision = previous ? previous.revision + 1 : 1;
+        if (original && recipe) {
+          const originalId = request.checkId;
+          let suffix = revision;
+          let additionalId = `${originalId}:recipe-${suffix}`;
+          while (checksById.has(additionalId))
+            additionalId = `${originalId}:recipe-${++suffix}`;
+          request = { ...request, checkId: additionalId };
+        }
+        checksById.set(request.checkId, {
+          ...definition,
+          id: request.checkId,
+          required: recipe ? true : definition.required,
+          ...(recipe
+            ? {
+                command: recipe.command,
+                cwd: recipe.cwd,
+                purpose: recipe.purpose,
+              }
+            : {}),
+        });
+        // Coverage claims annotate this recipe; they never discharge another ID.
+        coverage.set(request.checkId, refs);
+        recipes.set(request.checkId, {
+          revision,
+          reason:
+            request.recipe?.reason ??
+            "Additional acceptance references: " +
+              request.acceptanceRefs?.join(", "),
+        });
+        if (state.capsule)
+          state.capsule = { ...state.capsule, checks: currentChecks() };
+      }
       if (!checksById.has(request.checkId)) {
         throw new Error(
           `Unknown declared check ID ${JSON.stringify(request.checkId)}.`,
@@ -873,7 +1076,7 @@ export function createFeatureTaskRuntime(options: {
       if (active) {
         throw new Error(`Task ${task.id} finalization is already running.`);
       }
-      return launchCheckOperation(request);
+      return launchCheckOperation(request, undefined, capturedInput);
     } catch (error) {
       return Promise.reject(error);
     }
@@ -920,7 +1123,6 @@ export function createFeatureTaskRuntime(options: {
         options.target,
         options.taskBaseCommit,
         preparationBaseline,
-        new Set(state.residualPaths),
       );
       if (meaningful.length > 0) {
         throw new Error(
@@ -938,7 +1140,7 @@ export function createFeatureTaskRuntime(options: {
     state.error = undefined;
     state.checks = [];
     publish();
-    for (const definition of effectiveChecks) {
+    for (const definition of checksById.values()) {
       if (options.signal.aborted) {
         state.status = "cancelled";
         state.error = "Feature task was cancelled during final verification.";
@@ -957,6 +1159,7 @@ export function createFeatureTaskRuntime(options: {
         };
       }
       await runFinalizeCheck(operation, { checkId: definition.id });
+      assertActive();
     }
     const requiredFailure = state.checks.find(
       (result) => result.required && result.status !== "passed",
@@ -1000,16 +1203,191 @@ export function createFeatureTaskRuntime(options: {
     } satisfies FeatureTaskFinalizeResult;
   };
 
-  const finalize = (request: {
-    readonly commitPaths: ReadonlyArray<string>;
-    readonly discardPaths?: ReadonlyArray<string>;
-    readonly summary: string;
-  }) => {
+  const assertIdle = () => {
+    assertActive();
+    if (activeOperation || preparing)
+      throw new Error("Task operation is already running.");
+  };
+  const stage = async (request: FeatureStageRequest) => {
+    assertIdle();
+    if (!options.target.stage)
+      throw new Error("Target does not support explicit staging.");
+    return options.target.stage(request);
+  };
+  const checkpoint = async (request: FeatureCheckpointRequest) => {
+    assertIdle();
+    if (!options.target.checkpoint || !options.target.range)
+      throw new Error("Target does not support controller checkpoints/ranges.");
+    const result = options.target.checkpoint(request);
+    checkpointHead = result.commit;
+    state.provisionalCommit = result.commit; // Legacy projection only.
+    state.status = "provisional";
+    state.warnings.push(...result.warnings);
+    state.residualPaths = [...result.residualPaths];
+    publish();
+    commitRange = options.target.range(options.taskBaseCommit);
+    publish();
+    return result;
+  };
+  const prepare = async (request: FeaturePreparationRequest) => {
+    assertIdle();
+    if (request.replacesCommand !== undefined) {
+      if (
+        typeof request.replacesCommand !== "string" ||
+        !request.replacesCommand.trim() ||
+        preparationCommands.filter(
+          (command) => command === request.replacesCommand,
+        ).length !== 1 ||
+        typeof request.command !== "string" ||
+        !request.command.trim() ||
+        request.command.length > 32768 ||
+        request.cwd !== "." ||
+        typeof request.purpose !== "string" ||
+        !request.purpose.trim()
+      ) {
+        throw new Error(
+          "Preparation replacement requires a unique inherited command, a nonempty command of at most 32768 characters, root cwd and purpose.",
+        );
+      }
+    }
+    // Capture the proposal before awaiting the runner.
+    request = { ...request };
+    preparing = true;
+    let result: FeaturePreparationResult;
+    try {
+      if (!request.command.trim() || !request.purpose.trim())
+        throw new Error("Preparation requires command and purpose.");
+      const cwd = resolveCheckCwd(options.target.worktree, request.cwd);
+      const output = await runCheck({
+        kind: "prepare",
+        command: request.command,
+        cwd,
+        workspaceRoot: options.target.worktree,
+        signal: operationSignal(),
+      });
+      if (request.replacesCommand !== undefined) assertActive();
+      result = {
+        ...request,
+        ...output,
+        stdout: boundedText(output.stdout, 16 * 1024),
+        stderr: boundedText(output.stderr, 16 * 1024),
+        status: output.exitCode === 0 ? "passed" : "failed",
+      };
+    } catch (error) {
+      result = {
+        ...request,
+        exitCode: null,
+        stdout: "",
+        stderr: boundedError(error),
+        status: "failed",
+      };
+    } finally {
+      preparing = false;
+    }
+    if (
+      request.replacesCommand !== undefined &&
+      authority.getStore()?.aborted
+    ) {
+      preparations.push({ ...result, status: "failed" });
+      publish();
+    }
+    assertAuthority();
+    preparations.push(result);
+    if (options.signal.aborted) {
+      state.status = "cancelled";
+      state.active = false;
+    }
+    publish();
+    return result;
+  };
+  const accept = (request: FeatureAcceptanceRequest) => {
+    const { revision, evidence } = captureInputRevision();
+    const issues: string[] = [];
+    if (request.discardPaths?.length)
+      issues.push("Resolve discard paths explicitly before acceptance.");
+    // Only controller-recorded, fingerprint-validated residuals are
+    // exempt. Path-only residual claims and preparation baselines grant no
+    // acceptance authority; staged changes and conflicts always remain dirty.
+    const dirty = [
+      ...new Set([
+        ...currentMeaningfulPaths(
+          options.target,
+          options.taskBaseCommit,
+          new Set(),
+        ),
+        ...evidence.staged,
+        ...evidence.conflictPaths,
+      ]),
+    ];
+    if (dirty.length)
+      issues.push(
+        `Clean meaningful workspace required: ${dirty.join(", ")}. Use stage/checkpoint or explicitly resolve changes.`,
+      );
+    for (const definition of currentChecks().filter(
+      (check) => check.required,
+    )) {
+      const result = state.checks.find(
+        (check) => check.checkId === definition.id,
+      );
+      if (!result)
+        issues.push(`Missing required check ${definition.id}; invoke check.`);
+      else if (result.status !== "passed")
+        issues.push(
+          `Failed required check ${definition.id}; repair and invoke check.`,
+        );
+      else if (
+        result.outputRevision?.fingerprint !== revision.fingerprint ||
+        result.recipeRevision !== recipes.get(definition.id)?.revision
+      )
+        issues.push(
+          `Stale required check ${definition.id}; invoke check on current content/recipe.`,
+        );
+    }
+    try {
+      if (!options.target.range)
+        throw new Error("Target lacks controller-owned range support.");
+      commitRange = options.target.range(options.taskBaseCommit);
+      if (
+        commitRange.baseCommit !== options.taskBaseCommit ||
+        commitRange.headCommit !== options.target.head() ||
+        (commitRange.headCommit !== options.taskBaseCommit &&
+          commitRange.headCommit !== checkpointHead)
+      )
+        throw new Error("Invalid controller-owned commit range.");
+    } catch (error) {
+      issues.push(boundedError(error));
+    }
+    state.summary = request.summary.trim();
+    state.error = issues.length ? issues.join("\n") : undefined;
+    if (!issues.length) {
+      state.validatedCommit = checkpointHead;
+      state.status =
+        checkpointHead || options.kind === "final-review"
+          ? "validated"
+          : "satisfied_without_changes";
+      state.active = false;
+    }
+    publish();
+    return {
+      validated: !issues.length,
+      status: state.status,
+      commit: checkpointHead,
+      checkpointHead,
+      commitRange,
+      changedPaths: evidence.baseToHead,
+      checks: [...state.checks],
+      warnings: [...state.warnings],
+      residualPaths: dirty,
+      error: state.error,
+    };
+  };
+
+  const finalize = (request: FeatureAcceptanceRequest) => {
     try {
       assertActive();
-      if (activeOperation) {
+      if (activeOperation || preparing) {
         throw new Error(
-          `Task ${task.id} ${activeOperation.kind === "check" ? "verification" : "finalization"} is already running.`,
+          `Task ${task.id} ${activeOperation?.kind === "check" ? "verification" : "finalization"} is already running.`,
         );
       }
       if (!request.summary.trim())
@@ -1019,6 +1397,9 @@ export function createFeatureTaskRuntime(options: {
           `Task summary exceeds ${TASK_SUMMARY_LIMIT} UTF-8 bytes.`,
         );
       }
+      if (request.commitPaths === undefined)
+        return Promise.resolve(accept(request));
+      const legacyRequest = { ...request, commitPaths: request.commitPaths };
       const deferred = createDeferred<FeatureTaskFinalizeResult>();
       const operation: ActiveFinalizeOperation = {
         kind: "finalize",
@@ -1027,7 +1408,7 @@ export function createFeatureTaskRuntime(options: {
         startedAt: Date.now(),
       };
       activeOperation = operation;
-      void executeFinalize(request, operation)
+      void executeFinalize(legacyRequest, operation)
         .finally(() => {
           if (activeOperation === operation) activeOperation = undefined;
         })
@@ -1045,14 +1426,107 @@ export function createFeatureTaskRuntime(options: {
     }
   };
 
+  const leases = new Map<string, FeatureTaskHostLease>();
+  let currentLease:
+    | {
+        lease: FeatureTaskHostLease;
+        pending: Set<Promise<unknown>>;
+        failed: boolean;
+      }
+    | undefined;
+  const acquireSessionLease = (sessionId: string): FeatureTaskHostLease => {
+    if (!state.active) throw new Error("Task authority is closed.");
+    const existing = leases.get(sessionId);
+    if (existing) {
+      if (existing.signal.aborted)
+        throw new Error("Session authority is permanently revoked.");
+      return existing;
+    }
+    if (
+      currentLease &&
+      (!currentLease.lease.signal.aborted ||
+        currentLease.pending.size ||
+        currentLease.failed)
+    )
+      throw new Error("Previous session authority has not drained.");
+    const controller = new AbortController();
+    const signal = AbortSignal.any([options.signal, controller.signal]);
+    const pending = new Set<Promise<unknown>>();
+    const invoke = <T>(operation: () => Promise<T>) => {
+      if (signal.aborted)
+        return Promise.reject(new Error("Session authority is revoked."));
+      const result = authority.run(signal, operation);
+      const tracked = result
+        .then((value) => {
+          if (signal.aborted) throw new Error("Session authority is revoked.");
+          return value;
+        })
+        .finally(() => pending.delete(tracked));
+      pending.add(tracked);
+      return tracked;
+    };
+    const host: FeatureTaskToolHost = {
+      authoritySignal: signal,
+      describe: () =>
+        authority.run(signal, () => {
+          assertAuthority();
+          return runtime.host.describe?.();
+        }),
+      diff: (request) => invoke(() => diff(request)),
+      check: (request) => invoke(() => check(request)),
+      prepare: (request) => invoke(() => prepare(request)),
+      stage: (request) => invoke(() => stage(request)),
+      checkpoint: (request) => invoke(() => checkpoint(request)),
+      finalize: (request) => invoke(() => finalize(request)),
+    };
+    const entry = {
+      pending,
+      failed: false,
+      lease: {
+        host,
+        signal,
+        revoke: () => controller.abort(),
+        drain: async () => {
+          if (!signal.aborted)
+            throw new Error("Revoke session authority before draining.");
+          if (entry.failed)
+            throw new Error("Session drain previously timed out.");
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              Promise.allSettled(pending),
+              new Promise<never>((_, reject) => {
+                timer = setTimeout(() => {
+                  entry.failed = true;
+                  reject(
+                    new Error("Session host operations did not drain safely."),
+                  );
+                }, SESSION_DRAIN_TIMEOUT_MS);
+              }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+          }
+        },
+      } satisfies FeatureTaskHostLease,
+    };
+    currentLease = entry;
+    leases.set(sessionId, entry.lease);
+    return entry.lease;
+  };
+
   const runtime: FeatureTaskRuntime = {
     host: {
+      acquireSessionLease,
       describe: () => ({
         workspaceRoot: options.target.worktree,
-        checkIds: effectiveChecks.map(({ id }) => id),
+        checkIds: [...checksById.keys()],
       }),
       diff,
       check,
+      prepare,
+      stage,
+      checkpoint,
       finalize,
     },
     setPreparationBaseline(paths) {
@@ -1091,7 +1565,7 @@ export function createFeatureTaskRuntime(options: {
         implementationSketch: task.implementationSketch,
         acceptanceRefs: task.acceptanceRefs,
         doneWhen: task.doneWhen,
-        checks: effectiveChecks,
+        checks: currentChecks(),
         graphContext: {
           currentHead: options.target.head(),
           currentBranch: options.target.branch,
@@ -1126,6 +1600,7 @@ export function createFeatureTaskRuntime(options: {
           })),
           knownResidualPaths: [...state.residualPaths],
           preparationBaseline: [...preparationBaseline].sort(),
+          preparationCommands,
           preparationChanges: options.target.preparationChanges?.() ?? [],
           previousFailure: previousFailure ?? null,
           provisionalCommit: state.provisionalCommit ?? null,
@@ -1220,18 +1695,21 @@ export function createFeatureTaskRuntime(options: {
             ? "Feature task session failed."
             : "Feature task session ended without validated finalization.");
       }
+      if (!state.active) currentLease?.lease.revoke();
       return publish();
     },
     fail(error) {
       state.status = "failed";
       state.error = error;
       state.active = false;
+      currentLease?.lease.revoke();
       return publish();
     },
     cancel() {
       state.status = "cancelled";
       state.error = "Feature task was cancelled.";
       state.active = false;
+      currentLease?.lease.revoke();
       return publish();
     },
     snapshot,
@@ -1264,7 +1742,11 @@ export function createFeatureReviewRuntime(options: {
   readonly diffBaseCommit?: string;
   readonly knownResidualPaths?: ReadonlyArray<string>;
   readonly knownTrackedResiduals?: ReadonlyArray<FeatureTrackedResidualState>;
+  readonly knownUntrackedResiduals?: ReadonlyArray<FeatureTrackedResidualState>;
 }) {
+  const knownUntrackedResiduals = options.knownUntrackedResiduals?.map(
+    (record) => Object.freeze({ ...record }),
+  );
   let runtime: FeatureTaskRuntime | undefined;
   let expected: string | undefined;
   const signal = options.signal ?? new AbortController().signal;
@@ -1272,9 +1754,15 @@ export function createFeatureReviewRuntime(options: {
     throw new Error("Final Astra review is not active.");
   };
   const host: FeatureTaskToolHost = {
+    acquireSessionLease: (sessionId) =>
+      runtime?.host.acquireSessionLease?.(sessionId) ?? unavailable(),
     describe: () => runtime?.host.describe?.(),
     diff: (request) => runtime?.host.diff(request) ?? unavailable(),
     check: (request) => runtime?.host.check(request) ?? unavailable(),
+    prepare: (request) => runtime?.host.prepare?.(request) ?? unavailable(),
+    stage: (request) => runtime?.host.stage?.(request) ?? unavailable(),
+    checkpoint: (request) =>
+      runtime?.host.checkpoint?.(request) ?? unavailable(),
     finalize: (request) => runtime?.host.finalize(request) ?? unavailable(),
   };
   const review = {
@@ -1286,6 +1774,8 @@ export function createFeatureReviewRuntime(options: {
         options.workingDir,
         options.knownResidualPaths,
         options.knownTrackedResiduals,
+        undefined,
+        knownUntrackedResiduals,
       );
       if (target.head() !== expectedHead) {
         throw new Error(

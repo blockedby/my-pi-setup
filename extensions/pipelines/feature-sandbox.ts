@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -142,29 +142,6 @@ function assertAllowedPath(
 
 function shellQuote(value: string) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-function commonGitDir(tempRoot: string, cwd: string) {
-  const source = fs.existsSync(path.join(cwd, ".git"))
-    ? cwd
-    : fs
-        .readdirSync(tempRoot, { withFileTypes: true })
-        .find(
-          (entry) => entry.isDirectory() && entry.name.startsWith("candidate-"),
-        )?.name;
-  if (!source) return undefined;
-  const gitCwd = path.isAbsolute(source) ? source : path.join(tempRoot, source);
-  try {
-    const value = execFileSync("git", ["rev-parse", "--git-common-dir"], {
-      cwd: gitCwd,
-      encoding: "utf8",
-      maxBuffer: 16 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return comparableExistingPath(path.resolve(gitCwd, value));
-  } catch {
-    return undefined;
-  }
 }
 
 function visibleRoots(mode: FeatureSandboxMode, tempRoot: string, cwd: string) {
@@ -921,29 +898,65 @@ function sandboxCommandArguments(
 ) {
   assertFeatureRuntimeDirectories(runtime);
   const roots = visibleRoots(mode, tempRoot, cwd);
-  const args = [
-    "--die-with-parent",
-    "--new-session",
-    "--unshare-all",
-    "--ro-bind",
-    "/",
-    "/",
-    "--dev",
-    "/dev",
-    "--proc",
-    "/proc",
-    "--tmpfs",
-    tempRoot,
-  ];
-  // Only caller-declared preparation may download dependencies. Agent tools
-  // and verification commands keep their isolated network namespace.
+  const args = ["--die-with-parent", "--new-session", "--unshare-all"];
+  // Both capabilities start with an empty filesystem and environment. Preparation
+  // alone shares host networking (including loopback), NOT registry-only egress.
   if (preparation) args.push("--share-net");
+  args.push("--clearenv");
+  // No blanket user-home toolchains: unsupported tools must be provisioned
+  // inside the workspace rather than silently granting adjacent credentials.
+  for (const directory of [
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/lib64",
+    "/usr/libexec",
+    "/usr/share",
+    "/usr/include",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+  ]) {
+    if (fs.existsSync(directory)) args.push("--ro-bind", directory, directory);
+  }
+  for (const file of [
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/ld.so.cache",
+    "/etc/ssl/certs",
+    "/etc/ca-certificates",
+    "/etc/pki/tls/certs",
+  ]) {
+    if (fs.existsSync(file)) args.push("--ro-bind", file, file);
+  }
+  // Preserve absolute invocations of the controller's JS runtime without
+  // granting its user-managed installation directory (or adjacent auth data).
+  const executable = comparableExistingPath(process.execPath);
+  if (!isWithin(executable, "/usr/bin")) {
+    args.push("--ro-bind", executable, process.execPath);
+  }
+  // A single known runtime executable is safe to alias; its parent is not.
+  args.push(
+    "--ro-bind",
+    executable,
+    `/usr/local/bin/${process.versions.bun ? "bun" : "node"}`,
+  );
+  args.push("--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+  args.push("--setenv", "LANG", "C.UTF-8");
+  args.push("--setenv", "HOME", runtime.cache);
+  args.push("--setenv", "XDG_CONFIG_HOME", path.join(runtime.cache, "config"));
+  args.push("--setenv", "XDG_DATA_HOME", path.join(runtime.cache, "data"));
+  args.push("--setenv", "GIT_CONFIG_NOSYSTEM", "1");
+  args.push("--setenv", "GIT_CONFIG_GLOBAL", "/dev/null");
+  args.push("--setenv", "GIT_TERMINAL_PROMPT", "0");
+  args.push("--tmpfs", "/tmp");
+  args.push("--dev", "/dev", "--proc", "/proc", "--tmpfs", tempRoot);
   for (const root of roots) {
     args.push("--dir", root);
     args.push(mode === "selection" ? "--ro-bind" : "--bind", root, root);
   }
-  const gitDir = commonGitDir(tempRoot, cwd);
-  if (gitDir) args.push("--tmpfs", gitDir);
   args.push("--dir", runtime.root);
   args.push("--bind", runtime.root, runtime.root);
   // Keep Unix-socket paths below sun_path limits even for deeply nested graph
@@ -955,21 +968,35 @@ function sandboxCommandArguments(
   args.push("--setenv", "TMP", sandboxTemp);
   args.push("--setenv", "TEMP", sandboxTemp);
   args.push("--setenv", "XDG_CACHE_HOME", runtime.cache);
-  if (preparation) {
-    args.push(
-      "--setenv",
-      "BUN_INSTALL_CACHE_DIR",
-      path.join(runtime.cache, "bun"),
-    );
-    args.push("--setenv", "npm_config_cache", path.join(runtime.cache, "npm"));
-  }
-  for (const root of roots) {
-    for (const name of [".git", ".pi-subagents", ".pipi"]) {
-      const protectedPath = path.join(root, name);
-      if (fs.existsSync(protectedPath))
-        args.push("--ro-bind", protectedPath, protectedPath);
+  args.push(
+    "--setenv",
+    "BUN_INSTALL_CACHE_DIR",
+    path.join(runtime.cache, "bun"),
+  );
+  args.push("--setenv", "npm_config_cache", path.join(runtime.cache, "npm"));
+  // Mask metadata after all package mounts so a package cannot restore live Git.
+  // Never follow workspace-controlled symlinks while walking or masking.
+  const protect = (source: string, destination: string) => {
+    for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+      const target = path.join(destination, entry.name);
+      if ([".git", ".pi-subagents", ".pipi"].includes(entry.name)) {
+        if (entry.isSymbolicLink()) {
+          throw new Error("Sandbox metadata must not be a symbolic link.");
+        }
+        if (entry.isDirectory()) {
+          args.push("--tmpfs", target, "--remount-ro", target);
+        } else {
+          args.push("--ro-bind", "/dev/null", target);
+        }
+      } else if (entry.isDirectory()) {
+        protect(path.join(source, entry.name), target);
+      }
     }
-  }
+  };
+  const metadataRoots = roots.map((root) => ({
+    source: root,
+    destination: root,
+  }));
   // Restore loaded packages even when tempRoot masked their paths. These
   // bindings also override writable workspace mounts. Keep original paths
   // so scripts can locate resources relative to their package directory.
@@ -977,27 +1004,47 @@ function sandboxCommandArguments(
   // Canonical targets first; aliases may resolve through another package.
   for (const { source, directory } of resources) {
     args.push("--ro-bind", source, source);
-    if (directory) exposedDirectories.push(source);
+    if (directory) {
+      exposedDirectories.push(source);
+      metadataRoots.push({ source, destination: source });
+    }
   }
   for (const { source, destination, directory } of resources) {
     if (source === destination) continue;
-    // Existing symlinks must be followed, not used as bind destinations.
-    // Only recreate aliases erased by the controller's tempRoot mount.
-    if (
-      isWithin(destination, tempRoot) &&
-      !exposedDirectories.some((root) => isWithin(destination, root))
-    ) {
+    // Existing symlinks inside grants must be followed, not used as bind
+    // destinations. Recreate aliases outside grants in the empty namespace.
+    if (!exposedDirectories.some((root) => isWithin(destination, root))) {
       args.push("--ro-bind", source, destination);
-      if (directory) exposedDirectories.push(destination);
+      if (directory) {
+        exposedDirectories.push(destination);
+        metadataRoots.push({ source, destination });
+      }
     }
   }
+  for (const { source, destination } of metadataRoots)
+    protect(source, destination);
   // Only controller-owned verification snapshots may restore a Git view. Never
   // expose the live common directory or grant these mounts to agent tools.
+  if (gitBindings.length) {
+    for (const [key, value] of Object.entries({
+      GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_ATTR_NOSYSTEM: "1",
+      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: "/dev/null",
+      GIT_CONFIG_KEY_1: "core.fsmonitor",
+      GIT_CONFIG_VALUE_1: "false",
+      GIT_CONFIG_KEY_2: "protocol.allow",
+      GIT_CONFIG_VALUE_2: "never",
+    }))
+      args.push("--setenv", key, value);
+  }
   for (const { source, destination } of gitBindings) {
     args.push("--dir", path.dirname(destination));
     args.push("--ro-bind", source, destination);
   }
-  args.push("--chdir", executionCwd, "--", "/bin/bash", "-lc", command);
+  args.push("--chdir", executionCwd, "--", "/bin/bash", "-c", command);
   return args;
 }
 
@@ -1011,13 +1058,13 @@ export function createFeatureToolBoundary(options: {
   const tempRoot = comparableExistingPath(path.dirname(cwd));
   const runtime = createFeatureRuntimeDirectories(tempRoot, cwd);
   let mode: FeatureSandboxMode = options.mode;
-  const localBash = createLocalBashOperations();
+  const localBash = createLocalBashOperations({ shellPath: "/bin/bash" });
   const bashOperations: BashOperations = {
     async exec(command, _requestedCwd, execution) {
       const result = await localBash.exec(
         `/usr/bin/bwrap ${sandboxCommandArguments(command, mode, tempRoot, cwd, runtime, cwd, resources).map(shellQuote).join(" ")}`,
         "/",
-        execution,
+        { ...execution, env: { PATH: "/usr/bin:/bin" } },
       );
       return result;
     },
@@ -1140,7 +1187,11 @@ export function createFeatureToolBoundary(options: {
   } satisfies FeatureToolBoundary;
 }
 
-/** Run an accepted graph check or caller-supplied preparation in its assigned workspace. */
+/** Run an offline graph check or network-enabled, credential-free preparation.
+ * Preparation shares the host network (including loopback), not registry-only
+ * egress. Only distribution tooling and the assigned workspace are mounted;
+ * credentials already placed in that workspace are the caller's responsibility.
+ */
 export async function runFeatureSandboxCommand(options: {
   workspaceRoot: string;
   cwd: string;
@@ -1202,31 +1253,10 @@ async function runSandboxCommand(
   }>((resolve, reject) => {
     const child = spawn("/usr/bin/bwrap", args, {
       cwd: "/",
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      ...(gitBindings
-        ? {
-            env: {
-              ...Object.fromEntries(
-                Object.entries(process.env).filter(
-                  ([key]) => !key.startsWith("GIT_"),
-                ),
-              ),
-              GIT_CONFIG_NOSYSTEM: "1",
-              GIT_CONFIG_SYSTEM: "/dev/null",
-              GIT_CONFIG_GLOBAL: "/dev/null",
-              GIT_OPTIONAL_LOCKS: "0",
-              GIT_ATTR_NOSYSTEM: "1",
-              GIT_TERMINAL_PROMPT: "0",
-              GIT_CONFIG_COUNT: "3",
-              GIT_CONFIG_KEY_0: "core.hooksPath",
-              GIT_CONFIG_VALUE_0: "/dev/null",
-              GIT_CONFIG_KEY_1: "core.fsmonitor",
-              GIT_CONFIG_VALUE_1: "false",
-              GIT_CONFIG_KEY_2: "protocol.allow",
-              GIT_CONFIG_VALUE_2: "never",
-            },
-          }
-        : {}),
+      // Sanitize before launching bwrap too (e.g. LD_PRELOAD/NODE_OPTIONS).
+      env: { PATH: "/usr/bin:/bin" },
     });
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
@@ -1247,7 +1277,15 @@ async function runSandboxCommand(
       ]);
     });
     const cancel = () => {
-      child.kill("SIGTERM");
+      // Kill only this invocation's process group. Killing the namespace
+      // supervisor also tears down descendants that created their own session.
+      if (child.pid) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
     };
     options.signal?.addEventListener("abort", cancel, { once: true });
     if (options.signal?.aborted) cancel();

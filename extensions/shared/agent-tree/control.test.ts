@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentTreeController } from "./control.ts";
+import { AgentSessionUnavailableError } from "./domain.ts";
 import type {
   AgentNodeSpec,
   AgentTreeExecutionMetadata,
@@ -18,7 +19,8 @@ class ControlledSession implements AgentTreeSession {
   readonly sends: string[] = [];
   readonly executionMetadata?: AgentTreeExecutionMetadata;
   isStreaming = false;
-  disposed = 0;
+  disposed = false;
+  disposeCalls = 0;
   interrupted = 0;
 
   constructor(executionMetadata?: AgentTreeExecutionMetadata) {
@@ -54,7 +56,8 @@ class ControlledSession implements AgentTreeSession {
   }
 
   dispose() {
-    this.disposed++;
+    this.disposed = true;
+    this.disposeCalls++;
   }
 }
 
@@ -83,6 +86,147 @@ function spec(overrides: Partial<AgentNodeSpec> = {}) {
     ...overrides,
   } satisfies AgentNodeSpec;
 }
+
+test("retirement cannot hide an earlier failed disposal during creation", async () => {
+  const session = new ControlledSession();
+  const failure = new Error("Disposal did not establish quiescence");
+  session.dispose = () => {
+    session.disposeCalls++;
+    throw failure;
+  };
+  const { factory } = controlledFactory(session);
+  const tree = new AgentTreeController({ factory });
+  await assert.rejects(
+    tree.spawn(spec({ shouldStart: () => false })),
+    (error) => error === failure,
+  );
+  const node = tree.view.list()[0]!;
+  await assert.rejects(tree.retire(node.id), (error) => error === failure);
+  await assert.rejects(tree.retire(node.id), (error) => error === failure);
+  assert.equal(session.disposeCalls, 1);
+});
+
+test("availability rejects missing and disposed sends without dispatch or mutation", async () => {
+  const session = new ControlledSession();
+  const events: TreeEvidenceEvent[] = [];
+  const tree = new AgentTreeController({
+    ...controlledFactory(session),
+    observer: (event) => events.push(event),
+  });
+  assert.deepEqual(tree.sessionAvailability("missing"), {
+    kind: "unavailable",
+    reason: "missing",
+  });
+  await assert.rejects(
+    tree.send("missing", "hello"),
+    new AgentSessionUnavailableError("missing", "missing"),
+  );
+  await tree.retire("missing");
+  const node = await tree.spawn(spec());
+  assert.deepEqual(tree.sessionAvailability(node.id), { kind: "available" });
+  session.disposed = true;
+  const before = structuredClone(node);
+  const eventCount = events.length;
+  await assert.rejects(
+    tree.send(node.id, "hello"),
+    new AgentSessionUnavailableError(node.id, "disposed"),
+  );
+  assert.deepEqual(node, before);
+  assert.equal(events.length, eventCount);
+  assert.deepEqual(session.sends, []);
+  await tree.dispose();
+  await assert.rejects(
+    tree.send("missing", "hello"),
+    new AgentSessionUnavailableError("missing", "disposed"),
+  );
+});
+
+test("failed turns with live adapters remain reusable", async () => {
+  const session = new ControlledSession();
+  const tree = new AgentTreeController(controlledFactory(session));
+  const node = await tree.spawn(spec());
+  session.emit({
+    type: "settled",
+    outcome: {
+      type: "failed",
+      error: "session disposed: ordinary provider text",
+    },
+  });
+  assert.deepEqual(tree.sessionAvailability(node.id), { kind: "available" });
+  await tree.send(node.id, "retry");
+  assert.deepEqual(session.sends, ["retry"]);
+  assert.equal(node.status, "running");
+  await tree.dispose();
+});
+
+for (const failed of [false, true]) {
+  test(`retirement preserves ${failed ? "error" : "done"} outcome and transcript`, async () => {
+    const session = new ControlledSession();
+    const tree = new AgentTreeController(controlledFactory(session));
+    const node = await tree.spawn(spec());
+    session.emit({ type: "assistant", text: "retained" });
+    session.emit({
+      type: "settled",
+      outcome: failed
+        ? { type: "failed", error: "failure", finalText: "partial" }
+        : { type: "completed", finalText: "result" },
+    });
+    const before = structuredClone(node);
+    await tree.cancel(node.id);
+    assert.deepEqual(node, before);
+    assert.equal(session.disposeCalls, 0);
+    await Promise.all([tree.retire(node.id), tree.retire(node.id)]);
+    assert.deepEqual(node, before);
+    assert.equal(session.listeners.size, 0);
+    assert.equal(session.disposeCalls, 1);
+    assert.equal(session.interrupted, 0);
+    await assert.rejects(
+      tree.send(node.id, "retry"),
+      new AgentSessionUnavailableError(node.id, "disposed"),
+    );
+    await tree.dispose();
+    assert.equal(session.disposeCalls, 1);
+  });
+}
+
+test("running retirement drains cancellation once and preserves its evidence", async () => {
+  const session = new ControlledSession();
+  const tree = new AgentTreeController(controlledFactory(session));
+  const node = await tree.spawn(spec());
+  await Promise.all([tree.retire(node.id), tree.cancel(node.id)]);
+  assert.equal(node.status, "cancelled");
+  assert.equal(session.interrupted, 1);
+  assert.equal(session.disposeCalls, 1);
+  await tree.dispose();
+});
+
+test("failed retirement cannot manufacture settlement or successful disposal evidence", async () => {
+  const session = new ControlledSession();
+  const failure = new Error("cleanup failed");
+  session.interrupt = async () => {
+    throw failure;
+  };
+  session.dispose = () => {
+    session.disposeCalls++;
+    throw failure;
+  };
+  const events: TreeEvidenceEvent[] = [];
+  const tree = new AgentTreeController({
+    ...controlledFactory(session),
+    observer: (event) => events.push(event),
+  });
+  const node = await tree.spawn(spec());
+  await assert.rejects(tree.retire(node.id), failure);
+  await assert.rejects(tree.retire(node.id), failure);
+  assert.equal(node.status, "running");
+  assert.equal(session.disposeCalls, 1);
+  assert.equal(
+    events.some((event) => event.type === "disposed"),
+    false,
+  );
+  assert.equal(sessionEvents(events).length, 0);
+  await tree.dispose();
+});
 
 function sessionEvents(events: ReadonlyArray<TreeEvidenceEvent>) {
   return events.filter((event) => event.type === "session_event");
@@ -199,6 +343,14 @@ test("records startup failure without requiring a session file", async () => {
     assert.equal(failed.error, "provider startup failed");
   }
   assert.equal(tree.view.get("failed-node")?.status, "error");
+  assert.deepEqual(tree.sessionAvailability("failed-node"), {
+    kind: "unavailable",
+    reason: "missing",
+  });
+  await assert.rejects(
+    tree.send("failed-node", "retry"),
+    new AgentSessionUnavailableError("failed-node", "missing"),
+  );
   await tree.dispose();
 });
 
@@ -264,11 +416,11 @@ test("observer failures are reported without changing lifecycle", async () => {
   await tree.cancel(node.id);
 
   assert.equal(tree.view.get(node.id)?.status, "cancelled");
-  assert.equal(session.disposed, 1);
+  assert.equal(session.disposeCalls, 1);
   assert.ok(errors.length >= 1);
   assert.equal(tree.evidenceStatus, "incomplete");
   await tree.dispose();
-  assert.equal(session.disposed, 1);
+  assert.equal(session.disposeCalls, 1);
 });
 
 test("evidence never includes prompts, cwd, assistant text, or tool payload text", async () => {
