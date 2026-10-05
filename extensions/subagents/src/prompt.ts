@@ -1,41 +1,32 @@
 /** All model-facing strings for the subagents tools. */
 
-/** Describes subagent_spawn, including harnesses and the fixed concurrency cap. */
+/** Describes background delegation, role defaults, and direct-agent capacity. */
 export const SUBAGENT_SPAWN_TOOL_DESCRIPTION =
-  "Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. Use profile luna-explore for broad routine independent read-only exploration and luna-worker for focused implementation, testing, and mechanical refactors. Use sol-worker (Sol/medium) for implementation tasks needing deeper reasoning. Route routine repository initial or closure audits through the hardcoded audit-pipeline. Keep the Sol/main agent responsible for cross-cutting integration and final acceptance. Profiles fix Pi, the exact model, and reasoning level; omit conflicting harness/model/reasoning_effort values. luna-explore has a read-only role prompt; luna-worker and sol-worker are authorized for scoped workspace changes. Without a profile, choose an explicit harness and select the model and reasoning for the task, or omit them to use the harness defaults. Fire-and-forget: this returns immediately with an id. When the subagent settles, its final output is automatically delivered as a follow-up message that triggers a new parent turn. Do not wait or poll for subagent completion. Children cannot orchestrate more agents/workflows or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Pi quotas are Sol 4, Terra 8, and Luna 16; Claude and Codex share an aggregate cap of 4.";
+  "Spawn an autonomous background subagent with its own context and normal host permissions. Choose a role profile independently of model: explore (read-only, GPT6 Luna default), implement (workspace changes, Sol6.1 default), or review (read-only, Sol6.1 default). Profiles default to Pi and accept model and reasoning_effort overrides; incompatible harness overrides are rejected. The parent chooses the model appropriate to the task: Sol6.1, GPT6 Luna, or GPT6 Astra rarely; ordinary custom models remain supported. Read-only roles use guidance and exclude explicit edit/write tools, not an OS sandbox. Without a profile, specify a harness and optionally its model/effort, or use harness defaults. Give a self-contained goal, scope, role, and expected output; a child can own a complete task including related tests and documentation. Children cannot orchestrate agents/workflows or ask the user. The main agent owns integration and final acceptance. Use trusted working directories. Returns immediately with an id; results arrive automatically as follow-ups. Direct Pi family quotas: Sol 4, Luna 16, Astra 4 (legacy IDs retained; Terra 8). Claude/Codex share a cap of 4; pipeline graphs do not use these quotas.";
 
-/** Adds background subagent delegation to the parent model's available-tools prompt. */
 export const SUBAGENT_SPAWN_PROMPT_SNIPPET =
-  "Spawn a background subagent on a chosen harness or Luna/Sol profile (own context, normal tools) for a self-contained task";
+  "Delegate a self-contained task to a background explore, implement, or review agent; choose model and effort independently";
 
-/** Guides the parent model to delegate standalone tasks without blocking for results. */
 export const SUBAGENT_SPAWN_PROMPT_GUIDELINES = [
-  "Use subagent_spawn to delegate self-contained tasks that can run in the background; give it a complete, standalone prompt.",
-  'After a tool result explicitly reports truncation, consider delegating a self-contained follow-up with subagent_spawn using profile "luna-explore"; do not wait or poll for it.',
-  "Use profile luna-explore for broad/routine independent read-only exploration and luna-worker for focused implementation, test execution, and mechanical refactors. Use sol-worker (Sol/medium) for implementation tasks needing deeper reasoning. Without a profile, select an explicit harness and the model and reasoning suited to the task. Route routine repository initial or closure audits through audit-pipeline.",
-  "Before delegating multi-part work to Luna, split it into independently completable scopes. Give each Luna exactly one bounded question or deliverable, an explicit list of files it may edit—or a minimal inspection scope for read-only work—and explicit non-goals. A Luna may inspect dependencies for context but must not edit files outside its assigned edit scope. Treat schemas/contracts, validators, fixtures/tests, and documentation as separate scopes unless they must change together to produce one independently verifiable result.",
-  "For Luna implementation tasks, include a compact pseudocode sketch of the desired module contract: inputs, outputs, key functions/types, expected behavior, and non-goals. Example: for a new feature, use separate Lunas for the isolated feature module, schema/types, validation, fixtures/tests, and documentation; keep shared exports and final wiring with the main agent.",
-  "Launch every dependency-ready Luna scope with non-overlapping file ownership in the same parallel wave, up to eight. Do not serialize independent Luna work. Keep shared contracts, central registries and manifests, integration files, overlapping edits, conflict resolution, and result integration with the main agent. Keep cross-cutting integration and final acceptance with the Sol/main agent.",
-  "For routine repository auditing, launch audit-pipeline instead of automatically spawning a direct reviewer after workers. Ask workers to put their conclusion and recommended next step first so it survives output truncation.",
-  "After subagent_spawn, continue useful independent work. If none remains, end the current turn and leave the overall task pending. The subagent result will be delivered automatically and trigger a follow-up parent turn.",
-  "Do not wait or poll for subagents. Do not use sleep, repeated subagent_check/subagent_list calls, or any other blocking command just to wait for completion.",
+  "Delegate when independent ownership helps. Supply a concise, self-contained goal, scope, role, and expected output; allow full-task ownership including related tests and documentation. Choose model and effort for the task, not a forced Luna-first escalation.",
+  "Use explore or review for read-only work and implement for workspace changes. Coordinate overlapping ownership when running agents in parallel; the main agent integrates results and owns final acceptance.",
+  "Ask for the next step and conclusion first, followed by evidence, changed paths where applicable, checks, and remaining risks. Do not authorize recursive delegation, user questions, credential changes, or unrequested Git delivery or external writes.",
+  "After spawning, continue independent work or end the turn with the overall task pending. Results arrive automatically and trigger a parent turn; do not wait, sleep, or repeatedly poll for completion.",
 ];
 
-/** Model-facing schema descriptions for subagent_spawn task and execution options. */
 export const SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS = {
   prompt:
-    "Task prompt for the subagent. Must be self-contained: include all needed context, file paths, and what to report back.",
-  name: "Short human-readable name for this subagent, shown in listings and the UI",
+    "Self-contained goal, scope, role, and expected output, with the context needed to own the assigned task independently.",
+  name: "Short human-readable name for listings and the UI",
   profile:
-    'Optional capability profile: "luna-explore", "luna-worker", or "sol-worker". With a profile, provide profile, prompt, and name; it fixes Pi, model, and reasoning. luna-explore uses read-only system guidance; luna-worker and sol-worker permit scoped workspace changes. sol-worker fixes Sol with medium reasoning.',
+    'Optional role: "explore" (read-only), "implement" (workspace changes), or "review" (read-only). Defaults to Pi; model and reasoning_effort are independently overridable.',
   harness:
-    'Harness to run the subagent on: "pi", "claude", or "codex". Required without a profile and conflicting with profiles.',
-  workingDir:
-    "Trusted working directory for the autonomous child (default: current working directory)",
+    'Harness: "pi", "claude", or "codex". Required without a profile. Profiles support Pi only; incompatible overrides are rejected rather than dropping role semantics.',
+  workingDir: "Trusted working directory (default: current working directory)",
   model:
-    'Model hint, interpreted by the chosen harness (pi: "provider/model-id" or model id; claude: model alias like "sonnet"/"opus"; codex: model slug). Omit for the harness default (pi inherits the current model).',
+    'Optional model override. Pi accepts "provider/model-id" or a model id, including custom models. Profile defaults: implement/review openai-codex/gpt-6.1-sol; explore openai-codex/gpt-6-luna. openai-codex/gpt-6-astra is available for rare task-appropriate use. Without a profile, Pi inherits the parent model; other harnesses interpret their native aliases/slugs.',
   reasoningEffort:
-    "Reasoning effort on a shared scale; the harness maps it to its nearest native equivalent (pi thinking level, codex reasoning effort, claude thinking budget). Omit for the harness default (pi inherits the current level).",
+    "Optional effort override on the shared scale. Profiles supply defaults; without a profile use harness defaults (Pi inherits the parent level).",
 };
 
 /** Builds the subagent_spawn result that tells the parent model how to continue. */

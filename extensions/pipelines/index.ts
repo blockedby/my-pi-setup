@@ -23,11 +23,13 @@ import { registerPipelineCommands } from "./commands.ts";
 import { showPipelineDashboard } from "./dashboard.ts";
 import {
   AUDIT_PIPELINE_ID,
-  FEATURE_PIPELINE_ID,
+  IMPLEMENTING_PIPELINE_ID,
+  PUBLIC_PIPELINE_IDS,
   PIPELINE_DEFINITION_IDS,
+  PIPELINE_MODELS,
   assertPipelineGitCommitSupported,
-  type PipelineDefinitionId,
   type PipelineHandoff,
+  type PipelineDefinitionId,
 } from "./domain.ts";
 import {
   parsePipelineWallclockLimit,
@@ -98,14 +100,14 @@ const AUDIT_CLOSURE_PARAMETERS = Type.Object(
 const PIPELINE_RUN_COMMON_PROPERTIES = {
   task: Type.String({
     description:
-      "Self-contained feature task, planning goal, or audit scope; include known constraints or acceptance criteria when available. Closure-specific scope belongs in audit.",
+      "Self-contained implementation task or audit scope, with constraints and acceptance criteria. Closure-specific scope belongs in audit.",
     minLength: 1,
     maxLength: 64 * 1024,
   }),
   working_dir: Type.Optional(
     Type.String({
       description:
-        "Existing working directory in which the pipeline operates. feature-pipeline and small-feature-pipeline require the exact root of a caller-prepared dedicated linked Git worktree. Install dependencies and build required workspace packages before launch; ignored dependency/build outputs are allowed. feature additionally requires Linux bubblewrap, clean source files and a stable HEAD, and rejects the primary checkout. Plan and audit default to the current directory.",
+        "Existing working directory. implementing-pipeline requires the exact root of a dedicated linked Git worktree on its own branch. Audit defaults to the current directory. Environment preparation is caller-owned; no feature graph, bootstrap commands, or network sandbox is required.",
       minLength: 1,
       maxLength: 16 * 1024,
     }),
@@ -113,8 +115,31 @@ const PIPELINE_RUN_COMMON_PROPERTIES = {
   git_commit: Type.Optional(
     Type.Boolean({
       description:
-        "feature-pipeline hard-requires explicit true, Linux bubblewrap, and a dedicated clean attached linked worktree; controller-owned Astra tasks, final Astra review, and later audit remediation may make scoped ordinary commits. small-feature also requires a caller-prepared linked worktree but keeps commit permission optional for its persistent implementer. Plan/audit reject true. Never permits push, delivery merge, history rewrite, deployment, or arbitrary branch/worktree operations.",
+        "Optional ordinary commit permission for the persistent implementer, limited to the supplied worktree/current branch; defaults off. Audit rejects true. Never permits push, delivery merge, history rewrite, deployment, or external-state changes.",
     }),
+  ),
+  role_models: Type.Optional(
+    Type.Object(
+      {
+        "pipeline-root": Type.Optional(StringEnum(PIPELINE_MODELS)),
+        "implement-small-feature": Type.Optional(StringEnum(PIPELINE_MODELS)),
+        "audit-feature-outcome": Type.Optional(StringEnum(PIPELINE_MODELS)),
+        "audit-logic-invariants": Type.Optional(StringEnum(PIPELINE_MODELS)),
+        "audit-functional-correctness": Type.Optional(
+          StringEnum(PIPELINE_MODELS),
+        ),
+        "audit-reliability-regressions": Type.Optional(
+          StringEnum(PIPELINE_MODELS),
+        ),
+        "audit-executor": Type.Optional(StringEnum(PIPELINE_MODELS)),
+        "audit-synthesis": Type.Optional(StringEnum(PIPELINE_MODELS)),
+      },
+      {
+        additionalProperties: false,
+        description:
+          "Explicit per-role models, validated against the actual registry. Sol defaults for implementation/root/synthesis; Luna for exploration/small scoped tasks; Astra rarely. Sessions may adapt with pipeline_model_select without changing role or losing context.",
+      },
+    ),
   ),
   audit: Type.Optional(
     Type.Union([AUDIT_INITIAL_PARAMETERS, AUDIT_CLOSURE_PARAMETERS], {
@@ -132,14 +157,6 @@ const PIPELINE_RUN_COMMON_PROPERTIES = {
   ),
 };
 
-const PLAN_PATH_PARAMETER = Type.Union(
-  [Type.String({ minLength: 1, maxLength: 16 * 1024 }), Type.Null()],
-  {
-    description:
-      "Explicit plan-pipeline destination. Use null for terminal-only delivery; relative paths resolve under working_dir and absolute paths must remain inside it.",
-  },
-);
-
 const PIPELINE_NAME_PARAMETER = Type.String({
   description: PIPELINE_NAME_DESCRIPTION,
   minLength: 1,
@@ -147,61 +164,22 @@ const PIPELINE_NAME_PARAMETER = Type.String({
   pattern: PIPELINE_NAME_PATTERN,
 });
 
-const FEATURE_PIPELINE_PARAMETERS = Type.Object(
+export const PIPELINE_RUN_PARAMETERS = Type.Object(
   {
     pipeline_name: PIPELINE_NAME_PARAMETER,
-    pipeline: Type.Optional(Type.Literal(FEATURE_PIPELINE_ID)),
+    pipeline: Type.Optional(StringEnum(PUBLIC_PIPELINE_IDS)),
     ...PIPELINE_RUN_COMMON_PROPERTIES,
-    worktree_root: Type.String({
-      description:
-        "Required absolute pre-existing directory for controller-owned feature graph worktrees.",
-      minLength: 1,
-      maxLength: 16 * 1024,
-    }),
-    worktree_prepare: Type.Array(
-      Type.String({ minLength: 1, maxLength: 32 * 1024 }),
-      {
-        description:
-          "Required ordered child-worktree preparation commands, including dependency installation and required workspace builds. These caller-declared commands have network access and writable isolated package caches; verification and agent commands remain offline. Pass an empty array only when no preparation is needed.",
-        maxItems: 64,
-      },
-    ),
-    plan_path: Type.Optional(Type.Null()),
   },
   { additionalProperties: false },
 );
-
-const OTHER_NON_PLAN_PIPELINE_PARAMETERS = Type.Object(
-  {
-    pipeline_name: PIPELINE_NAME_PARAMETER,
-    pipeline: StringEnum(["small-feature-pipeline", AUDIT_PIPELINE_ID]),
-    ...PIPELINE_RUN_COMMON_PROPERTIES,
-    plan_path: Type.Optional(Type.Null()),
-  },
-  { additionalProperties: false },
-);
-
-const PLAN_PIPELINE_PARAMETERS = Type.Object(
-  {
-    pipeline_name: PIPELINE_NAME_PARAMETER,
-    pipeline: Type.Literal("plan-pipeline"),
-    ...PIPELINE_RUN_COMMON_PROPERTIES,
-    plan_path: PLAN_PATH_PARAMETER,
-  },
-  { additionalProperties: false },
-);
-
-export const PIPELINE_RUN_PARAMETERS = Type.Union([
-  FEATURE_PIPELINE_PARAMETERS,
-  OTHER_NON_PLAN_PIPELINE_PARAMETERS,
-  PLAN_PIPELINE_PARAMETERS,
-]);
 
 export function resolvePipelineDefinition(requested?: string) {
-  if (!requested) return FEATURE_PIPELINE_ID;
-  const definition = PIPELINE_DEFINITION_IDS.find((id) => id === requested);
+  if (requested === undefined) return IMPLEMENTING_PIPELINE_ID;
+  const definition = PUBLIC_PIPELINE_IDS.find((id) => id === requested);
   if (!definition)
-    throw new Error(`Unsupported pipeline definition: ${requested}`);
+    throw new Error(
+      `Unsupported pipeline definition: ${requested}. Legacy definitions are inspection-only.`,
+    );
   return definition;
 }
 
@@ -324,6 +302,10 @@ export default function pipelines(pi: ExtensionAPI) {
     if (controller) return controller;
     let created: PipelineController;
     created = new PipelineController({
+      modelAvailable: (name) => {
+        const [provider, ...id] = name.split("/");
+        return Boolean(ctx.modelRegistry.find(provider, id.join("/")));
+      },
       createSessionFactory: (
         rootTools,
         definitionForRun,
@@ -390,13 +372,12 @@ export default function pipelines(pi: ExtensionAPI) {
     name: "pipeline_run",
     label: "Run Pipeline",
     description:
-      "Start one of four known hardcoded pipelines with a required unchanged 3–5-word lowercase kebab-case pipeline_name and return its canonical name-plus-eight-hex run id immediately. feature-pipeline runs five discovery tracks, two independent Astra/low plans, one persistent Astra/low canonical plan and execution graph, fresh Astra/low implementation tasks on controller-owned branches, final review by the same Astra session, then the existing independent audit flow. It requires git_commit=true, a prepared linked working_dir, an absolute existing worktree_root, and an explicit ordered worktree_prepare array. plan-pipeline requires plan_path; small-feature keeps optional commit permission; plan/audit reject commit permission.",
-    promptSnippet:
-      "Start a background implementation, planning, or Luna audit pipeline",
+      "Start implementing-pipeline (default) or audit-pipeline in the background. Implementation uses one persistent implementer, four independent audit tracks, and same-session remediation. Legacy pipelines are inspection-only.",
+    promptSnippet: "Start a background implementation or independent audit",
     promptGuidelines: [
-      "Always provide pipeline_name as the unchanged lowercase kebab-case base of 3–5 hyphen-separated words (maximum 64 characters), such as replace-heavy-plan-pipeline. Optionally provide wallclock_limit as an integer duration such as 30s, 5m, or 2h; stages warn at 80% and end as limited at 100% unless an earlier outcome wins. The controller appends the canonical eight-character hexadecimal suffix; use that exact returned id for later inspection or cancellation. Select a pipeline by requested outcome. Honor an explicit feature-pipeline, small-feature-pipeline, plan-pipeline, or audit-pipeline request. Use audit-pipeline for routine repository initial or closure audits that require four independent static Luna tracks, one audit-executor contributor, and incremental Luna synthesis without remediation. Use small-feature-pipeline for a bounded, well-specified implementation that fits one Astra/low implementation, four parallel independent Luna audit tracks, and one same-session Astra/low remediation pass. Use feature-pipeline for nontrivial new-feature implementation that needs discovery and multi-concern audit. Use plan-pipeline only when the requested deliverable is planning rather than implementation. Omission remains feature-pipeline.",
-      "Automatically use plan-pipeline for a durable audited implementation plan, task breakdown, dependency waves, or test/release plan when at least one complexity signal applies: the goal spans two or more of frontend, backend, data, DevOps, or runtime; it includes migration, rollout, rollback, operational readiness, or cross-team sequencing; or acceptance criteria, scope, and dependencies require repository discovery. An explicit plan-pipeline request does not require a complexity signal.",
-      "Do not choose plan-pipeline merely because an implementation request is cross-layer. Do not use implementation or planning pipelines for bugs, refactors, research-only work, or trivial edits; use audit-pipeline only when the requested outcome is a bounded repository audit rather than implementation. Before feature-pipeline or small-feature-pipeline, create and prepare a dedicated linked Git worktree and pass its exact root. For feature-pipeline also pass an absolute existing worktree_root and the explicit project commands in worktree_prepare; pass [] only when no child preparation is needed. git_commit is authoritative and never inferred from task prose. No pipeline receives push, delivery merge, history rewrite, deployment, or external-state authority. After launch, do not duplicate work in the same workspace; use pipeline_check occasionally or /pipelines for live inspection while continuing only unrelated work. Do not poll; completion arrives automatically as a follow-up handoff.",
+      "Provide an unchanged 3–5-word lowercase kebab-case pipeline_name. Implementation requires a dedicated linked worktree; audit defaults to the current directory. Include scope and acceptance criteria.",
+      "Use role_models for explicit role choices: Sol for implementation/root/synthesis by default, Luna for exploration or small scoped tasks, Astra rarely for complex work. No pipeline has recursive orchestration or external delivery authority; git_commit optionally permits only scoped implementer commits.",
+      "After launch, continue only unrelated work. Completion arrives automatically; use pipeline_check or /pipelines for occasional inspection, not polling. wallclock_limit optionally bounds each stage.",
     ],
     parameters: PIPELINE_RUN_PARAMETERS,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -408,47 +389,9 @@ export default function pipelines(pi: ExtensionAPI) {
         throw new Error(`working_dir is not a directory: ${workingDir}`);
       }
       const definition = resolvePipelineDefinition(params.pipeline);
-      const featureParams =
-        definition === FEATURE_PIPELINE_ID &&
-        "worktree_root" in params &&
-        "worktree_prepare" in params
-          ? params
-          : undefined;
-      if (definition === FEATURE_PIPELINE_ID) {
-        if (!featureParams) {
-          throw new Error(
-            "feature-pipeline requires worktree_root and worktree_prepare.",
-          );
-        }
-        if (!path.isAbsolute(featureParams.worktree_root)) {
-          throw new Error("feature-pipeline worktree_root must be absolute.");
-        }
-        if (
-          !fs.existsSync(featureParams.worktree_root) ||
-          !fs.statSync(featureParams.worktree_root).isDirectory()
-        ) {
-          throw new Error(
-            `feature-pipeline worktree_root is not an existing directory: ${featureParams.worktree_root}`,
-          );
-        }
-      }
       // Keep range validation in the public admission path as well as the
       // controller so rejected requests do not even construct controller state.
       parsePipelineWallclockLimit(params.wallclock_limit);
-      if (definition === "plan-pipeline" && params.plan_path === undefined) {
-        throw new Error(
-          "plan-pipeline requires plan_path explicitly as a path or null.",
-        );
-      }
-      if (
-        definition !== "plan-pipeline" &&
-        params.plan_path !== undefined &&
-        params.plan_path !== null
-      ) {
-        throw new Error(
-          `plan_path is only valid for plan-pipeline; received ${definition}.`,
-        );
-      }
       assertPipelineGitCommitSupported(definition, params.git_commit === true);
       if (params.audit && definition !== AUDIT_PIPELINE_ID) {
         throw new Error(
@@ -475,20 +418,12 @@ export default function pipelines(pi: ExtensionAPI) {
         pipelineName: params.pipeline_name,
         task: params.task,
         workingDir,
-        ...(definition === FEATURE_PIPELINE_ID
-          ? {
-              worktreeRoot: fs.realpathSync(featureParams!.worktree_root),
-              worktreePrepare: featureParams!.worktree_prepare,
-            }
-          : {}),
         pipeline: definition,
         ...(params.git_commit !== undefined
           ? { gitCommit: params.git_commit }
           : {}),
         ...(audit ? { audit } : {}),
-        ...(definition === "plan-pipeline"
-          ? { planPath: params.plan_path ?? null }
-          : {}),
+        ...(params.role_models ? { roleModels: params.role_models } : {}),
         ...(params.wallclock_limit !== undefined
           ? { wallclockLimit: params.wallclock_limit }
           : {}),

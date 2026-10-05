@@ -283,22 +283,43 @@ function auditOutcome(report: AuditFinalReport) {
       detail: "The final audit report is malformed or incomplete.",
     };
   }
+  if (report.mode === "closure") {
+    if (report.closureResults.some(({ status }) => status === "open")) {
+      return {
+        status: "failed" as const,
+        detail: "At least one supplied blocker remains open.",
+      };
+    }
+    if (report.closureResults.some(({ status }) => status === "unproven")) {
+      return {
+        status: "unproven" as const,
+        detail:
+          "At least one supplied blocker closure lacks sufficient evidence.",
+      };
+    }
+  }
   if (findings.length > 0) {
     return {
       status: "failed" as const,
       detail: `The final audit reported ${findings.length} finding(s) for the reviewed state; acceptance is conservatively failed because findings are not linked to canonical acceptance IDs.`,
     };
   }
-  if (unprovenChecks.length > 0 || unresolvedConflicts.length > 0) {
+  const requiredChecks = unprovenChecks.filter(
+    ({ requirement }) =>
+      requirement === undefined || requirement === "required",
+  );
+  if (requiredChecks.length > 0 || unresolvedConflicts.length > 0) {
     return {
       status: "unproven" as const,
-      detail: `The final audit contains ${unprovenChecks.length} unproven check(s) and ${unresolvedConflicts.length} unresolved conflict(s).`,
+      detail: `The final audit contains ${requiredChecks.length} required unproven check(s) and ${unresolvedConflicts.length} unresolved conflict(s).`,
     };
   }
   return {
     status: "passed" as const,
     detail:
-      "The final audit contains no findings, unproven checks, or unresolved conflicts.",
+      unprovenChecks.length === 0
+        ? "The final audit contains no findings, unproven checks, or unresolved conflicts."
+        : `The final audit has no findings, required unproven checks, or unresolved conflicts; ${unprovenChecks.length} optional or inapplicable check(s) remain recorded.`,
   };
 }
 

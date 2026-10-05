@@ -13,6 +13,8 @@ import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import type { AcceptanceEnvelope } from "./run-acceptance.ts";
 import {
   PIPELINE_DEFINITION_IDS,
+  LUNA_MODEL,
+  SOL_MODEL,
   stagesForDefinition,
   type PipelineRunSnapshot,
   type PipelineRunStatus,
@@ -63,7 +65,7 @@ function agent(
     role: "discover-problem",
     attempt: 1,
     title: "Discover Problem",
-    model: "openai-codex/gpt-5.6-luna",
+    model: LUNA_MODEL,
     cwd: "/secret-agent-cwd",
     persistent: false,
     status,
@@ -90,7 +92,7 @@ function snapshot(
       agent({
         id: "root-1",
         role: "pipeline-root",
-        model: "openai-codex/gpt-5.6-sol",
+        model: SOL_MODEL,
         status: "running",
         createdAt: 1_000,
       }),
@@ -334,7 +336,7 @@ test("all run and agent statuses project with deterministic root-first creation 
     agent({
       id: "root",
       role: "pipeline-root",
-      model: "openai-codex/gpt-5.6-sol",
+      model: SOL_MODEL,
       status: "idle",
       createdAt: 9,
     }),
@@ -371,13 +373,13 @@ test("all run and agent statuses project with deterministic root-first creation 
   });
   assert.equal(details.agents[0]?.thinkingLevel, "high");
   assert.equal(details.agents[1]?.thinkingLevel, "medium");
-  assert.match(
-    formatPipelineCheck(details),
-    /openai-codex\/gpt-5\.6-sol · high · idle/,
+  assert.equal(
+    formatPipelineCheck(details).includes(`${SOL_MODEL} · high · idle`),
+    true,
   );
-  assert.match(
-    formatPipelineCheck(details),
-    /openai-codex\/gpt-5\.6-luna · medium · starting/,
+  assert.equal(
+    formatPipelineCheck(details).includes(`${LUNA_MODEL} · medium · starting`),
+    true,
   );
   assert.equal(
     projectPipelineCheck(snapshot({ rootId: undefined, agents: [] }), now)
@@ -606,7 +608,7 @@ test("active previews prefer live text, fall back to finalized assistant text, a
     id: "live",
     role: "discover-problem",
     attempt: 1,
-    model: "openai-codex/gpt-5.6-luna",
+    model: LUNA_MODEL,
     thinkingLevel: "medium",
     status: "running",
     preview: "live assistant preview",
@@ -713,7 +715,7 @@ test("audit segment inspection is explicit, bounded, and omits private reducer e
       agent({
         id: "audit-root",
         role: "audit-synthesis",
-        model: "openai-codex/gpt-5.6-luna",
+        model: SOL_MODEL,
         status: "running",
         transcript: [
           {
@@ -727,7 +729,7 @@ test("audit segment inspection is explicit, bounded, and omits private reducer e
         id: "executor-1",
         parentId: "audit-root",
         role: "audit-executor",
-        model: "openai-codex/gpt-5.6-luna",
+        model: LUNA_MODEL,
         status: "running",
         transcript: [
           {

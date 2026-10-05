@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import {
   FEATURE_PIPELINE_ID,
-  SMALL_FEATURE_PIPELINE_ID,
+  isImplementingWorkflow,
   type PipelineDefinitionId,
 } from "./domain.ts";
 
@@ -58,8 +58,7 @@ export function implementationPipelineRequiresLinkedWorktree(
   definition: PipelineDefinitionId,
 ) {
   return (
-    definition === FEATURE_PIPELINE_ID ||
-    definition === SMALL_FEATURE_PIPELINE_ID
+    definition === FEATURE_PIPELINE_ID || isImplementingWorkflow(definition)
   );
 }
 

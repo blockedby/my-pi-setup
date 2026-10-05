@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { Check } from "typebox/value";
 import { captureReviewIdentity } from "./review-identity.ts";
 import { createRunEvidenceHandoff } from "./run-evidence-handoff.ts";
 import { assessExecutionEvidence } from "./execution-evidence-assessment.ts";
@@ -57,14 +58,17 @@ import {
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_CHILD_ROLES,
   SMALL_FEATURE_PIPELINE_ID,
+  IMPLEMENTING_PIPELINE_ID,
+  isImplementingWorkflow,
+  selectedPipelineModel,
+  validatePipelineRoleModels,
+  assertPipelineLaunchSupported,
   assertPipelineGitCommitSupported,
   assertPipelineName,
   isCanonicalPipelineRunId,
   PIPELINE_ID_ATTEMPTS,
   childContextPolicyFor,
-  definitionFor,
   initialStageForDefinition,
-  modelForRole,
   roleBelongsToDefinition,
   rolesForDefinition,
   stagesForDefinition,
@@ -86,7 +90,7 @@ import {
 } from "./domain.ts";
 import {
   resolvePlanOutputPath,
-  validatePipelineReport,
+  validatePipelineReport as validateLegacyPipelineReport,
   writePlanOutput,
 } from "./plan-contract.ts";
 import {
@@ -152,6 +156,7 @@ import {
 } from "./feature-worktrees.ts";
 import {
   AuditSegment,
+  auditTrackReportSchema,
   buildAuditTrackPrompt,
   type AuditGitIdentity,
   type AuditSegmentContext,
@@ -237,6 +242,33 @@ export function pipelineAuditSubmissionAllowed(
     segmentActive &&
     AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role)
   );
+}
+
+// Preserve historical readers; new auditors share the canonical track schema.
+function validatePipelineReport(
+  definition: PipelineDefinitionId,
+  role: string,
+  text: string,
+) {
+  if (
+    definition === IMPLEMENTING_PIPELINE_ID &&
+    role !== SMALL_FEATURE_IMPLEMENTER_ROLE
+  ) {
+    const auditRole = STATIC_LUNA_AUDIT_ROLES.find(
+      (candidate) => candidate === role,
+    );
+    try {
+      const report: unknown = JSON.parse(text);
+      if (auditRole && Check(auditTrackReportSchema(auditRole), report))
+        return [];
+    } catch {
+      return ["Audit report must be exactly one JSON object."];
+    }
+    return [
+      "Audit report must match the complete schema for its assigned track.",
+    ];
+  }
+  return validateLegacyPipelineReport(definition, role, text);
 }
 
 function isFeatureDiscoveryRole(
@@ -405,6 +437,8 @@ function gitHead(workingDir: string) {
 }
 
 export interface PipelineControllerOptions {
+  /** Production admission uses the same registry as session creation. */
+  readonly modelAvailable?: (model: string) => boolean;
   readonly createSessionFactory: (
     rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
     definitionForRun: (runId: string) => PipelineDefinitionId,
@@ -547,6 +581,13 @@ export class PipelineController {
   private readonly featureReviewRuntimeFactory: typeof createFeatureReviewRuntime;
   private readonly artifactRoot: string;
   private readonly makeRunId: (pipelineName: string) => string;
+  private readonly modelAvailable: PipelineControllerOptions["modelAvailable"];
+
+  /** Runtime admission is strict; historical graph fixtures override this hook
+   * only to exercise dormant recovery code, never through the launch tool. */
+  protected assertLaunchSupported(definition: PipelineDefinitionId) {
+    assertPipelineLaunchSupported(definition);
+  }
   private shuttingDown = false;
 
   constructor(options: PipelineControllerOptions) {
@@ -559,6 +600,7 @@ export class PipelineController {
       options.wallclockScheduler ??
       options.scheduler ??
       systemPipelineWallclockScheduler;
+    this.modelAvailable = options.modelAvailable;
     this.makeRunId =
       options.makeRunId ??
       ((pipelineName) =>
@@ -843,7 +885,7 @@ export class PipelineController {
       return run.stage === "final-resolve" ? "final-resolve" : "build";
     if (role.startsWith("audit-")) {
       if (run.definition === AUDIT_PIPELINE_ID) return "audit";
-      if (run.definition === SMALL_FEATURE_PIPELINE_ID) return "final-audit";
+      if (isImplementingWorkflow(run.definition)) return "final-audit";
       return run.stage === "final-audit" || run.stage === "final-resolve"
         ? "final-audit"
         : "audit";
@@ -1591,6 +1633,14 @@ export class PipelineController {
     };
     let kind: string = event.type;
     let detail: string | undefined;
+    if (
+      event.type === "session_event" &&
+      event.event.type === "model_selected"
+    ) {
+      facts.previousModel = event.event.previousModel;
+      facts.model = event.event.model;
+      detail = event.event.reason;
+    }
     if (event.type === "session_created") {
       facts.provider = event.executionMetadata?.provider ?? null;
       facts.model = event.executionMetadata?.model ?? null;
@@ -1737,7 +1787,13 @@ export class PipelineController {
     );
     if (this.shuttingDown)
       throw new Error("Pipeline controller is shutting down.");
-    const definition = request.pipeline ?? FEATURE_PIPELINE_ID;
+    const definition = request.pipeline ?? IMPLEMENTING_PIPELINE_ID;
+    this.assertLaunchSupported(definition);
+    validatePipelineRoleModels(
+      definition,
+      request.roleModels,
+      this.modelAvailable,
+    );
     if (definition === PLAN_PIPELINE_ID) {
       if (
         !Object.prototype.hasOwnProperty.call(request, "planPath") ||
@@ -1844,8 +1900,19 @@ export class PipelineController {
         "Closure audit requires prior blockers, closure conditions, a remediation diff, and at least one directly touched invariant.",
       );
     }
-    if (definition === SMALL_FEATURE_PIPELINE_ID) {
+    if (isImplementingWorkflow(definition)) {
       assertImplementationPipelineWorkspace(definition, request.workingDir);
+      const canonicalDir = fs.realpathSync(request.workingDir);
+      const occupyingRun = [...this.runs.values()].find(
+        (candidate) =>
+          !this.handoffs.has(candidate.id) &&
+          isImplementingWorkflow(candidate.definition) &&
+          fs.realpathSync(candidate.request.workingDir) === canonicalDir,
+      );
+      if (occupyingRun)
+        throw new Error(
+          `Implementation workspace is already leased by run "${occupyingRun.id}".`,
+        );
     }
     const normalizedRequest =
       definition === AUDIT_PIPELINE_ID
@@ -1877,6 +1944,9 @@ export class PipelineController {
       request: {
         ...normalizedRequest,
         gitCommit: normalizedRequest.gitCommit === true,
+        ...(normalizedRequest.roleModels
+          ? { roleModels: { ...normalizedRequest.roleModels } }
+          : {}),
       },
       baseSha:
         featureCaller?.baseCommit ?? gitHead(effectiveRequest.workingDir),
@@ -1977,7 +2047,13 @@ export class PipelineController {
               : "pipeline-root",
         attempt: 1,
         title: run.id,
-        model: definitionFor(run.definition).rootModel,
+        model: selectedPipelineModel(
+          run.definition,
+          run.definition === AUDIT_PIPELINE_ID
+            ? AUDIT_SYNTHESIS_ROLE
+            : "pipeline-root",
+          run.request.roleModels,
+        ),
         thinkingLevel: run.definition === PLAN_PIPELINE_ID ? "low" : undefined,
         cwd: run.request.workingDir,
         prompt: buildPipelinePrompt(run.definition, run.request),
@@ -3590,7 +3666,11 @@ export class PipelineController {
         role: AUDIT_SYNTHESIS_ROLE,
         attempt: 1,
         title: scopedSessionTitle(run.id, titleForRole(AUDIT_SYNTHESIS_ROLE)),
-        model: modelForRole(AUDIT_SYNTHESIS_ROLE),
+        model: selectedPipelineModel(
+          run.definition,
+          AUDIT_SYNTHESIS_ROLE,
+          run.request.roleModels,
+        ),
         cwd: run.request.workingDir,
         prompt: "Controller-deferred audit synthesis.",
         persistent: true,
@@ -3618,7 +3698,11 @@ export class PipelineController {
             role,
             attempt,
             title: scopedSessionTitle(run.id, titleForRole(role)),
-            model: modelForRole(role),
+            model: selectedPipelineModel(
+              run.definition,
+              role,
+              run.request.roleModels,
+            ),
             cwd: run.request.workingDir,
             prompt: buildAuditTrackPrompt(role, context),
             shouldStart: () => run.status === "running",
@@ -3681,6 +3765,7 @@ export class PipelineController {
     run: MutableRun,
     sessionId: string,
     error: unknown,
+    instruction = "Use pipeline_audit_submit with the complete strict report object, correcting the reported fields, then stop.",
   ) {
     const count = (this.auditCorrections.get(sessionId) ?? 0) + 1;
     this.auditCorrections.set(sessionId, count);
@@ -3701,7 +3786,7 @@ export class PipelineController {
     const detail = error instanceof Error ? error.message : String(error);
     await this.tree.send(
       sessionId,
-      `Your audit submission was rejected (correction ${count}/3): ${detail} Use pipeline_audit_submit with the complete strict report object, correcting the reported fields, then stop. Do not rerun other tracks.`,
+      `Your audit submission was rejected (correction ${count}/3): ${detail} ${instruction} Correct transport only; do not repeat the review or rerun other tracks.`,
     );
   }
 
@@ -4391,7 +4476,7 @@ export class PipelineController {
     run: MutableRun,
     waitedChildren: ReadonlyArray<AgentNodeSnapshot>,
   ) {
-    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+    if (isImplementingWorkflow(run.definition)) {
       const boundary =
         run.stage === "build"
           ? {
@@ -4473,7 +4558,7 @@ export class PipelineController {
 
   setStage(runId: string, stage: PipelineStage) {
     const run = this.requireActiveRun(runId);
-    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+    if (isImplementingWorkflow(run.definition)) {
       const stages = stagesForDefinition(run.definition);
       const currentIndex = stages.indexOf(run.stage);
       const nextIndex = stages.indexOf(stage);
@@ -4483,7 +4568,7 @@ export class PipelineController {
         nextIndex > currentIndex + 1
       ) {
         throw new Error(
-          `Invalid small-feature-pipeline stage transition: ${run.stage} to ${stage}.`,
+          `Invalid ${run.definition} stage transition: ${run.stage} to ${stage}.`,
         );
       }
       if (stage === "final-audit") {
@@ -4499,7 +4584,7 @@ export class PipelineController {
           ) !== 1
         ) {
           throw new Error(
-            "small-feature-pipeline completion requires one same-session Astra remediation pass.",
+            `${run.definition} completion requires one same-session implementer remediation pass.`,
           );
         }
         this.requireValidReports(
@@ -4654,17 +4739,17 @@ export class PipelineController {
         `${role} can only start during feature-pipeline stage audit.`,
       );
     }
-    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+    if (isImplementingWorkflow(run.definition)) {
       const requiredStage =
         role === SMALL_FEATURE_IMPLEMENTER_ROLE ? "build" : "final-audit";
       if (run.stage !== requiredStage) {
         throw new Error(
-          `${role} can only start during small-feature-pipeline stage ${requiredStage}.`,
+          `${role} can only start during ${run.definition} stage ${requiredStage}.`,
         );
       }
       if (priorAttempts.length > 0) {
         throw new Error(
-          `small-feature-pipeline role ${role} already has its allowed child session.`,
+          `${run.definition} role ${role} already has its allowed child session.`,
         );
       }
     } else if (run.definition === PLAN_PIPELINE_ID) {
@@ -4718,8 +4803,13 @@ export class PipelineController {
       role,
       attempt,
       title: scopedSessionTitle(run.id, titleForRole(role)),
-      model: modelForRole(role),
+      model: selectedPipelineModel(
+        run.definition,
+        role,
+        run.request.roleModels,
+      ),
       thinkingLevel:
+        run.definition !== IMPLEMENTING_PIPELINE_ID &&
         role === SMALL_FEATURE_IMPLEMENTER_ROLE
           ? ("low" as const)
           : run.definition === PLAN_PIPELINE_ID
@@ -4733,8 +4823,9 @@ export class PipelineController {
         promptContext,
       ),
       persistent:
-        run.definition === SMALL_FEATURE_PIPELINE_ID &&
-        role === SMALL_FEATURE_IMPLEMENTER_ROLE,
+        run.definition === IMPLEMENTING_PIPELINE_ID ||
+        (run.definition === SMALL_FEATURE_PIPELINE_ID &&
+          role === SMALL_FEATURE_IMPLEMENTER_ROLE),
       shouldStart: () => run.status === "starting" || run.status === "running",
     };
     return this.tree.spawn(spec);
@@ -4770,26 +4861,65 @@ export class PipelineController {
     if (run.status !== "starting" && run.status !== "running") return children;
     await this.pumpAuditSegment(run);
     if (
-      run.definition === SMALL_FEATURE_PIPELINE_ID &&
+      isImplementingWorkflow(run.definition) &&
       (run.status === "starting" || run.status === "running")
     ) {
-      const invalid = children.find((child) => {
-        if (this.hasExecutionPartial(run, child.id)) return false;
-        if (child.status === "error" || child.status === "cancelled") {
-          return true;
+      for (const child of children) {
+        // Another overlapping wait may already be correcting this session.
+        // Join that turn before judging its still-visible prior report.
+        if (child.status === "starting" || child.status === "running") {
+          await this.tree.wait([child.id], signal);
+          this.settleDue(run);
         }
-        return (
-          validatePipelineReport(run.definition, child.role, child.finalText)
-            .length > 0
+        if (run.status !== "starting" && run.status !== "running")
+          return children;
+        if (this.hasExecutionPartial(run, child.id)) continue;
+        let issues = validatePipelineReport(
+          run.definition,
+          child.role,
+          child.finalText,
         );
-      });
-      if (invalid) {
-        this.failRun(
-          run,
-          `small-feature-pipeline child ${invalid.role} did not complete with a valid report.`,
-          true,
-        );
-        return children;
+        // Correct malformed audit transport in the original independent session;
+        // this is neither a replacement reviewer nor a new audit wave.
+        while (
+          run.definition === IMPLEMENTING_PIPELINE_ID &&
+          child.role !== SMALL_FEATURE_IMPLEMENTER_ROLE &&
+          issues.length > 0 &&
+          child.status === "idle" &&
+          (run.status === "starting" || run.status === "running")
+        ) {
+          await this.auditCorrection(
+            run,
+            child.id,
+            new Error(issues.join(" ")),
+            "Return only the corrected complete JSON audit report, then stop.",
+          );
+          if (run.status !== "starting" && run.status !== "running")
+            return children;
+          await this.tree.wait([child.id], signal);
+          this.settleDue(run);
+          if (this.hasExecutionPartial(run, child.id)) break;
+          issues = validatePipelineReport(
+            run.definition,
+            child.role,
+            child.finalText,
+          );
+        }
+        if (run.status !== "starting" && run.status !== "running")
+          return children;
+        if (this.hasExecutionPartial(run, child.id)) continue;
+        if (
+          child.status === "error" ||
+          child.status === "cancelled" ||
+          issues.length > 0
+        ) {
+          this.failRun(
+            run,
+            `${run.definition} child ${child.role} did not complete with a valid report.`,
+            true,
+          );
+          return children;
+        }
       }
     }
     if (
@@ -4857,26 +4987,26 @@ export class PipelineController {
         "feature-pipeline discovery retries are controller-owned and unavailable to the selected implementation root.",
       );
     }
-    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+    if (isImplementingWorkflow(run.definition)) {
       if (agent.role !== SMALL_FEATURE_IMPLEMENTER_ROLE) {
         throw new Error(
-          "small-feature-pipeline audit children cannot be retried or continued.",
+          `${run.definition} audit children cannot be retried or continued by the coordinator.`,
         );
       }
       if (run.stage !== "final-resolve") {
         throw new Error(
-          "small-feature-pipeline Astra remediation can only run during final-resolve.",
+          `${run.definition} implementer remediation can only run during final-resolve.`,
         );
       }
       this.requireValidReports(run, STATIC_LUNA_AUDIT_ROLES, run.stage);
       if (agent.status !== "idle") {
         throw new Error(
-          "small-feature-pipeline Astra must be idle before remediation.",
+          `${run.definition} implementer must be idle before remediation.`,
         );
       }
       if ((this.childContinuations.get(id) ?? 0) >= 1) {
         throw new Error(
-          "small-feature-pipeline Astra already completed its remediation pass.",
+          `${run.definition} implementer already completed its remediation pass.`,
         );
       }
     } else if (run.definition === PLAN_PIPELINE_ID) {
@@ -4920,23 +5050,23 @@ export class PipelineController {
         );
       }
     }
-    const continuationText =
-      run.definition === SMALL_FEATURE_PIPELINE_ID
-        ? [
-            "Independent Luna audit reports to resolve:",
-            ...STATIC_LUNA_AUDIT_ROLES.flatMap((role) => [
-              `${titleForRole(role)}:`,
-              this.agentsFor(runId).find((candidate) => candidate.role === role)
-                ?.finalText ?? "",
-            ]),
-            "Remediation instruction:",
-            text,
-          ].join("\n")
-        : text;
+    const continuationText = isImplementingWorkflow(run.definition)
+      ? [
+          "Independent audit reports to resolve:",
+          ...STATIC_LUNA_AUDIT_ROLES.flatMap((role) => [
+            `${titleForRole(role)}:`,
+            this.agentsFor(runId).find((candidate) => candidate.role === role)
+              ?.finalText ?? "",
+          ]),
+          "Fix each actionable finding or reject it with specific evidence. Rerun appropriate checks and return the implementation report; do not start another audit.",
+          "Remediation instruction:",
+          text,
+        ].join("\n")
+      : text;
     await this.tree.send(id, continuationText);
     if (
       run.definition === PLAN_PIPELINE_ID ||
-      run.definition === SMALL_FEATURE_PIPELINE_ID
+      isImplementingWorkflow(run.definition)
     ) {
       this.childContinuations.set(
         id,
@@ -5019,10 +5149,10 @@ export class PipelineController {
         "audit-pipeline completion is controller-owned and requires a validated final synthesis report.",
       );
     }
-    if (run.definition === SMALL_FEATURE_PIPELINE_ID) {
+    if (isImplementingWorkflow(run.definition)) {
       if (run.stage !== "complete") {
         throw new Error(
-          "small-feature-pipeline must finish same-session Astra remediation before completion.",
+          `${run.definition} must finish same-session implementer remediation before completion.`,
         );
       }
       this.requireValidReports(

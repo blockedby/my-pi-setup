@@ -77,7 +77,10 @@ export function timedPipelineStage(
       stage === "final-resolve"
     );
   }
-  if (definition === "small-feature-pipeline") {
+  if (
+    definition === "small-feature-pipeline" ||
+    definition === "implementing-pipeline"
+  ) {
     return (
       stage === "build" || stage === "final-audit" || stage === "final-resolve"
     );

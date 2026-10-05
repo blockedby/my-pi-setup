@@ -285,7 +285,7 @@ test("every pipeline role policy removes cancellation during host resource loadi
   });
 });
 
-test("small-feature policies isolate read-only roles and keep Luna workspace tools", () => {
+test("implementation policies preserve read-only roles and normal worker tools", () => {
   const rootDenied = new Set<string>(
     readOnlyPipelineRootToolPolicy().excludeTools,
   );

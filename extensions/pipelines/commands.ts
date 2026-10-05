@@ -1,8 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-  PIPELINE_DEFINITION_IDS,
-  type PipelineDefinitionId,
-} from "./domain.ts";
+import { PUBLIC_PIPELINE_IDS, type PipelineDefinitionId } from "./domain.ts";
 
 export function buildPipelineCommandMessage(
   pipeline: PipelineDefinitionId,
@@ -17,7 +14,7 @@ export function buildPipelineCommandMessage(
 }
 
 export function registerPipelineCommands(pi: ExtensionAPI) {
-  for (const pipeline of PIPELINE_DEFINITION_IDS) {
+  for (const pipeline of PUBLIC_PIPELINE_IDS) {
     pi.registerCommand(`pipelines:${pipeline}`, {
       description: `Run ${pipeline} with an optional task description`,
       handler: async (args) => {

@@ -9,34 +9,55 @@ import type {
 // These quotas govern direct subagent admission only. Fixed pipeline graphs
 // must not import or apply them to pipeline roots or children.
 export const PI_MODEL_QUOTAS = {
+  "openai-codex/gpt-6.1-sol": 4,
+  "openai-codex/gpt-6-luna": 16,
+  "openai-codex/gpt-6-astra": 4,
   "openai-codex/gpt-5.6-sol": 4,
   "openai-codex/gpt-5.6-terra": 8,
   "openai-codex/gpt-5.6-luna": 16,
 } as const;
 export const NON_PI_QUOTA = 4;
 
-export const SUBAGENT_PROFILES = {
-  "luna-explore": {
+const COMMON_ROLE_GUIDANCE =
+  "Own the complete assigned task independently within its scope; do not split tests or documentation into separate workers by default. Do not delegate recursively or ask the user questions; report blockers to the main agent. Do not change credentials or perform unrequested Git delivery or external-state writes. The main agent owns integration and final acceptance. Report the recommended next step and conclusion first, then concise evidence, validation, and remaining risks.";
+
+const ROLE_PROFILES = {
+  explore: {
+    role: "explore",
+    readOnly: true,
     harness: "pi",
-    model: "openai-codex/gpt-5.6-luna",
+    model: "openai-codex/gpt-6-luna",
     reasoningEffort: "max",
-    systemPrompt:
-      "You are Luna, a read-only exploration subagent. Investigate broadly and independently using the full normal tool set. Do not edit, create, delete, rename, format, commit, push, or otherwise mutate files, configuration, repositories, or external state. Start with a concise conclusion and recommended next step, then provide evidence with exact paths and commands. Separate verified facts from hypotheses.",
+    systemPrompt: `Explore the assigned goal broadly and independently. This is a read-only role, not an OS sandbox: do not mutate files, configuration, repositories, or external state, including through commands or checks. Separate verified facts from hypotheses and cite relevant paths. ${COMMON_ROLE_GUIDANCE}`,
   },
-  "luna-worker": {
+  implement: {
+    role: "implement",
+    readOnly: false,
     harness: "pi",
-    model: "openai-codex/gpt-5.6-luna",
-    reasoningEffort: "max",
-    systemPrompt:
-      "You are Luna, an autonomous implementation worker. Make focused changes within the requested scope, run proportionate checks, and report the conclusion first, followed by changed paths, validation, and remaining risks. You may edit workspace files and run tests, but do not commit, push, change credentials, or make unrelated or external-state changes. Leave cross-cutting integration and final acceptance to the Sol/main agent.",
-  },
-  "sol-worker": {
-    harness: "pi",
-    model: "openai-codex/gpt-5.6-sol",
+    model: "openai-codex/gpt-6.1-sol",
     reasoningEffort: "medium",
-    systemPrompt:
-      "You are Sol, an autonomous implementation worker for tasks needing deeper reasoning than routine delegated work. Make focused changes within the requested scope, run proportionate checks, and report the conclusion first, followed by changed paths, validation, and remaining risks. You may edit workspace files and run tests, but do not commit, push, change credentials, or make unrelated or external-state changes. Leave cross-cutting integration and final acceptance to the main agent.",
+    systemPrompt: `Implement the assigned goal, including related tests and documentation as needed. Use normal tools to make scoped workspace changes and run proportionate checks. Report changed paths and executed results. ${COMMON_ROLE_GUIDANCE}`,
   },
+  review: {
+    role: "review",
+    readOnly: true,
+    harness: "pi",
+    model: "openai-codex/gpt-6.1-sol",
+    reasoningEffort: "medium",
+    systemPrompt: `Review the assigned goal and scope for actionable defects using evidence, impact, and confidence. This is a read-only role, not an OS sandbox: do not mutate files, configuration, repositories, or external state, including through commands or checks. Report findings with locations, consequences, and minimal remediation; distinguish unproven risks. ${COMMON_ROLE_GUIDANCE}`,
+  },
+} as const;
+
+export const SUBAGENT_PROFILES = {
+  ...ROLE_PROFILES,
+  // Compatibility names preserve roles, not obsolete model generations.
+  "luna-explore": ROLE_PROFILES.explore,
+  "luna-worker": {
+    ...ROLE_PROFILES.implement,
+    model: "openai-codex/gpt-6-luna",
+    reasoningEffort: "max",
+  },
+  "sol-worker": ROLE_PROFILES.implement,
 } as const;
 
 export type SubagentProfile = keyof typeof SUBAGENT_PROFILES;
@@ -60,12 +81,19 @@ export function applySubagentProfile(
       throw new Error("harness is required without a profile.");
     return { ...options, systemPrompt: undefined };
   }
-  if (options.harness || options.model || options.reasoningEffort) {
+  const defaults = SUBAGENT_PROFILES[profile];
+  if (options.harness && options.harness !== defaults.harness) {
+    // Other backends currently ignore profileSystemPrompt. Do not silently
+    // drop role semantics or substitute a different harness.
     throw new Error(
-      `Profile "${profile}" fixes harness, model, and reasoning_effort; omit conflicting explicit values.`,
+      `Profile "${profile}" requires the Pi harness to preserve role guidance; harness "${options.harness}" is incompatible. Use Pi or omit the profile.`,
     );
   }
-  return { ...SUBAGENT_PROFILES[profile] };
+  return {
+    ...defaults,
+    model: options.model ?? defaults.model,
+    reasoningEffort: options.reasoningEffort ?? defaults.reasoningEffort,
+  };
 }
 
 export function resolvePiModel(
@@ -103,7 +131,17 @@ export function canonicalPiModelKey(
   model: Pick<Model<Api>, "provider" | "id"> | undefined,
 ): QuotaKey {
   if (!model) return "pi-unresolved";
-  const key = `${model.provider}/${model.id}`;
+  // Legacy and current IDs share family capacity; switching versions cannot
+  // double a family's direct-subagent allowance.
+  const identity = `${model.provider}/${model.id}`;
+  const key =
+    identity === "openai-codex/gpt-5.6-sol"
+      ? "openai-codex/gpt-6.1-sol"
+      : identity === "openai-codex/gpt-5.6-luna"
+        ? "openai-codex/gpt-6-luna"
+        : identity === "openai-codex/gpt-5.6-astra"
+          ? "openai-codex/gpt-6-astra"
+          : identity;
   return key in PI_MODEL_QUOTAS
     ? (key as CanonicalPiModelKey)
     : "pi-unresolved";

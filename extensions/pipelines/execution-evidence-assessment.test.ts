@@ -288,6 +288,39 @@ function status(
   return result.criteria.find((criterion) => criterion.id === id)?.status;
 }
 
+test("model provenance records session-local selections and rejects unexplained switches", () => {
+  const created = runEvent("session_created", 0, {
+    sessionId: "owner",
+    facts: {
+      requestedModel: "openai-codex/gpt-6.1-sol",
+      model: "gpt-6.1-sol",
+      provider: "openai-codex",
+    },
+  });
+  const chosen = runEvent("model_selected", 1, {
+    sessionId: "owner",
+    detail: "Routine remaining checks",
+    facts: {
+      previousModel: "openai-codex/gpt-6.1-sol",
+      model: "openai-codex/gpt-6-luna",
+    },
+  });
+  const assess = (switchEvent: RunEvent) =>
+    assessExecutionEvidence({
+      events: [created, switchEvent],
+      graphEvents: [],
+      state: "final",
+      featureGraphRequired: false,
+      completeness: "complete",
+    }).criteria.find(({ id }) => id === "model-provenance");
+  assert.equal(assess(chosen)?.status, "passed");
+  assert.deepEqual(assess(chosen)?.evidenceRefs, [
+    "run-events:session_created",
+    "run-events:model_selected",
+  ]);
+  assert.equal(assess({ ...chosen, detail: undefined })?.status, "unproven");
+});
+
 test("reduces overlapping and serial task turns into per-fork actual intervals", () => {
   eventNumber = 0;
   const overlapping = assessment(

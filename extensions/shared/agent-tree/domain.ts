@@ -46,6 +46,12 @@ export interface AgentNodeSnapshot {
 }
 
 export type AgentTreeSessionEvent =
+  | {
+      readonly type: "model_selected";
+      readonly previousModel: string;
+      readonly model: string;
+      readonly reason: string;
+    }
   | { readonly type: "run_started" }
   | { readonly type: "user"; readonly text: string }
   | {
@@ -149,6 +155,12 @@ export interface TreeEvidenceIdentity {
 }
 
 export type TreeEvidenceSessionEvent =
+  | {
+      readonly type: "model_selected";
+      readonly previousModel: string;
+      readonly model: string;
+      readonly reason: string;
+    }
   | { readonly type: "run_started" }
   | {
       readonly type: "tool";

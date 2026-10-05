@@ -13,6 +13,8 @@ import {
 import {
   AUDIT_SEGMENT_LUNA_ROLES,
   STATIC_LUNA_AUDIT_ROLES,
+  LUNA_MODEL,
+  SOL_MODEL,
   type PipelineRunSnapshot,
   type PlanningReadinessResult,
 } from "./domain.ts";
@@ -30,7 +32,7 @@ function agent(
     role: "pipeline-root",
     attempt: 1,
     title: id,
-    model: "openai-codex/gpt-5.6-sol",
+    model: SOL_MODEL,
     cwd: "/tmp/work",
     persistent: true,
     status: "running",
@@ -275,7 +277,7 @@ test("run expansion toggles without moving the stable run selection", () => {
     togglePipelineRunExpansion(expandedRunIds, expandedRunRow),
     true,
   );
-  assert.equal(buildPipelineRows([run], expandedRunIds).length, 5);
+  assert.equal(buildPipelineRows([run], expandedRunIds).length, 6);
   assert.equal(
     togglePipelineRunExpansion(expandedRunIds, {
       key: "definition:feature-pipeline",
@@ -294,7 +296,7 @@ test("nested UI model is definition to run to root, stages, and child attempts",
     role: "discover-problem",
     attempt: 2,
     title: "Problem",
-    model: "openai-codex/gpt-5.6-luna",
+    model: LUNA_MODEL,
     persistent: false,
   });
   const rows = buildPipelineRows(
@@ -304,10 +306,11 @@ test("nested UI model is definition to run to root, stages, and child attempts",
 
   assert.equal(rows[0]?.kind, "definition");
   assert.equal(rows[0]?.depth, 0);
-  assert.equal(rows[1]?.kind, "run");
-  assert.equal(rows[1]?.depth, 1);
+  assert.equal(rows[0]?.label, "implementing-pipeline");
+  assert.equal(rows[2]?.kind, "run");
+  assert.equal(rows[2]?.depth, 1);
   assert.deepEqual(
-    rows.slice(0, 3).map((row) => [row.kind, row.depth, row.label]),
+    rows.slice(1, 4).map((row) => [row.kind, row.depth, row.label]),
     [
       ["definition", 0, "feature-pipeline"],
       [
@@ -331,7 +334,7 @@ test("nested UI model is definition to run to root, stages, and child attempts",
       [
         "agent",
         3,
-        "discover-problem · attempt 2 · openai-codex/gpt-5.6-luna · medium · running",
+        `discover-problem · attempt 2 · ${LUNA_MODEL} · medium · running`,
       ],
     ],
   );
@@ -342,13 +345,13 @@ test("agent rows show configured thinking and omit the first attempt marker", ()
   const firstAttempt = agent("child-1", {
     parentId: root.id,
     role: "discover-goal-outcomes",
-    model: "openai-codex/gpt-5.6-luna",
+    model: LUNA_MODEL,
     attempt: 1,
   });
   const retry = agent("child-2", {
     parentId: root.id,
     role: "discover-frontend-scope",
-    model: "openai-codex/gpt-5.6-sol",
+    model: SOL_MODEL,
     attempt: 2,
   });
   const rows = buildPipelineRows(
@@ -359,11 +362,11 @@ test("agent rows show configured thinking and omit the first attempt marker", ()
   assert.equal(
     rows.find((row) => row.kind === "agent" && row.agentId === firstAttempt.id)
       ?.label,
-    "discover-goal-outcomes · openai-codex/gpt-5.6-luna · medium · running",
+    `discover-goal-outcomes · ${LUNA_MODEL} · medium · running`,
   );
   assert.equal(
     rows.find((row) => row.kind === "agent" && row.agentId === retry.id)?.label,
-    "discover-frontend-scope · attempt 2 · openai-codex/gpt-5.6-sol · high · running",
+    `discover-frontend-scope · attempt 2 · ${SOL_MODEL} · high · running`,
   );
   assert.equal(
     rows.find((row) => row.kind === "agent" && row.agentId === root.id)?.label,
@@ -390,7 +393,7 @@ test("plan pipeline renders six discovery agents and Astra low synthesis under i
     agent(`child-${index + 1}`, {
       parentId: root.id,
       role,
-      model: "openai-codex/gpt-5.6-luna",
+      model: LUNA_MODEL,
       thinkingLevel: "medium",
       createdAt: index + 2,
     }),
@@ -534,6 +537,7 @@ test("dashboard lists all definitions and nests runs under the selected definiti
   assert.deepEqual(
     buildPipelineRows([]).map((row) => [row.kind, row.label]),
     [
+      ["definition", "implementing-pipeline"],
       ["definition", "feature-pipeline"],
       ["definition", "small-feature-pipeline"],
       ["definition", "plan-pipeline"],
@@ -736,7 +740,7 @@ test("small-feature dashboard shows only its fixed stages and child placement", 
   const implementer = agent("luna-1", {
     parentId: root.id,
     role: "implement-small-feature",
-    model: "openai-codex/gpt-5.6-luna",
+    model: SOL_MODEL,
     persistent: true,
     status: "idle",
   });
@@ -744,7 +748,7 @@ test("small-feature dashboard shows only its fixed stages and child placement", 
     agent(`audit-luna-${index + 1}`, {
       parentId: root.id,
       role,
-      model: "openai-codex/gpt-5.6-luna",
+      model: LUNA_MODEL,
       persistent: false,
       status: "done",
     }),

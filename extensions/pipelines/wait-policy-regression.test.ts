@@ -8,7 +8,7 @@ import type {
   AgentTreeSession,
   AgentTreeSessionEvent,
 } from "../shared/agent-tree/domain.ts";
-import { PipelineController } from "./controller.ts";
+import { LegacyPipelineTestController as PipelineController } from "./__fixtures__/legacy-controller.ts";
 import type { PipelineHandoff } from "./domain.ts";
 import type {
   PipelineMonotonicClock,

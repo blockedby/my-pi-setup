@@ -52,11 +52,18 @@ const TestRegistryLive = Layer.sync(BackendRegistry, () => {
   );
 });
 
-const quotaModels = ["sol", "terra", "luna"].map(
+const quotaModels = [
+  "gpt-6.1-sol",
+  "gpt-6-luna",
+  "gpt-6-astra",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+].map(
   (id) =>
     ({
       provider: "openai-codex",
-      id: `gpt-5.6-${id}`,
+      id,
       name: id,
       api: "test",
       baseUrl: "",
@@ -433,12 +440,13 @@ test("Claude and Codex share one aggregate quota of four", async () => {
   });
 });
 
-test("direct Pi quotas admit Sol 4, Terra 8, and Luna 16 independently", async () => {
+test("direct Pi quotas admit Sol 4, Luna 16, Astra 4 and legacy Terra 8 independently", async () => {
   await withQuotaManager(async (manager, runtime) => {
     const capacities = [
-      ["openai-codex/gpt-5.6-sol", 4],
+      ["openai-codex/gpt-6.1-sol", 4],
+      ["openai-codex/gpt-6-luna", 16],
+      ["openai-codex/gpt-6-astra", 4],
       ["openai-codex/gpt-5.6-terra", 8],
-      ["openai-codex/gpt-5.6-luna", 16],
     ] as const;
     const tasks = capacities.flatMap(([model, limit]) =>
       Array.from({ length: limit }, (_, index) =>
@@ -452,7 +460,7 @@ test("direct Pi quotas admit Sol 4, Terra 8, and Luna 16 independently", async (
         concurrency: "unbounded",
       }),
     );
-    assert.equal(spawns.length, 28);
+    assert.equal(spawns.length, 32);
 
     for (const [model, limit] of capacities) {
       await assert.rejects(
@@ -464,6 +472,80 @@ test("direct Pi quotas admit Sol 4, Terra 8, and Luna 16 independently", async (
       );
     }
   });
+});
+
+test("parallel over-capacity Pi admission shares legacy/current family reservations atomically", async () => {
+  for (const [ids, limit] of [
+    [["gpt-6.1-sol", "gpt-5.6-sol"], 4],
+    [["gpt-6-luna", "gpt-5.6-luna"], 16],
+    [["gpt-6-astra"], 4],
+  ] as const) {
+    let backendStarts = 0;
+    const delayedPi: SubagentBackend = {
+      ...quotaPiBackend,
+      spawn: (spawnTask) =>
+        Effect.gen(function* () {
+          backendStarts++;
+          // Hold admitted spawns before snapshots exist to exercise in-flight
+          // reservations, not just counting already-running snapshots.
+          yield* Effect.sleep("20 millis");
+          const events = yield* Queue.unbounded<SubagentEvent>();
+          return {
+            meta: Effect.succeed({
+              backend: "pi" as const,
+              modelLabel: spawnTask.model,
+            }),
+            events: Stream.fromQueue(events),
+            send: () => Effect.void,
+            interrupt: Queue.offer(events, {
+              _tag: "RunSettled",
+              outcome: { _tag: "Interrupted" },
+            }).pipe(Effect.asVoid),
+          };
+        }),
+    };
+    await withQuotaManager(async (manager, runtime) => {
+      const outcomes = await Promise.allSettled(
+        Array.from({ length: limit + 8 }, (_, index) =>
+          runTool(
+            runtime,
+            manager.spawn(
+              "pi",
+              quotaTask(
+                `race ${index}`,
+                `openai-codex/${ids[index % ids.length]}`,
+              ),
+            ),
+          ),
+        ),
+      );
+      const admitted = outcomes.filter(
+        (result) => result.status === "fulfilled",
+      );
+      const rejected = outcomes.filter(
+        (result) => result.status === "rejected",
+      );
+      assert.equal(admitted.length, limit);
+      assert.equal(backendStarts, limit);
+      assert.equal(rejected.length, 8);
+      for (const result of rejected) {
+        assert.match(
+          String(result.reason),
+          new RegExp(`max ${limit} concurrent subagents`),
+        );
+      }
+      // Cancellation releases running capacity; subsequent admission works.
+      await runTool(
+        runtime,
+        manager.cancel(admitted.map((result) => result.value.id)),
+      );
+      const replacement = await runTool(
+        runtime,
+        manager.spawn("pi", quotaTask("replacement", `openai-codex/${ids[0]}`)),
+      );
+      assert.equal(replacement.status, "running");
+    }, delayedPi);
+  }
 });
 
 test("inherited Pi models use their canonical model quota", async () => {
@@ -512,7 +594,7 @@ test("failed Pi backend spawn releases its model reservation", async () => {
   };
 
   await withQuotaManager(async (manager, runtime) => {
-    const sol = "openai-codex/gpt-5.6-sol";
+    const sol = "openai-codex/gpt-6.1-sol";
     await assert.rejects(
       runTool(runtime, manager.spawn("pi", quotaTask("fails", sol))),
       /requested test spawn failure/,
