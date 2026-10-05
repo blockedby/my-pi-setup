@@ -32,6 +32,47 @@ const writePackage = (path, skills = ["./skills"]) => {
   );
 };
 
+test("Pipi discovers only the optional user-owned backlog skill", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pipi-shared-backlog-"));
+  try {
+    const home = join(root, "home");
+    const agentDir = join(home, ".pipi", "agent");
+    const cwd = join(root, "project");
+    mkdirSync(agentDir, { recursive: true });
+    mkdirSync(cwd, { recursive: true });
+    const input = {
+      home,
+      agentDir,
+      cwd,
+      settings: { packages: [repositoryRoot] },
+      repositoryRoot,
+    };
+    const withoutBacklog = await discoverInstalledSkills(input);
+    assert.equal(
+      withoutBacklog.identities.some(({ name }) => name === "plan-gh-backlog"),
+      false,
+    );
+
+    const target = join(root, "user-checkout");
+    const shared = join(home, ".agents", "skills", "plan-gh-backlog");
+    writeSkill(target, "plan-gh-backlog");
+    mkdirSync(join(home, ".agents", "skills"), { recursive: true });
+    symlinkSync(target, shared);
+    const withBacklog = await discoverInstalledSkills(input);
+    assertSelectedSkillIdentities({
+      discovery: withBacklog,
+      expected: { "plan-gh-backlog": shared },
+    });
+    assert.equal(
+      withBacklog.identities.filter(({ name }) => name === "plan-gh-backlog")
+        .length,
+      1,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("reports real discovery collisions separately from same-realpath aliases", async () => {
   const root = mkdtempSync(join(tmpdir(), "pipi-skill-discovery-"));
   try {
