@@ -7,6 +7,7 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 - **Less context switching.** Search, implementation, review, browser debugging, and long-running commands stay in one coding environment.
 - **Flexible delegation.** Work solo, choose a focused agent, or opt into a pipeline.
 - **Safer automation.** Read-only exploration and review, scoped implementation, and explicit delivery permission keep authority narrow.
+- **Keep working toward a goal.** Start `/goal <objective>` once; Pipi continues automatically until completion, a blocker, or a safety stop.
 - **Clear progress.** `/pipelines` shows active stages, agents, attempts, and status at a glance.
 - **Isolated setup.** Bun runtime wiring, settings, sessions, and authentication live under `~/.pipi`; regular Pi remains untouched.
 
@@ -46,6 +47,7 @@ When supported, start with `/pipelines:implementing-pipeline <task>` or `/pipeli
 - deterministic Codex-backed web search, fetching, patching, and bounded tasks
 - Native Pi MCP support with built-in server management and tool discovery
 - ask-user, copy-all, session summaries, and Git/model status UI
+- autonomous single-objective work with `/goal` ([usage and safety limits](SETUP.md#autonomous-goal-work))
 - manual OAuth account switching with `/subs` ([setup and limitations](SETUP.md#manual-account-switching))
 - GitHub Dark Default theme
 

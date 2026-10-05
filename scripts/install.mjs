@@ -23,6 +23,11 @@ import {
   resolveBunRuntime,
 } from "../extensions/shared/executable-runtime.ts";
 import {
+  goalIdentity,
+  goalPackagePath,
+  normalizeGoalPackage,
+} from "./goal-package.mjs";
+import {
   isolatedRuntimeSource,
   multiPassPackagePath,
   multiPassVersion,
@@ -71,7 +76,10 @@ if (
     runtimePiVersion ||
   isolatedRuntimeManifest.dependencies?.["pi-mcp-adapter"] !== undefined ||
   isolatedRuntimeManifest.dependencies?.["chrome-devtools-mcp"] !== "1.10.1" ||
-  isolatedRuntimeManifest.dependencies?.["pi-multi-pass"] !== multiPassVersion
+  isolatedRuntimeManifest.dependencies?.["pi-multi-pass"] !==
+    multiPassVersion ||
+  isolatedRuntimeManifest.dependencies?.[goalIdentity.name] !==
+    goalIdentity.version
 ) {
   throw new Error(
     "config/pipi-runtime/package.json is not aligned with the installer package pins.",
@@ -1256,6 +1264,12 @@ const install = () => {
     packages = normalizeMultiPassPackage({
       packages,
       desiredPath: multiPassPackagePath(isolatedRuntimePrefix),
+      settingsBaseDir: agentDir,
+      home,
+    });
+    packages = normalizeGoalPackage({
+      packages,
+      desiredPath: goalPackagePath(isolatedRuntimePrefix),
       settingsBaseDir: agentDir,
       home,
     });

@@ -6,6 +6,7 @@
       "name": "pipi-isolated-runtime",
       "dependencies": {
         "@earendil-works/pi-coding-agent": "1.0.3",
+        "@narumitw/pi-goal": "0.54.8",
         "chrome-devtools-mcp": "1.10.1",
         "pi-multi-pass": "1.5.1",
       },
@@ -17,6 +18,7 @@
   ],
   "overrides": {
     "@google/genai": "1.52.0",
+    "@narumitw/pi-tui-kit": "0.59.0",
     "protobufjs": "7.6.5",
   },
   "packages": {
@@ -131,6 +133,10 @@
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.28.2", "", { "os": "win32", "cpu": "x64" }, "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g=="],
 
     "@google/genai": ["@google/genai@1.52.0", "", { "dependencies": { "google-auth-library": "^10.3.0", "p-retry": "^4.6.2", "protobufjs": "^7.5.4", "ws": "^8.18.0" }, "peerDependencies": { "@modelcontextprotocol/sdk": "^1.25.2" }, "optionalPeers": ["@modelcontextprotocol/sdk"] }, "sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q=="],
+
+    "@narumitw/pi-goal": ["@narumitw/pi-goal@0.54.8", "", { "dependencies": { "@narumitw/pi-tui-kit": "^0.59.0" }, "peerDependencies": { "@earendil-works/pi-ai": "*", "@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-tui": "*", "typebox": "*" } }, "sha512-ba165WkOdBEQNYgjTa2MHgRtOh/hTLveObPzdoE29FOrfktymcBlayEHoXd9Jjw44VQ8bX7cq6V57zp0rJLVgQ=="],
+
+    "@narumitw/pi-tui-kit": ["@narumitw/pi-tui-kit@0.59.0", "", { "dependencies": { "grok-mermaid": "0.2.3", "highlight.js": "11.12.0" }, "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-tui": "*" } }, "sha512-KBbOcciJD+HVbeduUwBUiSy2AehMGYeOwiRPXvac5tcjuh3SDoQ+7qsNPt2s/ku6exJKZp0GYtAVsiu5ySddmA=="],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 
@@ -349,6 +355,8 @@
     "@aws-sdk/types/@smithy/types": ["@smithy/types@4.17.2", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-FOKpVZob9MPTn2znRzGrnsMHv7BOsKVw3XiP/cOyYLDVZ9qKp4nifIiSCuUU/fIj5Vu0UOAxCFr+qRAtG0NUkA=="],
 
     "@aws-sdk/xml-builder/@smithy/types": ["@smithy/types@4.17.2", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-FOKpVZob9MPTn2znRzGrnsMHv7BOsKVw3XiP/cOyYLDVZ9qKp4nifIiSCuUU/fIj5Vu0UOAxCFr+qRAtG0NUkA=="],
+
+    "@narumitw/pi-tui-kit/highlight.js": ["highlight.js@11.12.0", "", {}, "sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg=="],
 
     "@smithy/core/@smithy/types": ["@smithy/types@4.17.2", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-FOKpVZob9MPTn2znRzGrnsMHv7BOsKVw3XiP/cOyYLDVZ9qKp4nifIiSCuUU/fIj5Vu0UOAxCFr+qRAtG0NUkA=="],
 
