@@ -1085,6 +1085,96 @@ test("Codex package normalization removes legacy forms and selected duplicates",
   ]);
 });
 
+test("Codex package normalization canonicalizes exact npm specs and preserves near-name packages", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pipi-codex-npm-packages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const home = join(root, "home");
+  const settingsBaseDir = join(home, ".pipi", "agent");
+  const desiredPath = join(root, "adapters", "codex-tools");
+  const versionedManagedPackage = {
+    source: "npm:pi-codex-tools@1.2.3",
+    extensions: ["extensions/codex-tools.ts"],
+  };
+  const similarNameObject = {
+    source: "npm:pi-codex-tools-extra@1.2.3",
+    skills: ["skills/codex-tools"],
+  };
+
+  const result = normalizeCodexToolsPackage({
+    packages: [
+      versionedManagedPackage,
+      "npm:pi-codex-tools",
+      "npm:pi-codex-tools-extra",
+      similarNameObject,
+      "npm:unrelated@1.0.0",
+    ],
+    desiredPath,
+    settingsBaseDir,
+    home,
+  });
+
+  assert.deepEqual(result, [
+    { source: desiredPath, extensions: ["extensions/codex-tools.ts"] },
+    "npm:pi-codex-tools-extra",
+    similarNameObject,
+    "npm:unrelated@1.0.0",
+  ]);
+});
+
+test("Codex package normalization migrates only known adapter selectors", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pipi-codex-filter-migration-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const home = join(root, "home");
+  const settingsBaseDir = join(home, ".pipi", "agent");
+  const desiredPath = join(repositoryRoot, "adapters", "codex-tools");
+  const adapterSelector = "../../vendor/pi-codex/extensions/codex-tools.ts";
+  const selectorCases = [
+    ["extensions/codex-tools.ts", adapterSelector],
+    ["!extensions/codex-tools.ts", `!${adapterSelector}`],
+    ["+extensions/codex-tools.ts", `+${adapterSelector}`],
+    ["-extensions/codex-tools.ts", `-${adapterSelector}`],
+  ];
+
+  for (const [selector, expectedSelector] of selectorCases) {
+    const result = normalizeCodexToolsPackage({
+      packages: [
+        {
+          source: "npm:pi-codex-tools",
+          extensions: [selector, "extensions/custom.ts"],
+          skills: [],
+        },
+      ],
+      desiredPath,
+      settingsBaseDir,
+      home,
+    });
+
+    assert.deepEqual(
+      result,
+      [
+        {
+          source: desiredPath,
+          extensions: [expectedSelector, "extensions/custom.ts"],
+          skills: [],
+        },
+      ],
+      selector,
+    );
+  }
+
+  assert.deepEqual(
+    normalizeCodexToolsPackage({
+      packages: [{ source: "npm:pi-codex-tools", extensions: [], skills: [] }],
+      desiredPath,
+      settingsBaseDir,
+      home,
+    }),
+    [{ source: desiredPath, extensions: [], skills: [] }],
+  );
+});
+
 test("default install replaces sibling Codex tools with the pinned source adapter", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));

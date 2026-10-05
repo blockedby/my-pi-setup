@@ -281,6 +281,59 @@ function boundedError(error: unknown) {
   );
 }
 
+/** Coordinate caller- and SDK-originated lifecycle signals for one Pi run. */
+export function createPiRunLifecycle(emitStarted: () => void) {
+  let started = false;
+  let settled = true;
+  let runError: string | undefined;
+
+  const signalStarted = () => {
+    if (started) return;
+    started = true;
+    emitStarted();
+  };
+
+  return {
+    start(
+      prompt: () => Promise<unknown>,
+      isStreaming: () => boolean,
+      settle: () => void,
+    ) {
+      runError = undefined;
+      settled = false;
+      started = false;
+      signalStarted();
+      void prompt().catch((error) => {
+        runError = boundedError(error);
+        // Preflight failures may never start the agent lifecycle, so no
+        // agent_settled will arrive for them.
+        if (!isStreaming()) settle();
+      });
+    },
+    agentStarted() {
+      // Normally start() already signaled this run. Keep supporting an SDK
+      // initiated run without duplicating the caller-originated signal.
+      if (settled) {
+        runError = undefined;
+        settled = false;
+      }
+      signalStarted();
+    },
+    claimSettlement() {
+      if (settled) return false;
+      settled = true;
+      started = false;
+      return true;
+    },
+    get runError() {
+      return runError;
+    },
+    get settled() {
+      return settled;
+    },
+  };
+}
+
 const makePiSession = (
   task: SpawnTask,
 ): Effect.Effect<SubagentSession, SpawnError, Scope.Scope> =>
@@ -332,19 +385,13 @@ const makePiSession = (
       catch: (error) => new SpawnError({ message: boundedError(error) }),
     });
 
-    const state = {
-      closed: false,
-      /** prompt() rejection for the active run; folded into RunSettled. */
-      runError: undefined as string | undefined,
-      /** One terminal event per run: lifecycle, prompt-rejection, and abort
-       * fallbacks can all race to settle; the first wins. */
-      settled: false,
-    };
+    const state = { closed: false };
 
     const events = yield* Queue.make<SubagentEvent, Cause.Done>();
     const emit = (event: SubagentEvent) => {
       Queue.offerUnsafe(events, event);
     };
+    const lifecycle = createPiRunLifecycle(() => emit({ _tag: "RunStarted" }));
 
     const toolTimeout = createToolCallTimeoutGuard();
     toolTimeout.apply(session);
@@ -388,8 +435,7 @@ const makePiSession = (
     };
 
     const settle = () => {
-      if (state.settled) return;
-      state.settled = true;
+      if (!lifecycle.claimSettlement()) return;
       const last = lastAssistantMessage(session);
       const partialText = finalOutput(session) || undefined;
       if (last?.stopReason === "aborted") {
@@ -400,7 +446,7 @@ const makePiSession = (
         return;
       }
       const errorText =
-        state.runError ??
+        lifecycle.runError ??
         (last?.stopReason === "error"
           ? (last.errorMessage ?? "Run failed")
           : undefined);
@@ -427,8 +473,7 @@ const makePiSession = (
         case "agent_start":
           // Extensions may register tools between runs; guard new ones too.
           toolTimeout.apply(session);
-          state.settled = false;
-          emit({ _tag: "RunStarted" });
+          lifecycle.agentStarted();
           break;
         case "message_update": {
           const streamEvent = event.assistantMessageEvent;
@@ -532,15 +577,11 @@ const makePiSession = (
 
     /** Start a fresh run (v1 manager.run): fire-and-forget, errors -> events. */
     const startRun = (text: string) => {
-      state.runError = undefined;
-      state.settled = false;
-      emit({ _tag: "RunStarted" });
-      void session.prompt(text).catch((error) => {
-        state.runError = boundedError(error);
-        // Preflight failures may never start the agent lifecycle, so no
-        // agent_settled will arrive for them.
-        if (!session.isStreaming) settle();
-      });
+      lifecycle.start(
+        () => session.prompt(text),
+        () => session.isStreaming,
+        settle,
+      );
     };
 
     // Session naming is best-effort.
@@ -589,8 +630,7 @@ const makePiSession = (
         }
         // No streaming run means no agent_settled will arrive; emit the
         // terminal event (once) so the run cannot look running forever.
-        if (!state.closed && !state.settled) {
-          state.settled = true;
+        if (!state.closed && lifecycle.claimSettlement()) {
           emit({ _tag: "RunSettled", outcome: { _tag: "Interrupted" } });
         }
       }),

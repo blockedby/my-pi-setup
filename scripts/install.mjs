@@ -78,6 +78,9 @@ const browserAssetsRoot = join(repositoryRoot, "vendor", "pi-agent-setup");
 const codexToolsSubmoduleRoot = join(repositoryRoot, "vendor", "pi-codex");
 const codexToolsAdapterRoot = join(repositoryRoot, "adapters", "codex-tools");
 const legacyCodexToolsSiblingRoot = resolve(repositoryRoot, "..", "pi-codex");
+const legacyCodexToolsExtensionSelector = "extensions/codex-tools.ts";
+const codexToolsAdapterExtensionSelector =
+  "../../vendor/pi-codex/extensions/codex-tools.ts";
 const submoduleConfigPath = join(repositoryRoot, "config", "submodules.json");
 const modelOverridesSource = join(
   repositoryRoot,
@@ -175,6 +178,7 @@ const readSettings = (path, requiredValidJson) => {
 
 const packageSource = (entry) =>
   typeof entry === "string" ? entry : entry?.source;
+const codexToolsNpmSpec = /^npm:pi-codex-tools(?:@.+)?$/;
 
 const addPackage = (packages, path) => {
   if (!packages.some((entry) => packageSource(entry) === path))
@@ -185,6 +189,31 @@ const resolveSettingsPackagePath = (source, settingsBaseDir, home) => {
   if (source === "~") return home;
   if (source.startsWith("~/")) return resolve(home, source.slice(2));
   return resolve(settingsBaseDir, source);
+};
+
+const migrateKnownCodexToolsFilter = (entry, desiredPath) => {
+  if (
+    resolve(desiredPath) !== resolve(codexToolsAdapterRoot) ||
+    !entry ||
+    typeof entry !== "object" ||
+    !Array.isArray(entry.extensions)
+  )
+    return entry;
+
+  let changed = false;
+  const extensions = entry.extensions.map((selector) => {
+    if (typeof selector !== "string") return selector;
+    const prefix =
+      ["!", "+", "-"].find((candidate) => selector.startsWith(candidate)) ?? "";
+    if (selector.slice(prefix.length) !== legacyCodexToolsExtensionSelector)
+      return selector;
+    changed = true;
+    return `${prefix}${codexToolsAdapterExtensionSelector}`;
+  });
+
+  // Only the known legacy selector is migrated. Empty arrays, exclusions, and
+  // unrelated custom selectors retain their original filter semantics.
+  return changed ? { ...entry, extensions } : entry;
 };
 
 export const normalizeCodexToolsPackage = ({
@@ -198,10 +227,29 @@ export const normalizeCodexToolsPackage = ({
   const normalizedLegacyPath = resolve(legacyPath);
   const normalizedPackages = [];
   let selectedPackageAdded = false;
+  const addSelectedPackage = (entry) => {
+    if (selectedPackageAdded) return;
+    const selectedEntry =
+      typeof entry === "string"
+        ? normalizedDesiredPath
+        : { ...entry, source: normalizedDesiredPath };
+    normalizedPackages.push(
+      migrateKnownCodexToolsFilter(selectedEntry, normalizedDesiredPath),
+    );
+    selectedPackageAdded = true;
+  };
 
   for (const entry of packages) {
     const source = packageSource(entry);
-    if (typeof source !== "string" || source.startsWith("npm:")) {
+    if (typeof source !== "string") {
+      normalizedPackages.push(entry);
+      continue;
+    }
+    if (codexToolsNpmSpec.test(source)) {
+      addSelectedPackage(entry);
+      continue;
+    }
+    if (source.startsWith("npm:")) {
       normalizedPackages.push(entry);
       continue;
     }
@@ -212,14 +260,7 @@ export const normalizeCodexToolsPackage = ({
       home,
     );
     if (resolvedSource === normalizedDesiredPath) {
-      if (!selectedPackageAdded) {
-        normalizedPackages.push(
-          typeof entry === "string"
-            ? normalizedDesiredPath
-            : { ...entry, source: normalizedDesiredPath },
-        );
-        selectedPackageAdded = true;
-      }
+      addSelectedPackage(entry);
       continue;
     }
     if (resolvedSource === normalizedLegacyPath) continue;
