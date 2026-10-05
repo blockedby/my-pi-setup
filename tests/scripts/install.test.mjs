@@ -43,9 +43,8 @@ const checkPipiInstallScript = join(
   "check-pipi-install.mjs",
 );
 const uninstallScript = join(repositoryRoot, "scripts", "uninstall.mjs");
-const mcpAdapterPackage = (home) =>
-  join(home, ".pipi", "agent", "runtime", "node_modules", "pi-mcp-adapter");
 const legacyMcpAdapterPackage = "npm:pi-mcp-adapter";
+const versionedLegacyMcpAdapterPackage = "npm:pi-mcp-adapter@2.15.0";
 const legacyPiSubagentsPackage = "npm:pi-subagents";
 const browserSkillSource = join(
   repositoryRoot,
@@ -68,10 +67,19 @@ const runtimePiPackage = "@earendil-works/pi-coding-agent";
 const rootManifest = JSON.parse(
   readFileSync(join(repositoryRoot, "package.json"), "utf8"),
 );
-const runtimePiSpec = rootManifest.dependencies[runtimePiPackage];
-const runtimePiVersion = runtimePiSpec.match(/^\^(\d+\.\d+\.\d+)$/)?.[1];
+const runtimePiSpec = rootManifest.devDependencies[runtimePiPackage];
+const runtimePiVersion = runtimePiSpec.match(/^\^?(\d+\.\d+\.\d+)$/)?.[1];
 if (!runtimePiVersion)
   throw new Error(`Unexpected Pi runtime dependency range: ${runtimePiSpec}`);
+const isolatedRuntimeManifest = JSON.parse(
+  readFileSync(
+    join(repositoryRoot, "config", "pipi-runtime", "package.json"),
+    "utf8",
+  ),
+);
+const browserMcpVersion =
+  isolatedRuntimeManifest.dependencies["chrome-devtools-mcp"];
+const browserMcpPackage = `chrome-devtools-mcp@${browserMcpVersion}`;
 const herdrLegacyIntegrationPath = (home) =>
   join(home, ".pipi", "agent", "extensions", "herdr-agent-state.ts");
 const herdrPipiIntegrationPath = join(
@@ -174,28 +182,19 @@ if (args[0] === "install") {
   ) {
     const binDir = join(cwd, "node_modules", ".bin");
     const piPackage = join(cwd, "node_modules", "@earendil-works", "pi-coding-agent");
-    const adapterPackage = join(cwd, "node_modules", "pi-mcp-adapter");
     const browserPackage = join(cwd, "node_modules", "chrome-devtools-mcp");
     mkdirSync(binDir, { recursive: true });
     const piEntry = join(piPackage, "dist", "bundle", "cli.js");
-    const adapterEntry = join(adapterPackage, "cli.js");
     const browserEntry = join(browserPackage, "build", "src", "bin", "chrome-devtools-mcp.js");
     mkdirSync(join(piPackage, "dist", "bundle"), { recursive: true });
-    mkdirSync(adapterPackage, { recursive: true });
     mkdirSync(join(browserPackage, "build", "src", "bin"), { recursive: true });
     writeFileSync(join(piPackage, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: ${JSON.stringify(runtimePiVersion)}, piConfig: { configDir: ".pi" }, bin: { pi: "dist/bundle/cli.js" } }));
-    writeFileSync(join(adapterPackage, "package.json"), JSON.stringify({ name: "pi-mcp-adapter", version: "2.15.0", bin: { "pi-mcp-adapter": "cli.js" } }));
-    writeFileSync(join(browserPackage, "package.json"), JSON.stringify({ name: "chrome-devtools-mcp", version: "1.8.0", bin: { "chrome-devtools-mcp": "./build/src/bin/chrome-devtools-mcp.js" } }));
+    writeFileSync(join(browserPackage, "package.json"), JSON.stringify({ name: "chrome-devtools-mcp", version: ${JSON.stringify(browserMcpVersion)}, bin: { "chrome-devtools-mcp": "./build/src/bin/chrome-devtools-mcp.js" } }));
     cpSync(process.env.PIPI_TEST_PI_FIXTURE, piEntry);
     chmodSync(piEntry, 0o755);
-    writeFileSync(adapterEntry, "process.exit(0);\\n");
-    writeFileSync(join(adapterPackage, "index.ts"), "export default {};\\n");
-    writeFileSync(join(adapterPackage, "types.ts"), "export {};\\n");
-    chmodSync(adapterEntry, 0o755);
     writeFileSync(browserEntry, 'process.stdout.write(JSON.stringify({ execPath: process.execPath, bunVersion: process.versions.bun, noUpdateChecks: process.env.CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS, args: process.argv.slice(2) }));\\n');
     chmodSync(browserEntry, 0o755);
     symlinkSync("../@earendil-works/pi-coding-agent/dist/bundle/cli.js", join(binDir, "pi"));
-    symlinkSync("../pi-mcp-adapter/cli.js", join(binDir, "pi-mcp-adapter"));
     symlinkSync("../chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js", join(binDir, "chrome-devtools-mcp"));
   }
   process.exit(0);
@@ -378,7 +377,7 @@ const expectedBrowserMcpServers = (home) => {
     CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1",
     PIPI_BUN_RUNTIME: bunRuntime,
     BROWSER_CHROME_NPX: browserBunWrapper,
-    BROWSER_CHROME_MCP_PACKAGE: "chrome-devtools-mcp@1.8.0",
+    BROWSER_CHROME_MCP_PACKAGE: browserMcpPackage,
   };
   return {
     "browser-chrome-control": {
@@ -473,11 +472,7 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     maxRetries: 2,
     baseDelayMs: 1000,
   });
-  assert.deepEqual(settings.packages, [
-    repositoryRoot,
-    mcpAdapterPackage(fixture.home),
-    fixture.codexTools,
-  ]);
+  assert.deepEqual(settings.packages, [repositoryRoot, fixture.codexTools]);
 
   const pipiAgentDir = join(fixture.home, ".pipi", "agent");
   const installedBrowserSkill = join(
@@ -517,7 +512,7 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   const browserProbe = JSON.parse(
     execFileSync(
       browserBunWrapper,
-      ["-y", "chrome-devtools-mcp@1.8.0", "argument with spaces"],
+      ["-y", browserMcpPackage, "argument with spaces"],
       {
         env: {
           ...fixture.env,
@@ -975,14 +970,16 @@ test("Pi package, SDK, TUI, and TypeBox dependencies remain aligned", () => {
   const lockfile = readBunLock(join(repositoryRoot, "bun.lock"));
 
   assert.equal(validatePipiVersionState(repositoryRoot), runtimePiVersion);
-  assert.equal(manifest.dependencies.typebox, "1.3.27");
+  assert.equal(manifest.devDependencies.typebox, "1.3.27");
+  assert.equal(manifest.peerDependencies.typebox, "*");
+  assert.equal(manifest.dependencies.typebox, undefined);
   assert.equal(
     lockfile.packages.typebox[0],
-    `typebox@${manifest.dependencies.typebox}`,
+    `typebox@${manifest.devDependencies.typebox}`,
   );
   assert.equal(
     lockfile.packages[runtimePiPackage][2].dependencies.typebox,
-    manifest.dependencies.typebox,
+    manifest.devDependencies.typebox,
   );
 });
 
@@ -1088,7 +1085,97 @@ test("Codex package normalization removes legacy forms and selected duplicates",
   ]);
 });
 
-test("default install replaces sibling Codex tools with the pinned submodule", async (t) => {
+test("Codex package normalization canonicalizes exact npm specs and preserves near-name packages", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pipi-codex-npm-packages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const home = join(root, "home");
+  const settingsBaseDir = join(home, ".pipi", "agent");
+  const desiredPath = join(root, "adapters", "codex-tools");
+  const versionedManagedPackage = {
+    source: "npm:pi-codex-tools@1.2.3",
+    extensions: ["extensions/codex-tools.ts"],
+  };
+  const similarNameObject = {
+    source: "npm:pi-codex-tools-extra@1.2.3",
+    skills: ["skills/codex-tools"],
+  };
+
+  const result = normalizeCodexToolsPackage({
+    packages: [
+      versionedManagedPackage,
+      "npm:pi-codex-tools",
+      "npm:pi-codex-tools-extra",
+      similarNameObject,
+      "npm:unrelated@1.0.0",
+    ],
+    desiredPath,
+    settingsBaseDir,
+    home,
+  });
+
+  assert.deepEqual(result, [
+    { source: desiredPath, extensions: ["extensions/codex-tools.ts"] },
+    "npm:pi-codex-tools-extra",
+    similarNameObject,
+    "npm:unrelated@1.0.0",
+  ]);
+});
+
+test("Codex package normalization migrates only known adapter selectors", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pipi-codex-filter-migration-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const home = join(root, "home");
+  const settingsBaseDir = join(home, ".pipi", "agent");
+  const desiredPath = join(repositoryRoot, "adapters", "codex-tools");
+  const adapterSelector = "../../vendor/pi-codex/extensions/codex-tools.ts";
+  const selectorCases = [
+    ["extensions/codex-tools.ts", adapterSelector],
+    ["!extensions/codex-tools.ts", `!${adapterSelector}`],
+    ["+extensions/codex-tools.ts", `+${adapterSelector}`],
+    ["-extensions/codex-tools.ts", `-${adapterSelector}`],
+  ];
+
+  for (const [selector, expectedSelector] of selectorCases) {
+    const result = normalizeCodexToolsPackage({
+      packages: [
+        {
+          source: "npm:pi-codex-tools",
+          extensions: [selector, "extensions/custom.ts"],
+          skills: [],
+        },
+      ],
+      desiredPath,
+      settingsBaseDir,
+      home,
+    });
+
+    assert.deepEqual(
+      result,
+      [
+        {
+          source: desiredPath,
+          extensions: [expectedSelector, "extensions/custom.ts"],
+          skills: [],
+        },
+      ],
+      selector,
+    );
+  }
+
+  assert.deepEqual(
+    normalizeCodexToolsPackage({
+      packages: [{ source: "npm:pi-codex-tools", extensions: [], skills: [] }],
+      desiredPath,
+      settingsBaseDir,
+      home,
+    }),
+    [{ source: desiredPath, extensions: [], skills: [] }],
+  );
+});
+
+test("default install replaces sibling Codex tools with the pinned source adapter", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
 
@@ -1114,8 +1201,7 @@ test("default install replaces sibling Codex tools with the pinned submodule", a
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(readJson(join(pipiAgentDir, "settings.json")).packages, [
     repositoryRoot,
-    mcpAdapterPackage(fixture.home),
-    codexSubmodule,
+    join(repositoryRoot, "adapters", "codex-tools"),
   ]);
 });
 
@@ -1152,16 +1238,13 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
     name: "pipi",
   });
   assert.equal(
-    readJson(
-      join(pipiRuntime, "node_modules", "pi-mcp-adapter", "package.json"),
-    ).version,
-    "2.15.0",
+    existsSync(join(pipiRuntime, "node_modules", "pi-mcp-adapter")),
+    false,
   );
   const isolatedManifest = readJson(join(pipiRuntime, "package.json"));
   assert.deepEqual(isolatedManifest.dependencies, {
     "@earendil-works/pi-coding-agent": runtimePiVersion,
-    "chrome-devtools-mcp": "1.8.0",
-    "pi-mcp-adapter": "2.15.0",
+    "chrome-devtools-mcp": browserMcpVersion,
   });
   assert.deepEqual(isolatedManifest.trustedDependencies, [
     "@google/genai",
@@ -1276,10 +1359,8 @@ test("repository dependency skip still installs isolated runtime dependencies", 
     runtimePiVersion,
   );
   assert.equal(
-    readJson(
-      join(pipiRuntime, "node_modules", "pi-mcp-adapter", "package.json"),
-    ).version,
-    "2.15.0",
+    existsSync(join(pipiRuntime, "node_modules", "pi-mcp-adapter")),
+    false,
   );
 });
 
@@ -1397,9 +1478,9 @@ test("install repairs stale isolated Bun package metadata", async (t) => {
   const isolatedManifest = readJson(join(pipiRuntime, "package.json"));
   assert.deepEqual(isolatedManifest.dependencies, {
     "@earendil-works/pi-coding-agent": runtimePiVersion,
-    "chrome-devtools-mcp": "1.8.0",
-    "pi-mcp-adapter": "2.15.0",
+    "chrome-devtools-mcp": browserMcpVersion,
   });
+  assert.equal(existsSync(mcpPackageDir), false);
   assert.deepEqual(isolatedManifest.trustedDependencies, [
     "@google/genai",
     "protobufjs",
@@ -1517,6 +1598,11 @@ test("legacy managed browser copy is backed up during explicit upgrade", async (
       `${legacySkill}/`,
     ),
   );
+  for (const server of Object.values(legacyServers)) {
+    if (server.env.BROWSER_CHROME_MCP_PACKAGE !== undefined) {
+      server.env.BROWSER_CHROME_MCP_PACKAGE = "chrome-devtools-mcp@1.8.0";
+    }
+  }
   writeFileSync(
     join(agentDir, "mcp.json"),
     `${JSON.stringify({ metadata: { preserved: true }, mcpServers: legacyServers }, null, 2)}\n`,
@@ -1819,7 +1905,7 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
   const settingsPath = join(pipiAgentDir, "settings.json");
   writeFileSync(
     settingsPath,
-    `${JSON.stringify({ quietStartup: true, theme: "old-theme", skills: ["skills/browser-chrome"], compaction: { enabled: false, reserveTokens: 1, keepRecentTokens: 12_345 }, packages: ["existing-package", repositoryRoot, { source: legacyMcpAdapterPackage, extensions: ["index.ts"] }, { source: legacyPiSubagentsPackage, skills: [] }] }, null, 2)}\n`,
+    `${JSON.stringify({ quietStartup: true, theme: "old-theme", skills: ["skills/browser-chrome"], compaction: { enabled: false, reserveTokens: 1, keepRecentTokens: 12_345 }, packages: ["existing-package", repositoryRoot, { source: legacyMcpAdapterPackage, extensions: ["index.ts"] }, { source: versionedLegacyMcpAdapterPackage, skills: [] }, { source: "runtime/node_modules/pi-mcp-adapter" }, { source: "./npm/node_modules/pi-mcp-adapter" }, { source: join(fixture.home, ".pipi", "agent", "npm", "node_modules", "pi-mcp-adapter") }, { source: join(fixture.home, ".pipi", "agent", "runtime", "node_modules", "pi-mcp-adapter"), extensions: ["legacy.ts"] }, { source: legacyPiSubagentsPackage, skills: [] }] }, null, 2)}\n`,
   );
   writeFileSync(
     join(pipiAgentDir, "mcp.json"),
@@ -1867,15 +1953,7 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
     },
     httpIdleTimeoutMs: 300_000,
     retry: { enabled: true, maxRetries: 2, baseDelayMs: 1000 },
-    packages: [
-      "existing-package",
-      repositoryRoot,
-      {
-        source: mcpAdapterPackage(fixture.home),
-        extensions: ["index.ts"],
-      },
-      fixture.codexTools,
-    ],
+    packages: ["existing-package", repositoryRoot, fixture.codexTools],
   });
   assert.deepEqual(readJson(join(pipiAgentDir, "mcp.json")), {
     mcpServers: {
@@ -2922,7 +3000,7 @@ test("generated headless launcher preserves status and reaps its MCP child befor
     ...fixture.env,
     BROWSER_CHROME_NODE: fixture.fakeBunPath,
     BROWSER_CHROME_NPX: join(agentDir, "bin", "pipi-browser-bun"),
-    BROWSER_CHROME_MCP_PACKAGE: "chrome-devtools-mcp@1.8.0",
+    BROWSER_CHROME_MCP_PACKAGE: browserMcpPackage,
     BROWSER_CHROME_HOME: browserHome,
     BROWSER_CHROME_HEADLESS_START_COMMAND:
       "printf 'id=fixture url=http://127.0.0.1:9444\\n'",

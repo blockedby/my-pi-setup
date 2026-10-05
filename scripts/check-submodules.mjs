@@ -155,7 +155,12 @@ for (const [name, submodule] of entries) {
       for (const [packageName, version] of Object.entries(
         submodule.bunDependencyBoundary,
       )) {
-        if (manifest.dependencies?.[packageName] !== version) {
+        const rootVersion =
+          manifest.dependencies?.[packageName] ??
+          (manifest.peerDependencies?.[packageName] === "*"
+            ? manifest.devDependencies?.[packageName]
+            : undefined);
+        if (rootVersion !== version) {
           fail(
             `Root Bun dependency boundary for ${name} must pin ${packageName}@${version}`,
           );

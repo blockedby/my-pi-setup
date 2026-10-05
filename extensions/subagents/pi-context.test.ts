@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import test from "node:test";
-import type { CompactionResult } from "@earendil-works/pi-coding-agent";
 import {
+  type CompactionResult,
+  DefaultResourceLoader,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+import {
+  createChildBuiltinExtensions,
   normalizePiContextUsage,
   refreshPiUsageAfterCompaction,
 } from "./src/backends/pi.ts";
@@ -12,6 +20,55 @@ const compactionResult: CompactionResult = {
   tokensBefore: 311_923,
   details: { readFiles: [], modifiedFiles: [] },
 };
+
+async function loadChildBuiltinPaths(options: {
+  cwd: string;
+  agentDir: string;
+  projectTrusted: boolean;
+}) {
+  const settingsManager = SettingsManager.create(
+    options.cwd,
+    options.agentDir,
+    { projectTrusted: options.projectTrusted },
+  );
+  const loader = new DefaultResourceLoader({
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+    settingsManager,
+    extensionFactories: createChildBuiltinExtensions(),
+  });
+  await loader.reload();
+  return loader
+    .getExtensions()
+    .extensions.map((extension) => extension.path)
+    .filter((extensionPath) => extensionPath.startsWith("builtin:"))
+    .sort();
+}
+
+test("ordinary Pi children load native MCP helpers and honor trusted project settings", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "pipi-child-mcp-"));
+  const cwd = path.join(root, "project");
+  const agentDir = path.join(root, "agent");
+  try {
+    await mkdir(path.join(cwd, ".pi"), { recursive: true });
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(
+      path.join(cwd, ".pi", "settings.json"),
+      JSON.stringify({ extensions: ["-builtin:mcp"] }),
+    );
+
+    assert.deepEqual(
+      await loadChildBuiltinPaths({ cwd, agentDir, projectTrusted: false }),
+      ["builtin:codemode", "builtin:mcp", "builtin:tool-search"],
+    );
+    assert.deepEqual(
+      await loadChildBuiltinPaths({ cwd, agentDir, projectTrusted: true }),
+      ["builtin:codemode", "builtin:tool-search"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Pi context adapter preserves an explicit unknown token count", () => {
   assert.deepEqual(

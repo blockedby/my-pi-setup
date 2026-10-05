@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type {
-  ExtensionContext,
-  ToolDefinition,
+import {
+  createExtensionRuntime,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  type ExtensionToolContext,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
@@ -11,6 +16,26 @@ import {
   CHILD_TOOL_CALL_TIMEOUT_MS,
   ToolCallTimeoutError,
 } from "./tool-call-timeout.ts";
+
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 test("the production timeout error names the tool and three-minute limit", () => {
   assert.equal(
@@ -119,13 +144,7 @@ test("a per-tool policy disables only the selected tool timeout", async () => {
   );
   guard.apply(registry);
   const execute = (definition: ToolDefinition) =>
-    definition.execute(
-      "fixture",
-      {},
-      undefined,
-      undefined,
-      {} as ExtensionContext,
-    );
+    definition.execute("fixture", {}, undefined, undefined, toolContext());
 
   const result = await execute(wait);
   assert.equal(result.content[0]?.type, "text");

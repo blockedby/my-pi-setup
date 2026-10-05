@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { isLegacyMcpAdapterSource } from "./legacy-mcp.mjs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveBunRuntime } from "../extensions/shared/executable-runtime.ts";
@@ -67,14 +68,14 @@ if (
     "The isolated Pipi manifest does not pin the expected runtime.",
   );
 }
-if (isolatedManifest.dependencies?.["pi-mcp-adapter"] !== "2.15.0") {
+if (isolatedManifest.dependencies?.["pi-mcp-adapter"] !== undefined) {
   throw new Error(
-    "The isolated Pipi manifest does not pin MCP adapter 2.15.0.",
+    "The isolated Pipi runtime must use native MCP, not pi-mcp-adapter.",
   );
 }
-if (isolatedManifest.dependencies?.["chrome-devtools-mcp"] !== "1.8.0") {
+if (isolatedManifest.dependencies?.["chrome-devtools-mcp"] !== "1.10.1") {
   throw new Error(
-    "The isolated Pipi manifest does not pin chrome-devtools-mcp 1.8.0.",
+    "The isolated Pipi manifest does not pin chrome-devtools-mcp 1.10.1.",
   );
 }
 if (
@@ -99,6 +100,14 @@ if (!trackedOverrides.equals(installedOverrides)) {
 const installedSettings = readJson(
   join(home, ".pipi", "agent", "settings.json"),
 );
+if (
+  installedSettings.packages?.some((entry) => {
+    const source = typeof entry === "string" ? entry : entry.source;
+    return isLegacyMcpAdapterSource(source, join(home, ".pipi", "agent"));
+  })
+) {
+  throw new Error("The legacy MCP adapter still overrides native MCP.");
+}
 const skillDiscovery = await discoverInstalledSkills({
   home,
   agentDir: join(home, ".pipi", "agent"),
@@ -257,5 +266,5 @@ if (
 const herdrStatus =
   " The Pipi-owned Herdr reporter is available without a legacy reporter conflict.";
 console.log(
-  `Installed Pipi ${expectedVersion}, branded launcher/resume command, MCP 2.15.0, install-script policy, and model overrides are verified.${herdrStatus}`,
+  `Installed Pipi ${expectedVersion}, branded launcher/resume command, native MCP and Chrome DevTools MCP 1.10.1, install-script policy, and model overrides are verified.${herdrStatus}`,
 );

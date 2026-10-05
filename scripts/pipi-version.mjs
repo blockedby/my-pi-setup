@@ -60,9 +60,25 @@ export const requiresChangelogReview = (currentVersion, targetVersion) => {
   return currentMajor !== targetMajor || currentMinor !== targetMinor;
 };
 
+const hasOwn = (value, key) =>
+  value !== null &&
+  typeof value === "object" &&
+  Object.prototype.hasOwnProperty.call(value, key);
+
+export const pipiDependencySectionFor = (manifest, packageName) => {
+  if (hasOwn(manifest.devDependencies, packageName)) {
+    return "devDependencies";
+  }
+  if (hasOwn(manifest.dependencies, packageName)) {
+    return "dependencies";
+  }
+  return "devDependencies";
+};
+
 export const getDeclaredPipiVersion = (manifest) => {
   const versions = pipiPackageNames.map((packageName) => {
-    const spec = manifest.dependencies?.[packageName];
+    const dependencySection = pipiDependencySectionFor(manifest, packageName);
+    const spec = manifest[dependencySection]?.[packageName];
     const version =
       typeof spec === "string"
         ? spec.match(/^\^(\d+\.\d+\.\d+)$/)?.[1]
@@ -101,11 +117,13 @@ export const validatePipiVersionState = (repositoryRoot) => {
   const expectedRange = `^${version}`;
 
   for (const packageName of pipiPackageNames) {
+    const dependencySection = pipiDependencySectionFor(manifest, packageName);
     if (
-      lockfile.workspaces?.[""]?.dependencies?.[packageName] !== expectedRange
+      lockfile.workspaces?.[""]?.[dependencySection]?.[packageName] !==
+      expectedRange
     ) {
       throw new Error(
-        `bun.lock root dependency for ${packageName} is not ${expectedRange}.`,
+        `bun.lock root ${dependencySection} for ${packageName} is not ${expectedRange}.`,
       );
     }
   }

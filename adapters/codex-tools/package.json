@@ -1,0 +1,16 @@
+{
+  "name": "pi-codex-tools",
+  "private": true,
+  "type": "module",
+  "peerDependencies": {
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "../../vendor/pi-codex/extensions/codex-tools.ts"
+    ],
+    "skills": [
+      "../../vendor/pi-codex/skills"
+    ]
+  }
+}

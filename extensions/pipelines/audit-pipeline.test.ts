@@ -5,9 +5,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { Check } from "typebox/value";
-import type {
-  ExtensionContext,
-  ToolDefinition,
+import {
+  createExtensionRuntime,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  type ExtensionToolContext,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type {
   AgentNodeSpec,
@@ -40,6 +45,26 @@ import {
   TERRA_MODEL,
   type PipelineHandoff,
 } from "./domain.ts";
+
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 class FakeSession implements AgentTreeSession {
   readonly listeners = new Set<(event: AgentTreeSessionEvent) => void>();
@@ -336,7 +361,7 @@ function harness() {
         value,
         undefined,
         undefined,
-        {} as ExtensionContext,
+        toolContext(),
       );
     },
     submitUnauthorized(role: string, value: unknown) {

@@ -44,7 +44,7 @@ Implementation agents work in dedicated Git worktrees, keeping feature changes i
 - multi-agent workflows for phased or parallel tasks
 - Chrome DevTools control in disposable headless or persistent headed modes
 - deterministic Codex-backed web search, fetching, patching, and bounded tasks
-- MCP support through an isolated `pi-mcp-adapter`
+- Native Pi MCP support with built-in server management and tool discovery
 - ask-user, copy-all, session summaries, and Git/model status UI
 - GitHub Dark Default theme
 

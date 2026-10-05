@@ -20,10 +20,22 @@ import {
   updatePipiVersion,
 } from "../../scripts/update-pipi-version.mjs";
 
-const manifestFor = (version) => ({
-  dependencies: Object.fromEntries(
-    pipiPackageNames.map((packageName) => [packageName, `^${version}`]),
-  ),
+const peerDependenciesFor = () =>
+  Object.fromEntries(
+    [...pipiPackageNames, "typebox"].map((packageName) => [packageName, "*"]),
+  );
+
+const manifestFor = (version, dependencySection = "devDependencies") => ({
+  ...(dependencySection === "devDependencies"
+    ? { dependencies: { "runtime-fixture": "1.0.0" } }
+    : {}),
+  [dependencySection]: {
+    ...Object.fromEntries(
+      pipiPackageNames.map((packageName) => [packageName, `^${version}`]),
+    ),
+    typebox: "1.3.27",
+  },
+  peerDependencies: peerDependenciesFor(),
   overrides: Object.fromEntries(
     pipiResolutionPackageNamesFor(version).map((packageName) => [
       packageName,
@@ -39,38 +51,54 @@ const packageEntry = (packageName, version, metadata = {}) => [
   "sha512-fixture",
 ];
 
-const lockfileFor = (version) => ({
-  lockfileVersion: 2,
-  configVersion: 1,
-  workspaces: { "": { name: "fixture", ...manifestFor(version) } },
-  packages: {
-    ...Object.fromEntries(
-      pipiResolutionPackageNamesFor(version).map((packageName) => [
-        packageName,
-        packageEntry(packageName, version),
-      ]),
-    ),
-    "@earendil-works/pi-coding-agent": packageEntry(
-      "@earendil-works/pi-coding-agent",
-      version,
-      {
-        dependencies: {
-          "@earendil-works/pi-agent-core": `^${version}`,
-          "@earendil-works/pi-ai": `^${version}`,
-          "@earendil-works/pi-tui": `^${version}`,
-        },
+const lockfileFor = (version, dependencySection = "devDependencies") => {
+  const manifest = manifestFor(version, dependencySection);
+  return {
+    lockfileVersion: 2,
+    configVersion: 1,
+    workspaces: {
+      "": {
+        name: "fixture",
+        ...(manifest.dependencies
+          ? { dependencies: manifest.dependencies }
+          : {}),
+        ...(manifest.devDependencies
+          ? { devDependencies: manifest.devDependencies }
+          : {}),
       },
-    ),
-  },
-});
+    },
+    packages: {
+      ...Object.fromEntries(
+        pipiResolutionPackageNamesFor(version).map((packageName) => [
+          packageName,
+          packageEntry(packageName, version),
+        ]),
+      ),
+      "@earendil-works/pi-coding-agent": packageEntry(
+        "@earendil-works/pi-coding-agent",
+        version,
+        {
+          dependencies: {
+            "@earendil-works/pi-agent-core": `^${version}`,
+            "@earendil-works/pi-ai": `^${version}`,
+            "@earendil-works/pi-tui": `^${version}`,
+          },
+        },
+      ),
+    },
+  };
+};
 
-const createFixture = async (version = "0.84.2") => {
+const createFixture = async (
+  version = "0.84.2",
+  dependencySection = "devDependencies",
+) => {
   const root = await mkdtemp(join(tmpdir(), "pipi-version-"));
   const runtimeRoot = join(root, "config", "pipi-runtime");
   mkdirSync(runtimeRoot, { recursive: true });
   writeFileSync(
     join(root, "package.json"),
-    `${JSON.stringify(manifestFor(version), null, 2)}\n`,
+    `${JSON.stringify(manifestFor(version, dependencySection), null, 2)}\n`,
   );
   writeFileSync(
     join(runtimeRoot, "package.json"),
@@ -79,7 +107,7 @@ const createFixture = async (version = "0.84.2") => {
   writeFileSync(join(runtimeRoot, "bun.lock"), "{}\n");
   writeFileSync(
     join(root, "bun.lock"),
-    `${JSON.stringify(lockfileFor(version), null, 2)}\n`,
+    `${JSON.stringify(lockfileFor(version, dependencySection), null, 2)}\n`,
   );
   return root;
 };
@@ -131,11 +159,18 @@ test("extracts all new release sections and exposes breaking changes", () => {
   assert.doesNotMatch(result, /\[0\.84\.2\]/);
 });
 
-test("requires aligned caret ranges", () => {
+test("requires aligned caret ranges in modern manifests", () => {
   const manifest = manifestFor("0.84.2");
   assert.equal(getDeclaredPipiVersion(manifest), "0.84.2");
-  manifest.dependencies["@earendil-works/pi-tui"] = "^0.84.1";
+  manifest.devDependencies["@earendil-works/pi-tui"] = "^0.84.1";
   assert.throws(() => getDeclaredPipiVersion(manifest), /not aligned/);
+});
+
+test("reads legacy Pi ranges from dependencies", () => {
+  assert.equal(
+    getDeclaredPipiVersion(manifestFor("0.84.2", "dependencies")),
+    "0.84.2",
+  );
 });
 
 test("pins the requested patch with Bun overrides and regenerates bun.lock", async (t) => {
@@ -168,10 +203,14 @@ test("pins the requested patch with Bun overrides and regenerates bun.lock", asy
   assert.equal(calls.filter(([, args]) => args[0] === "pm").length, 3);
   assert.equal(validatePipiVersionState(root), targetVersion);
   const updated = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  assert.equal(
-    updated.dependencies["@earendil-works/pi-coding-agent"],
-    `^${targetVersion}`,
-  );
+  for (const packageName of pipiPackageNames) {
+    assert.equal(updated.devDependencies[packageName], `^${targetVersion}`);
+    assert.equal(updated.dependencies?.[packageName], undefined);
+    assert.equal(updated.peerDependencies[packageName], "*");
+  }
+  assert.equal(updated.devDependencies.typebox, "1.3.27");
+  assert.equal(updated.dependencies["runtime-fixture"], "1.0.0");
+  assert.equal(updated.peerDependencies.typebox, "*");
   const runtimeManifest = JSON.parse(
     readFileSync(join(root, "config", "pipi-runtime", "package.json"), "utf8"),
   );
@@ -193,6 +232,17 @@ test("validates Bun manifest, lock, overrides, and coding-agent family", async (
   assert.equal(validatePipiVersionState(root), "0.84.2");
 
   const lockfile = lockfileFor("0.84.2");
+  lockfile.workspaces[""].devDependencies["@earendil-works/pi-ai"] = "^0.84.1";
+  writeFileSync(
+    join(root, "bun.lock"),
+    `${JSON.stringify(lockfile, null, 2)}\n`,
+  );
+  assert.throws(
+    () => validatePipiVersionState(root),
+    /root devDependencies for @earendil-works\/pi-ai/,
+  );
+
+  lockfile.workspaces[""].devDependencies["@earendil-works/pi-ai"] = "^0.84.2";
   lockfile.packages["@earendil-works/pi-coding-agent"][2].dependencies[
     "@earendil-works/pi-agent-core"
   ] = "^0.84.1";
@@ -204,4 +254,10 @@ test("validates Bun manifest, lock, overrides, and coding-agent family", async (
     () => validatePipiVersionState(root),
     /pi-agent-core@\^0\.84\.1/,
   );
+});
+
+test("validates legacy dependency manifests and lockfiles", async (t) => {
+  const root = await createFixture("0.84.2", "dependencies");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  assert.equal(validatePipiVersionState(root), "0.84.2");
 });

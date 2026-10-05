@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   getDeclaredPipiVersion,
   legacyPipiResolutionPackageNames,
+  pipiDependencySectionFor,
   parseStableVersion,
   pipiPackageNames,
   pipiResolutionPackageNamesFor,
@@ -95,7 +96,9 @@ export const updatePipiVersion = ({
 
   try {
     for (const packageName of pipiPackageNames) {
-      manifest.dependencies[packageName] = `^${version}`;
+      const dependencySection = pipiDependencySectionFor(manifest, packageName);
+      manifest[dependencySection] ??= {};
+      manifest[dependencySection][packageName] = `^${version}`;
     }
     manifest.overrides ??= {};
     const resolutionPackageNames = pipiResolutionPackageNamesFor(version);
