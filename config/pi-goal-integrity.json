@@ -1,0 +1,19 @@
+{
+  "name": "@narumitw/pi-goal",
+  "version": "0.54.8",
+  "integrity": "sha512-ba165WkOdBEQNYgjTa2MHgRtOh/hTLveObPzdoE29FOrfktymcBlayEHoXd9Jjw44VQ8bX7cq6V57zp0rJLVgQ==",
+  "revision": "76f42aeaec16aabc98af2b50ae5261e62e1c7935",
+  "files": {
+    "package.json": "b3ff8c1af92d9d3af40e8bb1ad57faeb7c0e40ce87f9304fcc59c41724464529",
+    "dist/chunks/chunk-7FMBWODN.ts": "018283860565509ef92e4e7bde7e9b564f90dd2b242577a274bbcdc5eea8f492",
+    "dist/chunks/chunk-RNWM7MOG.ts": "106b0beb8ee64ab177cc1a9392afff0288491acec7ea00176cc864f22a80eb03",
+    "dist/chunks/menu-7W5HGHFO.ts": "ae7ab867dbe88ec34e983cc4cff7600f91d390414a27bc763b7f5b9130a7e828",
+    "dist/chunks/settings-ui-T77VFPTK.ts": "b7038dc2edda607c1714952e85c2fd3e0013a396a638db1ce8abec3c97e22093",
+    "dist/index.ts": "aa1488c18e842941f01ce6cac88bed91f17bfa5ba00e8631aae2988c4b2709e6"
+  },
+  "dependencies": {
+    "@narumitw/pi-tui-kit": "0.59.0",
+    "grok-mermaid": "0.2.3",
+    "highlight.js": "11.12.0"
+  }
+}

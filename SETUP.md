@@ -28,7 +28,7 @@ The installer accepts `--bun /absolute/path/to/bun` or `PIPI_BUN_RUNTIME`. It re
 Installation creates:
 
 - `~/.local/bin/pipi` — managed Bun launcher
-- `~/.pipi/agent/runtime` — isolated, frozen Bun runtime containing Pi, unchanged `pi-multi-pass@1.5.1`, and `chrome-devtools-mcp`
+- `~/.pipi/agent/runtime` — isolated, frozen Bun runtime containing Pi, unchanged `pi-multi-pass@1.5.1` and `@narumitw/pi-goal@0.54.8`, and `chrome-devtools-mcp`
 - `~/.pipi/agent/cache/bun` — Pipi-owned Bun package cache
 - `~/.pipi/agent/settings.json`, `models.json`, and `mcp.json` — isolated settings, tracked model overrides (seeded only when missing), and MCP configuration
 - `~/.pipi/sessions` — isolated sessions
@@ -45,7 +45,7 @@ pipi --version
 
 If older PiPi skill copies are present, installation refuses implicit removal. After reviewing their differences, use `bun run install:pipi -- --adopt-shared-skills` to preserve those copies and adopt shared skills. Backups are retained under `~/.pipi/agent/backups/shared-skill-migration-v1/`, including the affected settings/MCP configuration and absence metadata. Existing backups are never overwritten. See [migration safety](docs/shared-skills.md#migration-safety).
 
-Re-running installation is idempotent. Every normal install and reinstall stages a fresh isolated runtime from `config/pipi-runtime/bun.lock`, runs the frozen Bun install, validates the required Pi and browser entrypoints and the multi-pass package version/extension, and atomically activates the staged result. Existing mutable runtime contents are never reused. Browser target and rollback paths use no-follow occupancy checks, so a dangling managed browser symlink is replaced without touching its external referent and can be restored exactly after a caught failure. One exclusive per-HOME installer lock records host, PID, boot, process-start identity, and a random token in an atomically created symlink. A live same-host or foreign/ambiguous owner is preserved and refused; a demonstrably dead same-host owner and its private stage are recovered. Malformed ownership fails closed with an explicit manual-removal instruction. The complete managed agent tree and launcher are prepared from a private staged snapshot; caught failures, including late Herdr/config/link/activation failures, restore prior bytes, material modes, symlink targets, presence, and managed directories. Auth link metadata is copied without reading auth secret bytes. `--skip-repository-dependencies` skips only the root workspace frozen install; it still performs the fresh isolated runtime installation.
+Re-running installation is idempotent. Every normal install and reinstall stages a fresh isolated runtime from `config/pipi-runtime/bun.lock`, runs the frozen Bun install, validates the required Pi and browser entrypoints, the multi-pass package version/extension, and Goal manifest/entry/chunk integrity plus its resolved dependency graph, and atomically activates the staged result. Existing mutable runtime contents are never reused. Browser target and rollback paths use no-follow occupancy checks, so a dangling managed browser symlink is replaced without touching its external referent and can be restored exactly after a caught failure. One exclusive per-HOME installer lock records host, PID, boot, process-start identity, and a random token in an atomically created symlink. A live same-host or foreign/ambiguous owner is preserved and refused; a demonstrably dead same-host owner and its private stage are recovered. Malformed ownership fails closed with an explicit manual-removal instruction. The complete managed agent tree and launcher are prepared from a private staged snapshot; caught failures, including late Herdr/config/link/activation failures, restore prior bytes, material modes, symlink targets, presence, and managed directories. Auth link metadata is copied without reading auth secret bytes. `--skip-repository-dependencies` skips only the root workspace frozen install; it still performs the fresh isolated runtime installation.
 
 The normal root `bun install --frozen-lockfile` is a repository preflight/cache boundary that runs before the managed HOME transaction. It may prepare or repair repository `node_modules` and Bun cache state, and those package-manager outputs are intentionally not snapshotted or rolled back if a later managed-HOME step fails. Tracked manifests and `bun.lock` remain authoritative and unchanged; the preflight is safe to rerun on the next normal install. This repository boundary does not weaken rollback of `~/.pipi` managed state.
 
@@ -83,6 +83,29 @@ Three lazy browser servers are installed: `browser-chrome-control`, `browser-chr
 ## Isolation and authentication
 
 The launcher invokes the installed JavaScript entrypoint with its recorded absolute Bun executable and exports Pipi-only settings/session paths. Pipi auth remains separate unless `--share-auth` is explicitly requested; that option creates a symlink and refuses to overwrite existing auth state.
+
+## Autonomous goal work
+
+Pipi bundles unchanged `@narumitw/pi-goal@0.54.8` as exactly one local isolated package. Start with `/goal <objective>`: Goal automatically starts another run when the current work settles, without repeated human “continue” messages. It stops on explicit completion, pause, a blocker, waiting, or a safety limit. `/goal` opens the manager; `/goal pause`, `/goal resume`, and `/goal clear` control the current objective. Clear cancels Goal continuation, not unrelated in-flight work; pause aborts the current turn.
+
+The upstream defaults remain **25 automatic model responses**, **3 repeated tool-free automatic runs**, and **managed RPC off**. Tool-loop responses count toward the 25-response limit. These are safety stops, not quota management or dollar-cost caps. Goal mode can repeatedly invoke paid models and workspace-writing tools; an objective does not expand permission to commit, push, deploy, or delegate. Keep scope and delivery permissions explicit. Restrictive tool allowlists must retain Goal’s completion/blocker tools; otherwise activation is refused or the goal pauses.
+
+Installation creates no `pi-goal.json` and preserves existing user settings. Configure limits through `/goal` → **Settings…** or `~/.pipi/agent/pi-goal.json`, then `/reload` after manual file edits. **Unlimited is an explicit opt-in**, not the installation default. For supervised long-plan work without response-count or repetitive-output pauses, while keeping managed RPC disabled:
+
+```json
+{
+  "continuationLimits": { "automaticTurns": null, "noProgressTurns": null },
+  "rpc": { "enabled": false }
+}
+```
+
+Both `null` values are intentional opt-ins: the agent can keep working without those two safety pauses, consuming provider usage until completion or another stop condition. Keep `noProgressTurns: 3` instead if you want repeated tool-free output to pause for review. Neither setting guarantees useful progress or correct completion.
+
+An unfinished goal and its objective/safety counters persist in the current session through compaction, reload, and reopening. Restoration itself does not guarantee a new run: `/goal resume` wakes a waiting/stopped goal, or ordinary input restarts active work. A new session does not inherit the previous goal. Completion requires the matching goal identity and nonempty evidence, but neither the extension nor deterministic tests can prove real model reasoning or that every real requirement was satisfied; verify important outcomes independently.
+
+The offline SDK regressions exercise genuine Pi **1.0.3** session prompts/events, not manually invoked lifecycle handlers. They cover automatic multi-run work, stale completion/evidence rejection, pause/clear, defaults, opt-in work beyond 25 responses, compaction/reload/reopen/resume, fresh-session isolation, and manual account switching while waiting. They use disposable HOME/session directories, synthetic credentials, a deterministic provider, and no provider network or paid calls. Runtime upgrades must revalidate compatibility. Do not enable multi-pass pools for Goal; automatic account failover remains unclaimed.
+
+See [Goal compatibility evidence](docs/goal-mode.md) and upstream [settings](https://unpkg.com/@narumitw/pi-goal@0.54.8/docs/settings.md) / [managing goals](https://unpkg.com/@narumitw/pi-goal@0.54.8/docs/managing-goals.md).
 
 ## Manual account switching
 

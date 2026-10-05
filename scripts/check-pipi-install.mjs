@@ -4,6 +4,11 @@ import {
   multiPassVersion,
 } from "./install-dependencies.mjs";
 import { normalizeMultiPassPackage } from "./install.mjs";
+import {
+  goalIdentity,
+  validateGoalPackage,
+  normalizeGoalPackage,
+} from "./goal-package.mjs";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isLegacyMcpAdapterSource } from "./legacy-mcp.mjs";
@@ -38,6 +43,14 @@ const installedPackage = readJson(
 );
 const isolatedManifest = readJson(join(isolatedPrefix, "package.json"));
 const multiPassPath = validateMultiPassPackage(isolatedPrefix);
+const goalPath = validateGoalPackage(isolatedPrefix);
+if (
+  isolatedManifest.dependencies?.[goalIdentity.name] !== goalIdentity.version
+) {
+  throw new Error(
+    "The isolated Pipi manifest must pin @narumitw/pi-goal 0.54.8.",
+  );
+}
 if (isolatedManifest.dependencies?.["pi-multi-pass"] !== multiPassVersion) {
   throw new Error("The isolated Pipi manifest must pin pi-multi-pass 1.5.1.");
 }
@@ -120,16 +133,21 @@ if (
 if (
   JSON.stringify(installedSettings.packages) !==
   JSON.stringify(
-    normalizeMultiPassPackage({
-      packages: installedSettings.packages ?? [],
-      desiredPath: multiPassPath,
+    normalizeGoalPackage({
+      packages: normalizeMultiPassPackage({
+        packages: installedSettings.packages ?? [],
+        desiredPath: multiPassPath,
+        settingsBaseDir: join(home, ".pipi", "agent"),
+        home,
+      }),
+      desiredPath: goalPath,
       settingsBaseDir: join(home, ".pipi", "agent"),
       home,
     }),
   )
 ) {
   throw new Error(
-    "Pipi must load exactly one local isolated pi-multi-pass package.",
+    "Pipi must load exactly one local isolated package each for pi-multi-pass and @narumitw/pi-goal.",
   );
 }
 const skillDiscovery = await discoverInstalledSkills({
@@ -290,5 +308,5 @@ if (
 const herdrStatus =
   " The Pipi-owned Herdr reporter is available without a legacy reporter conflict.";
 console.log(
-  `Installed Pipi ${expectedVersion}, branded launcher/resume command, native MCP and Chrome DevTools MCP 1.10.1, install-script policy, and model overrides are verified.${herdrStatus}`,
+  `Installed Pipi ${expectedVersion}, branded launcher/resume command, native MCP and Chrome DevTools MCP 1.10.1, unchanged Goal 0.54.8 integrity/dependencies and single-source loading, install-script policy, and model overrides are verified.${herdrStatus}`,
 );

@@ -17,13 +17,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import {
   installAssetDirectory,
   normalizeCodexToolsPackage,
   normalizeMultiPassPackage,
 } from "../../scripts/install.mjs";
+import { goalDependencyPaths } from "../../scripts/goal-package.mjs";
 import {
   acquireInstallLock,
   encodeInstallLockOwner,
@@ -37,6 +38,16 @@ const repositoryRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
+const installedGoalPath = (home) =>
+  join(
+    home,
+    ".pipi",
+    "agent",
+    "runtime",
+    "node_modules",
+    "@narumitw",
+    "pi-goal",
+  );
 const installScript = join(repositoryRoot, "scripts", "install.mjs");
 const checkPipiInstallScript = join(
   repositoryRoot,
@@ -187,12 +198,23 @@ if (args[0] === "install") {
     const browserEntry = join(browserPackage, "build", "src", "bin", "chrome-devtools-mcp.js");
     mkdirSync(join(piPackage, "dist", "bundle"), { recursive: true });
     mkdirSync(join(browserPackage, "build", "src", "bin"), { recursive: true });
-    writeFileSync(join(piPackage, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: ${JSON.stringify(runtimePiVersion)}, piConfig: { configDir: ".pi" }, bin: { pi: "dist/bundle/cli.js" } }));
+    writeFileSync(join(piPackage, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: ${JSON.stringify(runtimePiVersion)}, piConfig: { configDir: ".pi" }, main: "dist/index.js", bin: { pi: "dist/bundle/cli.js" } }));
     writeFileSync(join(browserPackage, "package.json"), JSON.stringify({ name: "chrome-devtools-mcp", version: ${JSON.stringify(browserMcpVersion)}, bin: { "chrome-devtools-mcp": "./build/src/bin/chrome-devtools-mcp.js" } }));
     const multiPass = join(cwd, "node_modules", "pi-multi-pass");
     mkdirSync(join(multiPass, "extensions"), { recursive: true });
     writeFileSync(join(multiPass, "package.json"), JSON.stringify({ name: "pi-multi-pass", version: process.env.PIPI_TEST_MULTIPASS_BAD_VERSION || "1.5.1", pi: { extensions: ["./extensions"] } }));
     if (!process.env.PIPI_TEST_MULTIPASS_MISSING_EXTENSION) writeFileSync(join(multiPass, "extensions", "multi-sub.ts"), "// fixture");
+    writeFileSync(join(piPackage, "dist", "index.js"), ${JSON.stringify(`export * from ${JSON.stringify(pathToFileURL(join(repositoryRoot, "node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href)};`)});
+    const dependencies = ${JSON.stringify(goalDependencyPaths(repositoryRoot))};
+    cpSync(${JSON.stringify(join(repositoryRoot, "node_modules/@narumitw/pi-goal"))}, join(cwd, "node_modules/@narumitw/pi-goal"), { recursive: true, dereference: true });
+    for (const [name, directory] of Object.entries(dependencies)) {
+      if (name === "@earendil-works/pi-coding-agent") continue;
+      const target = name === "highlight.js" ? join(cwd, "node_modules/@narumitw/pi-tui-kit/node_modules/highlight.js") : join(cwd, "node_modules", name);
+      cpSync(directory, target, { recursive: true, dereference: true });
+    }
+    const goal = join(cwd, "node_modules", "@narumitw/pi-goal");
+    if (process.env.PIPI_TEST_GOAL_CORRUPT) writeFileSync(join(goal, process.env.PIPI_TEST_GOAL_CORRUPT), "// corrupt fixture");
+    if (process.env.PIPI_TEST_GOAL_MISSING_DEPENDENCY) require("node:fs").rmSync(join(cwd, "node_modules", process.env.PIPI_TEST_GOAL_MISSING_DEPENDENCY), { recursive: true, force: true });
     cpSync(process.env.PIPI_TEST_PI_FIXTURE, piEntry);
     chmodSync(piEntry, 0o755);
     writeFileSync(browserEntry, 'process.stdout.write(JSON.stringify({ execPath: process.execPath, bunVersion: process.versions.bun, noUpdateChecks: process.env.CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS, args: process.argv.slice(2) }));\\n');
@@ -497,6 +519,7 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
       "node_modules",
       "pi-multi-pass",
     ),
+    installedGoalPath(fixture.home),
   ]);
 
   const pipiAgentDir = join(fixture.home, ".pipi", "agent");
@@ -1233,6 +1256,7 @@ test("default install replaces sibling Codex tools with the pinned source adapte
       "node_modules",
       "pi-multi-pass",
     ),
+    installedGoalPath(fixture.home),
   ]);
 });
 
@@ -1277,6 +1301,7 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
     "@earendil-works/pi-coding-agent": runtimePiVersion,
     "chrome-devtools-mcp": browserMcpVersion,
     "pi-multi-pass": "1.5.1",
+    "@narumitw/pi-goal": "0.54.8",
   });
   assert.deepEqual(isolatedManifest.trustedDependencies, [
     "@google/genai",
@@ -1512,6 +1537,7 @@ test("install repairs stale isolated Bun package metadata", async (t) => {
     "@earendil-works/pi-coding-agent": runtimePiVersion,
     "chrome-devtools-mcp": browserMcpVersion,
     "pi-multi-pass": "1.5.1",
+    "@narumitw/pi-goal": "0.54.8",
   });
   assert.equal(existsSync(mcpPackageDir), false);
   assert.deepEqual(isolatedManifest.trustedDependencies, [
@@ -1998,6 +2024,7 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
         "node_modules",
         "pi-multi-pass",
       ),
+      installedGoalPath(fixture.home),
     ],
   });
   assert.deepEqual(readJson(join(pipiAgentDir, "mcp.json")), {
@@ -3255,6 +3282,7 @@ test("multi-pass install preserves auth/settings and creates no rotation config 
       repositoryRoot,
       fixture.codexTools,
       desiredPath,
+      installedGoalPath(fixture.home),
     ]);
     assert.equal(readFileSync(authPath, "utf8"), auth);
     assert.equal(existsSync(join(agentDir, "multi-pass.json")), false);
@@ -3289,6 +3317,110 @@ test("invalid multi-pass version or missing extension refuses activation and res
       snapshotTree(join(fixture.home, ".local/bin/pipi")),
       launcher,
     );
+  }
+});
+
+test("Goal integrity or dependency failure refuses activation and rolls back managed state", async (t) => {
+  for (const extraEnv of [
+    { PIPI_TEST_GOAL_CORRUPT: "package.json" },
+    { PIPI_TEST_GOAL_CORRUPT: "dist/index.ts" },
+    { PIPI_TEST_GOAL_CORRUPT: "dist/chunks/menu-7W5HGHFO.ts" },
+    { PIPI_TEST_GOAL_MISSING_DEPENDENCY: "@narumitw/pi-tui-kit" },
+    { PIPI_TEST_GOAL_MISSING_DEPENDENCY: "grok-mermaid" },
+  ]) {
+    const fixture = await createFixture();
+    t.after(() => rm(fixture.home, { recursive: true, force: true }));
+    assert.equal(install(fixture).status, 0);
+    const before = snapshotTree(join(fixture.home, ".pipi"));
+    const launcher = snapshotTree(join(fixture.home, ".local/bin/pipi"));
+    const result = spawnSync(
+      process.execPath,
+      [installScript, "--codex-tools", fixture.codexTools],
+      {
+        cwd: repositoryRoot,
+        env: { ...fixture.env, ...extraEnv },
+        encoding: "utf8",
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Invalid isolated @narumitw\/pi-goal/);
+    assert.deepEqual(snapshotTree(join(fixture.home, ".pipi")), before);
+    assert.deepEqual(
+      snapshotTree(join(fixture.home, ".local/bin/pipi")),
+      launcher,
+    );
+  }
+});
+
+test("installed-state validation rejects Goal corruption and duplicate loading", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  assert.equal(install(fixture).status, 0);
+  assert.equal(
+    existsSync(join(fixture.home, ".pipi/agent/pi-goal.json")),
+    false,
+  );
+  const entry = join(installedGoalPath(fixture.home), "dist/index.ts");
+  const original = readFileSync(entry);
+  writeFileSync(entry, "// corrupt");
+  let result = spawnSync(process.execPath, [checkPipiInstallScript], {
+    cwd: repositoryRoot,
+    env: fixture.env,
+    encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Integrity mismatch/);
+  writeFileSync(entry, original);
+  const settingsPath = join(fixture.home, ".pipi/agent/settings.json");
+  const settings = readJson(settingsPath);
+  settings.packages.push("npm:@narumitw/pi-goal@0.54.8");
+  writeFileSync(settingsPath, JSON.stringify(settings));
+  result = spawnSync(process.execPath, [checkPipiInstallScript], {
+    cwd: repositoryRoot,
+    env: fixture.env,
+    encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /exactly one local isolated package each/);
+});
+
+test("Goal reinstall deduplicates sources and preserves user limits and synthetic auth", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const agentDir = join(fixture.home, ".pipi/agent");
+  mkdirSync(agentDir, { recursive: true });
+  const settings = {
+    custom: "retained",
+    packages: [
+      { source: "npm:@narumitw/pi-goal@0.54.7", extensions: [] },
+      { source: "npm:unrelated", extensions: ["!private/**"] },
+    ],
+  };
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings));
+  const limits = JSON.stringify({
+    continuationLimits: { automaticTurns: 7 },
+    custom: true,
+  });
+  const auth = JSON.stringify({
+    synthetic: { type: "api_key", key: "synthetic-only" },
+  });
+  writeFileSync(join(agentDir, "pi-goal.json"), limits);
+  writeFileSync(join(agentDir, "auth.json"), auth);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = install(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    const installed = readJson(join(agentDir, "settings.json"));
+    assert.equal(installed.custom, "retained");
+    assert.deepEqual(installed.packages[0], settings.packages[1]);
+    assert.equal(installed.packages.at(-1), installedGoalPath(fixture.home));
+    assert.equal(
+      installed.packages.filter(
+        (p) => typeof p === "string" && p.includes("@narumitw/pi-goal"),
+      ).length,
+      1,
+    );
+    assert.equal(readFileSync(join(agentDir, "pi-goal.json"), "utf8"), limits);
+    assert.equal(readFileSync(join(agentDir, "auth.json"), "utf8"), auth);
   }
 });
 

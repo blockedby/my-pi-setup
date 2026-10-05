@@ -12,6 +12,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateGoalPackage } from "./goal-package.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const isolatedRuntimeSource = join(
@@ -160,6 +161,7 @@ export const prepareIsolatedBunRuntime = ({
       }
     }
     validateMultiPassPackage(stage);
+    validateGoalPackage(stage);
     if (!ensureIsolatedPiBranding({ prefix: stage, appName })) {
       throw new Error(
         "Isolated Bun install did not create the Pi runtime package",
