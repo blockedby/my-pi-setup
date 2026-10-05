@@ -1,4 +1,9 @@
 import { execFileSync } from "node:child_process";
+import {
+  validateMultiPassPackage,
+  multiPassVersion,
+} from "./install-dependencies.mjs";
+import { normalizeMultiPassPackage } from "./install.mjs";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isLegacyMcpAdapterSource } from "./legacy-mcp.mjs";
@@ -32,6 +37,10 @@ const installedPackage = readJson(
   ),
 );
 const isolatedManifest = readJson(join(isolatedPrefix, "package.json"));
+const multiPassPath = validateMultiPassPackage(isolatedPrefix);
+if (isolatedManifest.dependencies?.["pi-multi-pass"] !== multiPassVersion) {
+  throw new Error("The isolated Pipi manifest must pin pi-multi-pass 1.5.1.");
+}
 const bunRuntime = resolveBunRuntime();
 const expectedTrustedDependencies = ["@google/genai", "protobufjs"];
 const sharedSkills = inspectSharedSkills(home);
@@ -107,6 +116,21 @@ if (
   })
 ) {
   throw new Error("The legacy MCP adapter still overrides native MCP.");
+}
+if (
+  JSON.stringify(installedSettings.packages) !==
+  JSON.stringify(
+    normalizeMultiPassPackage({
+      packages: installedSettings.packages ?? [],
+      desiredPath: multiPassPath,
+      settingsBaseDir: join(home, ".pipi", "agent"),
+      home,
+    }),
+  )
+) {
+  throw new Error(
+    "Pipi must load exactly one local isolated pi-multi-pass package.",
+  );
 }
 const skillDiscovery = await discoverInstalledSkills({
   home,

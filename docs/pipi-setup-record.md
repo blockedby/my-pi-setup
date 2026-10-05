@@ -1,6 +1,6 @@
 # Pipi setup record
 
-This is the durable, user-facing record for the local `pipi` setup. Append future Pipi requests here after they are implemented or clearly identified as pending. Never record tokens, API keys, OAuth credentials, cookies, or auth-file contents.
+This is the durable, user-facing record for the local `pipi` setup. Append one concise line per future Pipi operation: what changed, verification result, and any pending step. Keep historical entries intact; exclude Git-only delivery actions. Never record tokens, API keys, OAuth credentials, cookies, or auth-file contents.
 
 ## Current installation
 
@@ -2352,3 +2352,5 @@ Avoid broad live backend tests unless explicitly authorized. The upstream broad 
 - Pending: verified PR delivery to main and local rollout, then installed-state/version/default verification. Preserve primary uncommitted operation records and existing sessions; manual reload/restart remains caller-owned.
 
 - Removed the bundled plan-gh-backlog submodule, package exposure, and installer requirement; installer/discovery tests, submodule validation, type checks, formatting, and lint passed; the optional user-owned ~/.agents/skills copy is preserved, with /reload or a new session pending.
+- Simplified `AGENTS.md` and this record to one-line future operation logs; dependency preparation, typecheck, lint, formatting and diff checks passed; historical entries preserved.
+- Added pinned pi-multi-pass 1.5.1 to source and local Pipi for manual switching without pools; review, tests, type/lint/format and installed-SDK checks passed; pending reload and second-account login.

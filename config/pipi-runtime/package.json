@@ -8,7 +8,8 @@
   ],
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.0.3",
-    "chrome-devtools-mcp": "1.10.1"
+    "chrome-devtools-mcp": "1.10.1",
+    "pi-multi-pass": "1.5.1"
   },
   "overrides": {
     "@google/genai": "1.52.0",

@@ -7,6 +7,7 @@
       "dependencies": {
         "@earendil-works/pi-coding-agent": "1.0.3",
         "chrome-devtools-mcp": "1.10.1",
+        "pi-multi-pass": "1.5.1",
       },
     },
   },
@@ -264,6 +265,8 @@
     "partial-json": ["partial-json@0.1.7", "", {}, "sha512-Njv/59hHaokb/hRUjce3Hdv12wd60MtM9Z5Olmn+nehe0QDAsRtRbJPvJ0Z91TusF0SuZRIvnM+S4l6EIP8leA=="],
 
     "path-key": ["path-key@3.1.1", "", {}, "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q=="],
+
+    "pi-multi-pass": ["pi-multi-pass@1.5.1", "", {}, "sha512-+ArFAiXpcB3AglLGBJGn2yOQ5ZWLQ1qjiM7VQvLnLn5X7w8hOaLUfFTSx50+MglEIC4IKNaCJe5649ykydMX5Q=="],
 
     "proper-lockfile": ["proper-lockfile@4.1.2", "", { "dependencies": { "graceful-fs": "^4.2.4", "retry": "^0.12.0", "signal-exit": "^3.0.2" } }, "sha512-TjNPblN4BwAWMXU8s9AEz4JmQxnD1NNL7bNOY/AKUzyamc379FWASUhc/K1pL2noVb+XmZKLL68cjzLsiOAMaA=="],
 

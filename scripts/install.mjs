@@ -24,6 +24,8 @@ import {
 } from "../extensions/shared/executable-runtime.ts";
 import {
   isolatedRuntimeSource,
+  multiPassPackagePath,
+  multiPassVersion,
   prepareIsolatedBunRuntime,
   prepareRepositoryDependencies,
 } from "./install-dependencies.mjs";
@@ -68,7 +70,8 @@ if (
   isolatedRuntimeManifest.dependencies?.["@earendil-works/pi-coding-agent"] !==
     runtimePiVersion ||
   isolatedRuntimeManifest.dependencies?.["pi-mcp-adapter"] !== undefined ||
-  isolatedRuntimeManifest.dependencies?.["chrome-devtools-mcp"] !== "1.10.1"
+  isolatedRuntimeManifest.dependencies?.["chrome-devtools-mcp"] !== "1.10.1" ||
+  isolatedRuntimeManifest.dependencies?.["pi-multi-pass"] !== multiPassVersion
 ) {
   throw new Error(
     "config/pipi-runtime/package.json is not aligned with the installer package pins.",
@@ -278,6 +281,79 @@ export const normalizeCodexToolsPackage = ({
 
   if (!selectedPackageAdded) normalizedPackages.push(normalizedDesiredPath);
   return normalizedPackages;
+};
+
+const isMultiPassGitSource = (source) => {
+  const hasGitPrefix = /^git:(?!\/\/)/.test(source.trim());
+  let repository = source
+    .trim()
+    .replace(/^git:(?!\/\/)/, "")
+    .trim();
+  repository = repository.replace(/^git\+(?=(?:https?|ssh|git):\/\/)/, "");
+  if (
+    hasGitPrefix &&
+    /^hjanuschka\/pi-multi-pass(?:\.git)?(?:[/@#]|$)/i.test(repository)
+  ) {
+    repository = `https://github.com/${repository}`;
+  }
+  repository = repository.replace(/^github:/, "https://github.com/");
+  repository = repository.replace(
+    /^git@github\.com:/i,
+    "ssh://git@github.com/",
+  );
+  if (/^github\.com\//i.test(repository)) repository = `https://${repository}`;
+  try {
+    const url = new URL(repository);
+    if (
+      !["https:", "http:", "ssh:", "git:"].includes(url.protocol) ||
+      url.hostname.replace(/^www\./, "") !== "github.com"
+    )
+      return false;
+    const path = decodeURIComponent(url.pathname)
+      .split("@", 1)[0]
+      .toLowerCase()
+      .split("/")
+      .filter(Boolean)
+      .slice(0, 2)
+      .join("/")
+      .replace(/\.git$/, "");
+    return path === "hjanuschka/pi-multi-pass";
+  } catch {
+    return false;
+  }
+};
+
+// Replace all known copies with one unfiltered local, frozen package source.
+// Only this package's filters are reset; unrelated entries remain untouched.
+export const normalizeMultiPassPackage = ({
+  packages,
+  desiredPath,
+  settingsBaseDir,
+  home,
+}) => {
+  const selectedPath = resolve(desiredPath);
+  const retained = packages.filter((entry) => {
+    const source = packageSource(entry);
+    if (typeof source !== "string") return true;
+    if (/^npm:pi-multi-pass(?:@.+)?$/.test(source)) return false;
+    if (isMultiPassGitSource(source)) return false;
+    if (source.startsWith("npm:") || source.startsWith("git:")) return true;
+    const path = resolveSettingsPackagePath(source, settingsBaseDir, home);
+    if (
+      path === selectedPath ||
+      path === join(settingsBaseDir, "npm", "node_modules", "pi-multi-pass")
+    )
+      return false;
+    try {
+      return (
+        JSON.parse(readFileSync(join(path, "package.json"), "utf8")).name !==
+        "pi-multi-pass"
+      );
+    } catch {
+      return true;
+    }
+  });
+  return [...retained, selectedPath];
 };
 
 const removeLegacyMcpPackage = (packages, agentDir) => {
@@ -1174,6 +1250,12 @@ const install = () => {
         options.codexTools === codexToolsSubmoduleRoot
           ? codexToolsAdapterRoot
           : options.codexTools,
+      settingsBaseDir: agentDir,
+      home,
+    });
+    packages = normalizeMultiPassPackage({
+      packages,
+      desiredPath: multiPassPackagePath(isolatedRuntimePrefix),
       settingsBaseDir: agentDir,
       home,
     });

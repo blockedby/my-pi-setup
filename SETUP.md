@@ -28,12 +28,12 @@ The installer accepts `--bun /absolute/path/to/bun` or `PIPI_BUN_RUNTIME`. It re
 Installation creates:
 
 - `~/.local/bin/pipi` — managed Bun launcher
-- `~/.pipi/agent/runtime` — isolated, frozen Bun runtime containing Pi, `pi-mcp-adapter`, and `chrome-devtools-mcp`
+- `~/.pipi/agent/runtime` — isolated, frozen Bun runtime containing Pi, unchanged `pi-multi-pass@1.5.1`, and `chrome-devtools-mcp`
 - `~/.pipi/agent/cache/bun` — Pipi-owned Bun package cache
 - `~/.pipi/agent/settings.json`, `models.json`, and `mcp.json` — isolated settings, tracked model overrides (seeded only when missing), and MCP configuration
 - `~/.pipi/sessions` — isolated sessions
 
-The isolated manifest and lock are copied from `config/pipi-runtime/` and installed with `bun install --frozen-lockfile`. Required dependency lifecycle scripts are narrowly trusted only for `@google/genai` and `protobufjs`. Browser MCP is pinned to `chrome-devtools-mcp@1.8.0`. Generated MCP entries and adapter scripts under `~/.pipi/agent/adapters/browser-chrome` use the recorded absolute Bun and local pinned entrypoint. The adapter is not a skill, and does not include `SKILL.md` or a separate `install-local.sh` configuration writer. `PIPI_BUN_RUNTIME` may be unset on every installed browser entrypoint; if set, it must exactly equal the recorded absolute Bun. Control startup also verifies that the recorded executable remains executable and reports the stable version recorded at install time. Alternate or invalid runtime/package overrides fail before server startup instead of enabling registry resolution or another package manager.
+The isolated manifest and lock are copied from `config/pipi-runtime/` and installed with `bun install --frozen-lockfile`. Required dependency lifecycle scripts are narrowly trusted only for `@google/genai` and `protobufjs`. Browser MCP is pinned to `chrome-devtools-mcp@1.10.1`. Generated MCP entries and adapter scripts under `~/.pipi/agent/adapters/browser-chrome` use the recorded absolute Bun and local pinned entrypoint. The adapter is not a skill, and does not include `SKILL.md` or a separate `install-local.sh` configuration writer. `PIPI_BUN_RUNTIME` may be unset on every installed browser entrypoint; if set, it must exactly equal the recorded absolute Bun. Control startup also verifies that the recorded executable remains executable and reports the stable version recorded at install time. Alternate or invalid runtime/package overrides fail before server startup instead of enabling registry resolution or another package manager.
 
 The installer loads this checkout, the pinned backlog skill, and read-only `vendor/pi-codex`. Canonical browser, frontend-quality, and reviewer skills are consumed from `~/.agents/skills`, not duplicated in PiPi's skill directory or reviewer package exposure. Shared repositories and development symlink targets remain user-owned. Codex-tool dependencies are declared at the parent root and resolved by the root Bun lock; the immutable vendor lock remains source metadata and is not executed. Existing unrelated Pipi settings and MCP servers are preserved. Auth bytes are never copied.
 
@@ -45,7 +45,7 @@ pipi --version
 
 If older PiPi skill copies are present, installation refuses implicit removal. After reviewing their differences, use `bun run install:pipi -- --adopt-shared-skills` to preserve those copies and adopt shared skills. Backups are retained under `~/.pipi/agent/backups/shared-skill-migration-v1/`, including the affected settings/MCP configuration and absence metadata. Existing backups are never overwritten. See [migration safety](docs/shared-skills.md#migration-safety).
 
-Re-running installation is idempotent. Every normal install and reinstall stages a fresh isolated runtime from `config/pipi-runtime/bun.lock`, runs the frozen Bun install, validates the required Pi, MCP adapter, and browser entrypoints, and atomically activates the staged result. Existing mutable runtime contents are never reused. Browser target and rollback paths use no-follow occupancy checks, so a dangling managed browser symlink is replaced without touching its external referent and can be restored exactly after a caught failure. One exclusive per-HOME installer lock records host, PID, boot, process-start identity, and a random token in an atomically created symlink. A live same-host or foreign/ambiguous owner is preserved and refused; a demonstrably dead same-host owner and its private stage are recovered. Malformed ownership fails closed with an explicit manual-removal instruction. The complete managed agent tree and launcher are prepared from a private staged snapshot; caught failures, including late Herdr/config/link/activation failures, restore prior bytes, material modes, symlink targets, presence, and managed directories. Auth link metadata is copied without reading auth secret bytes. `--skip-repository-dependencies` skips only the root workspace frozen install; it still performs the fresh isolated runtime installation.
+Re-running installation is idempotent. Every normal install and reinstall stages a fresh isolated runtime from `config/pipi-runtime/bun.lock`, runs the frozen Bun install, validates the required Pi and browser entrypoints and the multi-pass package version/extension, and atomically activates the staged result. Existing mutable runtime contents are never reused. Browser target and rollback paths use no-follow occupancy checks, so a dangling managed browser symlink is replaced without touching its external referent and can be restored exactly after a caught failure. One exclusive per-HOME installer lock records host, PID, boot, process-start identity, and a random token in an atomically created symlink. A live same-host or foreign/ambiguous owner is preserved and refused; a demonstrably dead same-host owner and its private stage are recovered. Malformed ownership fails closed with an explicit manual-removal instruction. The complete managed agent tree and launcher are prepared from a private staged snapshot; caught failures, including late Herdr/config/link/activation failures, restore prior bytes, material modes, symlink targets, presence, and managed directories. Auth link metadata is copied without reading auth secret bytes. `--skip-repository-dependencies` skips only the root workspace frozen install; it still performs the fresh isolated runtime installation.
 
 The normal root `bun install --frozen-lockfile` is a repository preflight/cache boundary that runs before the managed HOME transaction. It may prepare or repair repository `node_modules` and Bun cache state, and those package-manager outputs are intentionally not snapshotted or rolled back if a later managed-HOME step fails. Tracked manifests and `bun.lock` remain authoritative and unchanged; the preflight is safe to rerun on the next normal install. This repository boundary does not weaken rollback of `~/.pipi` managed state.
 
@@ -83,6 +83,32 @@ Three lazy browser servers are installed: `browser-chrome-control`, `browser-chr
 ## Isolation and authentication
 
 The launcher invokes the installed JavaScript entrypoint with its recorded absolute Bun executable and exports Pipi-only settings/session paths. Pipi auth remains separate unless `--share-auth` is explicitly requested; that option creates a symlink and refuses to overwrite existing auth state.
+
+## Manual account switching
+
+Pipi loads unchanged upstream `pi-multi-pass@1.5.1` from exactly one local isolated runtime package, never a registry source at startup. The reviewed upstream revision is `0d9a2113f26d38eb041f7b641d0f517520594872`; both Bun locks retain the reviewed npm tarball integrity. The package has no runtime dependencies or lifecycle scripts. Reinstallation replaces duplicate multi-pass sources (including their filters) while preserving unrelated package filters, settings, and auth. No pools, chains, presets, or `multi-pass.json` files are created or enabled by installation.
+
+In Pipi:
+
+1. `/subs add` — add an extra account for your provider.
+2. `/login openai-codex-2` — authenticate the new Codex account in the browser (use the provider name shown by `/subs add`). Choose your second ChatGPT account; the existing `openai-codex` login remains separate. `/subs login` only guides you to the native `/login` command and can log out a selected existing extra account when re-authentication is confirmed.
+3. `/subs switch` — select the account to use (or `/subs switch openai-codex-2`; switch back with `/subs switch openai-codex`).
+4. `/subs limits` — inspect account limits.
+
+This integration is for **manual switching only**. Upstream 1.5.1 has an automatic-failover bug; full automatic failover reliability is not claimed. Leave pools unconfigured. Existing user-authored configuration is not deleted or rewritten.
+
+**Project configuration is trusted code:** upstream reads `.pi/multi-pass.json` without Pi's project-trust gate. It can enable automatic routing and execute configured selector scripts with full process privileges. Pipi does not patch this upstream behavior; review project configuration before opening untrusted repositories.
+
+Switching affects the current Pi session, not Codex CLI authentication or explicit subagent model/provider defaults. Extra provider names do not inherit `openai-codex`-specific `models.json` overrides; configure those separately if needed. Login and limits may contact providers; the deterministic SDK smoke uses dummy auth and makes no network requests or paid model calls.
+
+To repeat the smoke against the repository SDK (or a parent-selected installed SDK), run:
+
+```sh
+bun tests/scripts/fixtures/multi-pass-smoke.mjs
+bun tests/scripts/fixtures/multi-pass-smoke.mjs --sdk-root /path/to/runtime/node_modules/@earendil-works/pi-coding-agent --package-root /path/to/runtime/node_modules/pi-multi-pass
+```
+
+Both invocations create and remove a disposable HOME; they never read the caller's auth.
 
 ## Updating
 
