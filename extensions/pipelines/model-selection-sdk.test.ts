@@ -70,8 +70,8 @@ function assistantMessage(
   } satisfies AssistantMessage;
 }
 
-test("Pi 1.0.2 model selection uses Luna on the next request in the same Sol run without losing context or permissions or persisting defaults", async () => {
-  assert.equal(VERSION, "1.0.2");
+test("Pi 1.0.3 model selection uses Luna on the next request in the same Sol run without losing context or permissions or persisting defaults", async () => {
+  assert.equal(VERSION, "1.0.3");
   const agentDir = await mkdtemp(
     join(tmpdir(), "pipeline-model-selection-sdk-"),
   );
