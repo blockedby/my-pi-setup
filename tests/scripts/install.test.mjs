@@ -22,6 +22,7 @@ import test from "node:test";
 import {
   installAssetDirectory,
   normalizeCodexToolsPackage,
+  normalizeMultiPassPackage,
 } from "../../scripts/install.mjs";
 import {
   acquireInstallLock,
@@ -188,6 +189,10 @@ if (args[0] === "install") {
     mkdirSync(join(browserPackage, "build", "src", "bin"), { recursive: true });
     writeFileSync(join(piPackage, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: ${JSON.stringify(runtimePiVersion)}, piConfig: { configDir: ".pi" }, bin: { pi: "dist/bundle/cli.js" } }));
     writeFileSync(join(browserPackage, "package.json"), JSON.stringify({ name: "chrome-devtools-mcp", version: ${JSON.stringify(browserMcpVersion)}, bin: { "chrome-devtools-mcp": "./build/src/bin/chrome-devtools-mcp.js" } }));
+    const multiPass = join(cwd, "node_modules", "pi-multi-pass");
+    mkdirSync(join(multiPass, "extensions"), { recursive: true });
+    writeFileSync(join(multiPass, "package.json"), JSON.stringify({ name: "pi-multi-pass", version: process.env.PIPI_TEST_MULTIPASS_BAD_VERSION || "1.5.1", pi: { extensions: ["./extensions"] } }));
+    if (!process.env.PIPI_TEST_MULTIPASS_MISSING_EXTENSION) writeFileSync(join(multiPass, "extensions", "multi-sub.ts"), "// fixture");
     cpSync(process.env.PIPI_TEST_PI_FIXTURE, piEntry);
     chmodSync(piEntry, 0o755);
     writeFileSync(browserEntry, 'process.stdout.write(JSON.stringify({ execPath: process.execPath, bunVersion: process.versions.bun, noUpdateChecks: process.env.CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS, args: process.argv.slice(2) }));\\n');
@@ -481,7 +486,18 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
     maxRetries: 2,
     baseDelayMs: 1000,
   });
-  assert.deepEqual(settings.packages, [repositoryRoot, fixture.codexTools]);
+  assert.deepEqual(settings.packages, [
+    repositoryRoot,
+    fixture.codexTools,
+    join(
+      fixture.home,
+      ".pipi",
+      "agent",
+      "runtime",
+      "node_modules",
+      "pi-multi-pass",
+    ),
+  ]);
 
   const pipiAgentDir = join(fixture.home, ".pipi", "agent");
   const installedBrowserSkill = join(
@@ -1209,6 +1225,14 @@ test("default install replaces sibling Codex tools with the pinned source adapte
   assert.deepEqual(readJson(join(pipiAgentDir, "settings.json")).packages, [
     repositoryRoot,
     join(repositoryRoot, "adapters", "codex-tools"),
+    join(
+      fixture.home,
+      ".pipi",
+      "agent",
+      "runtime",
+      "node_modules",
+      "pi-multi-pass",
+    ),
   ]);
 });
 
@@ -1252,6 +1276,7 @@ test("default install uses Pipi-owned Pi runtime pinned by package.json", async 
   assert.deepEqual(isolatedManifest.dependencies, {
     "@earendil-works/pi-coding-agent": runtimePiVersion,
     "chrome-devtools-mcp": browserMcpVersion,
+    "pi-multi-pass": "1.5.1",
   });
   assert.deepEqual(isolatedManifest.trustedDependencies, [
     "@google/genai",
@@ -1486,6 +1511,7 @@ test("install repairs stale isolated Bun package metadata", async (t) => {
   assert.deepEqual(isolatedManifest.dependencies, {
     "@earendil-works/pi-coding-agent": runtimePiVersion,
     "chrome-devtools-mcp": browserMcpVersion,
+    "pi-multi-pass": "1.5.1",
   });
   assert.equal(existsSync(mcpPackageDir), false);
   assert.deepEqual(isolatedManifest.trustedDependencies, [
@@ -1960,7 +1986,19 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
     },
     httpIdleTimeoutMs: 300_000,
     retry: { enabled: true, maxRetries: 2, baseDelayMs: 1000 },
-    packages: ["existing-package", repositoryRoot, fixture.codexTools],
+    packages: [
+      "existing-package",
+      repositoryRoot,
+      fixture.codexTools,
+      join(
+        fixture.home,
+        ".pipi",
+        "agent",
+        "runtime",
+        "node_modules",
+        "pi-multi-pass",
+      ),
+    ],
   });
   assert.deepEqual(readJson(join(pipiAgentDir, "mcp.json")), {
     mcpServers: {
@@ -3118,6 +3156,140 @@ test("uninstall removes only the managed launcher unless purge is explicit", asy
   assert.equal(purge.status, 0, purge.stderr);
   assert.equal(existsSync(launcherPath), false);
   assert.equal(existsSync(pipiDir), false);
+});
+
+test("multi-pass normalization preserves unrelated filters and is idempotent", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "pipi-multi-pass-normalize-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const agentDir = join(home, ".pipi", "agent");
+  const desiredPath = join(
+    agentDir,
+    "runtime",
+    "node_modules",
+    "pi-multi-pass",
+  );
+  const otherCopy = join(home, "old-copy");
+  mkdirSync(otherCopy);
+  writeFileSync(
+    join(otherCopy, "package.json"),
+    JSON.stringify({ name: "pi-multi-pass" }),
+  );
+  const unrelated = {
+    source: "npm:pi-multi-pass-other",
+    extensions: [],
+    skills: ["!private"],
+  };
+  const normalize = (packages) =>
+    normalizeMultiPassPackage({
+      packages,
+      desiredPath,
+      settingsBaseDir: agentDir,
+      home,
+    });
+  const result = normalize([
+    unrelated,
+    { source: "npm:other", extensions: ["+one.ts", "!two.ts"], themes: [] },
+    "npm:pi-multi-pass",
+    { source: "npm:pi-multi-pass@1.4.0", extensions: [] },
+    "git:https://github.com/hjanuschka/pi-multi-pass.git#old",
+    "https://github.com/hjanuschka/pi-multi-pass/",
+    "https://github.com/hjanuschka/pi-multi-pass.git/",
+    " https://github.com/Hjanuschka/Pi-Multi-Pass/#v1.5.1 ",
+    "git: https://github.com/hjanuschka/pi-multi-pass/@v1.5.1",
+    "git:git://github.com/hjanuschka/pi-multi-pass.git/",
+    "git:git+https://github.com/hjanuschka/pi-multi-pass.git#v1.5.1",
+    "git:hjanuschka/pi-multi-pass@v1.5.1",
+    "https://github.com/hjanuschka/pi-multi-pass/tree/v1.5.1",
+    "https://www.github.com/hjanuschka/pi-multi-pass/",
+    "git:git@github.com:hjanuschka/pi-multi-pass.git/",
+    "git:github.com/hjanuschka/pi-multi-pass@v1.5.1",
+    "git:github:hjanuschka/pi-multi-pass",
+    "git:ssh://git@github.com/hjanuschka/pi-multi-pass.git@v1.5.1",
+    "npm/node_modules/pi-multi-pass",
+    otherCopy,
+    "runtime/node_modules/pi-multi-pass",
+    { source: desiredPath, extensions: [] },
+    "~/.pipi/agent/runtime/node_modules/pi-multi-pass",
+  ]);
+  assert.deepEqual(result, [
+    unrelated,
+    { source: "npm:other", extensions: ["+one.ts", "!two.ts"], themes: [] },
+    desiredPath,
+  ]);
+  assert.deepEqual(normalize(result), result);
+});
+
+test("multi-pass install preserves auth/settings and creates no rotation config on reinstall", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.home, { recursive: true, force: true }));
+  const agentDir = join(fixture.home, ".pipi", "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const authPath = join(agentDir, "auth.json");
+  const auth = ' { "dummy": { "type": "api_key", "key": "synthetic" } }\n';
+  writeFileSync(authPath, auth, { mode: 0o600 });
+  const unrelated = {
+    source: "npm:unrelated",
+    extensions: [],
+    skills: ["!hidden"],
+  };
+  writeFileSync(
+    join(agentDir, "settings.json"),
+    JSON.stringify({
+      custom: { keep: true },
+      packages: [unrelated, "npm:pi-multi-pass@1.5.1"],
+    }),
+  );
+  const desiredPath = join(
+    agentDir,
+    "runtime",
+    "node_modules",
+    "pi-multi-pass",
+  );
+  for (let count = 0; count < 2; count++) {
+    const result = install(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    const settings = readJson(join(agentDir, "settings.json"));
+    assert.deepEqual(settings.custom, { keep: true });
+    assert.deepEqual(settings.packages, [
+      unrelated,
+      repositoryRoot,
+      fixture.codexTools,
+      desiredPath,
+    ]);
+    assert.equal(readFileSync(authPath, "utf8"), auth);
+    assert.equal(existsSync(join(agentDir, "multi-pass.json")), false);
+    assert.equal(existsSync(join(fixture.home, ".pi/multi-pass.json")), false);
+  }
+});
+
+test("invalid multi-pass version or missing extension refuses activation and restores prior state", async (t) => {
+  for (const extraEnv of [
+    { PIPI_TEST_MULTIPASS_BAD_VERSION: "1.5.0" },
+    { PIPI_TEST_MULTIPASS_MISSING_EXTENSION: "1" },
+  ]) {
+    const fixture = await createFixture();
+    t.after(() => rm(fixture.home, { recursive: true, force: true }));
+    assert.equal(install(fixture).status, 0);
+    const managed = join(fixture.home, ".pipi");
+    const before = snapshotTree(managed);
+    const launcher = snapshotTree(join(fixture.home, ".local/bin/pipi"));
+    const result = spawnSync(
+      process.execPath,
+      [installScript, "--codex-tools", fixture.codexTools],
+      {
+        cwd: repositoryRoot,
+        env: { ...fixture.env, ...extraEnv },
+        encoding: "utf8",
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Invalid isolated pi-multi-pass/);
+    assert.deepEqual(snapshotTree(managed), before);
+    assert.deepEqual(
+      snapshotTree(join(fixture.home, ".local/bin/pipi")),
+      launcher,
+    );
+  }
 });
 
 test("removed web provider is absent from tracked source and manifests", () => {

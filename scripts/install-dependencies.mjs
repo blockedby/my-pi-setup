@@ -113,6 +113,29 @@ const activateStagedDirectory = (stage, target) => {
   };
 };
 
+export const multiPassVersion = "1.5.1";
+export const multiPassPackagePath = (prefix) =>
+  join(prefix, "node_modules", "pi-multi-pass");
+
+export const validateMultiPassPackage = (prefix) => {
+  const packagePath = multiPassPackagePath(prefix);
+  const manifest = readManifest(join(packagePath, "package.json"));
+  if (
+    manifest?.name !== "pi-multi-pass" ||
+    manifest.version !== multiPassVersion ||
+    JSON.stringify(manifest.pi?.extensions) !==
+      JSON.stringify(["./extensions"]) ||
+    !lstatSync(join(packagePath, "extensions", "multi-sub.ts"), {
+      throwIfNoEntry: false,
+    })?.isFile()
+  ) {
+    throw new Error(
+      "Invalid isolated pi-multi-pass 1.5.1 package or extension",
+    );
+  }
+  return packagePath;
+};
+
 export const prepareIsolatedBunRuntime = ({
   prefix,
   bunExecutable,
@@ -136,6 +159,7 @@ export const prepareIsolatedBunRuntime = ({
         );
       }
     }
+    validateMultiPassPackage(stage);
     if (!ensureIsolatedPiBranding({ prefix: stage, appName })) {
       throw new Error(
         "Isolated Bun install did not create the Pi runtime package",

@@ -46,6 +46,7 @@ When supported, start with `/pipelines:implementing-pipeline <task>` or `/pipeli
 - deterministic Codex-backed web search, fetching, patching, and bounded tasks
 - Native Pi MCP support with built-in server management and tool discovery
 - ask-user, copy-all, session summaries, and Git/model status UI
+- manual OAuth account switching with `/subs` ([setup and limitations](SETUP.md#manual-account-switching))
 - GitHub Dark Default theme
 
 ### Skills
