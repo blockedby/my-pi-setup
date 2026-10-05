@@ -123,10 +123,10 @@ assertSelectedSkillIdentities({
 });
 if (
   installedSettings.defaultProvider !== "openai-codex" ||
-  installedSettings.defaultModel !== "gpt-6-astra" ||
-  installedSettings.defaultThinkingLevel !== "low"
+  installedSettings.defaultModel !== "gpt-6.1-sol" ||
+  installedSettings.defaultThinkingLevel !== "high"
 ) {
-  throw new Error("Installed Pipi does not default to Astra low.");
+  throw new Error("Installed Pipi does not default to Sol 6.1 high.");
 }
 if (
   installedSettings.compaction?.enabled !== true ||

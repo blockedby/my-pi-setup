@@ -459,8 +459,8 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
 
   const settings = readJson(settingsPath);
   assert.equal(settings.defaultProvider, "openai-codex");
-  assert.equal(settings.defaultModel, "gpt-6-astra");
-  assert.equal(settings.defaultThinkingLevel, "low");
+  assert.equal(settings.defaultModel, "gpt-6.1-sol");
+  assert.equal(settings.defaultThinkingLevel, "high");
   assert.deepEqual(settings.compaction, {
     enabled: true,
     reserveTokens: 30_000,
@@ -1944,8 +1944,8 @@ test("existing Pipi settings retain unrelated values and packages", async (t) =>
     skills: ["skills/browser-chrome"],
     theme: "github-dark-default",
     defaultProvider: "openai-codex",
-    defaultModel: "gpt-6-astra",
-    defaultThinkingLevel: "low",
+    defaultModel: "gpt-6.1-sol",
+    defaultThinkingLevel: "high",
     compaction: {
       enabled: true,
       reserveTokens: 30_000,
