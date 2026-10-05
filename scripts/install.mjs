@@ -89,8 +89,8 @@ const modelOverridesSource = join(
 );
 const pipiModelDefaults = {
   defaultProvider: "openai-codex",
-  defaultModel: "gpt-6-astra",
-  defaultThinkingLevel: "low",
+  defaultModel: "gpt-6.1-sol",
+  defaultThinkingLevel: "high",
 };
 
 const git = (args, cwd = repositoryRoot) =>
