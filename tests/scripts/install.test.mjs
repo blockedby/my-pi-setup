@@ -60,8 +60,6 @@ const reviewerSkillSource = join(
   "code-review",
   "SKILL.md",
 );
-const backlogSubmodule = join(repositoryRoot, "vendor", "plan-gh-backlog");
-const backlogSkillSource = join(backlogSubmodule, "SKILL.md");
 const codexSubmodule = join(repositoryRoot, "vendor", "pi-codex");
 const runtimePiPackage = "@earendil-works/pi-coding-agent";
 const rootManifest = JSON.parse(
@@ -409,6 +407,21 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
 
+  const backlogTarget = join(fixture.home, "user-backlog-checkout");
+  mkdirSync(backlogTarget);
+  writeFileSync(
+    join(backlogTarget, "SKILL.md"),
+    "---\nname: plan-gh-backlog\ndescription: User-owned backlog skill.\n---\n",
+  );
+  const sharedBacklog = join(
+    fixture.home,
+    ".agents",
+    "skills",
+    "plan-gh-backlog",
+  );
+  symlinkSync(backlogTarget, sharedBacklog);
+  const backlogBefore = snapshotTree(backlogTarget);
+
   const regularAgentDir = join(fixture.home, ".pi", "agent");
   mkdirSync(regularAgentDir, { recursive: true });
   const regularSettingsPath = join(regularAgentDir, "settings.json");
@@ -435,10 +448,6 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   assert.equal(first.status, 0, first.stderr);
   assert.match(first.stdout, /Codex CLI:/);
   assert.match(first.stdout, /Shared code-review skill:/);
-  assert.match(
-    first.stdout,
-    new RegExp(`Plan GitHub backlog skill: ${backlogSubmodule}`),
-  );
 
   const launcherPath = join(fixture.home, ".local", "bin", "pipi");
   const settingsPath = join(fixture.home, ".pipi", "agent", "settings.json");
@@ -578,6 +587,13 @@ test("clean install creates an isolated launcher and is idempotent", async (t) =
   );
   assert.equal(lstatSync(sharedBrowser).isSymbolicLink(), true);
   assert.equal(readlinkSync(sharedBrowser), browserSkillSource);
+  assert.equal(lstatSync(sharedBacklog).isSymbolicLink(), true);
+  assert.equal(readlinkSync(sharedBacklog), backlogTarget);
+  assert.deepEqual(snapshotTree(backlogTarget), backlogBefore);
+  assert.equal(
+    existsSync(join(pipiAgentDir, "skills", "plan-gh-backlog")),
+    false,
+  );
 });
 
 for (const [fileName, dangling] of [
@@ -989,7 +1005,6 @@ test("package loads canonical submodule resources", () => {
     join(repositoryRoot, "config", "submodules.json"),
   );
   const reviewer = submodules.submodules["gpt5.6-reviewer"];
-  const backlog = submodules.submodules["plan-gh-backlog"];
   const codex = submodules.submodules["pi-codex"];
 
   assert.equal(existsSync(reviewerSkillSource), true);
@@ -1012,24 +1027,16 @@ test("package loads canonical submodule resources", () => {
   );
   assert.equal(reviewer.branch, "main");
 
-  assert.equal(existsSync(backlogSkillSource), true);
-  assert.match(
-    readFileSync(backlogSkillSource, "utf8"),
-    /^---\nname: plan-gh-backlog\n/,
+  assert.equal(submodules.submodules["plan-gh-backlog"], undefined);
+  assert.equal(
+    existsSync(join(repositoryRoot, "vendor", "plan-gh-backlog", "SKILL.md")),
+    false,
   );
   assert.equal(
     existsSync(join(repositoryRoot, "skills", "plan-gh-backlog")),
     false,
   );
-  assert.equal(
-    manifest.pi.skills.filter((path) => path === "./vendor/plan-gh-backlog")
-      .length,
-    1,
-  );
-  assert.equal(backlog.path, "vendor/plan-gh-backlog");
-  assert.equal(backlog.url, "https://github.com/blockedby/plan-gh-backlog.git");
-  assert.equal(backlog.branch, "main");
-  assert.equal(backlog.piSkillPath, "./vendor/plan-gh-backlog");
+  assert.deepEqual(manifest.pi.skills, ["./skills"]);
 
   const codexManifest = readJson(join(codexSubmodule, "package.json"));
   assert.equal(codex.path, "vendor/pi-codex");
@@ -2018,7 +2025,6 @@ test("install rejects every configured missing submodule asset before writing Pi
   );
   for (const [name, source] of [
     ["vendor/gpt5.6-reviewer", reviewerSubmodule],
-    ["vendor/plan-gh-backlog", backlogSubmodule],
     ["vendor/pi-codex", codexSubmodule],
   ]) {
     execFileSync("git", [
@@ -2090,7 +2096,7 @@ test("install rejects every configured missing submodule asset before writing Pi
   }
 });
 
-test("install rejects backlog submodule pin, origin, and cleanliness drift before writing Pipi state", async (t) => {
+test("install rejects reviewer submodule pin, origin, and cleanliness drift before writing Pipi state", async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.home, { recursive: true, force: true }));
 
@@ -2102,7 +2108,6 @@ test("install rejects backlog submodule pin, origin, and cleanliness drift befor
   );
   for (const [name, source] of [
     ["vendor/gpt5.6-reviewer", reviewerSubmodule],
-    ["vendor/plan-gh-backlog", backlogSubmodule],
     ["vendor/pi-codex", codexSubmodule],
   ]) {
     execFileSync("git", [
@@ -2134,7 +2139,7 @@ test("install rejects backlog submodule pin, origin, and cleanliness drift befor
       submodule.url,
     ]);
   }
-  const backlogRoot = join(cloneRoot, "vendor", "plan-gh-backlog");
+  const reviewerRoot = join(cloneRoot, "vendor", "gpt5.6-reviewer");
   const runCloneInstaller = () =>
     spawnSync(
       process.execPath,
@@ -2158,52 +2163,52 @@ test("install rejects backlog submodule pin, origin, and cleanliness drift befor
     );
   };
 
-  const skillPath = join(backlogRoot, "SKILL.md");
+  const skillPath = join(reviewerRoot, "skills", "code-review", "SKILL.md");
   writeFileSync(skillPath, `${readFileSync(skillPath, "utf8")}\ndrift\n`);
   assertRejectedWithoutState(
     runCloneInstaller(),
-    /Submodule plan-gh-backlog has direct worktree changes/,
+    /Submodule gpt5\.6-reviewer has direct worktree changes/,
   );
-  execFileSync("git", ["-C", backlogRoot, "restore", "."]);
+  execFileSync("git", ["-C", reviewerRoot, "restore", "."]);
 
   execFileSync("git", [
     "-C",
-    backlogRoot,
+    reviewerRoot,
     "remote",
     "set-url",
     "origin",
-    "https://example.invalid/plan-gh-backlog.git",
+    "https://example.invalid/gpt5.6-reviewer.git",
   ]);
   assertRejectedWithoutState(
     runCloneInstaller(),
-    /Submodule plan-gh-backlog origin URL does not match configured URL/,
+    /Submodule gpt5\.6-reviewer origin URL does not match configured URL/,
   );
   execFileSync("git", [
     "-C",
-    backlogRoot,
+    reviewerRoot,
     "remote",
     "set-url",
     "origin",
-    submodules.submodules["plan-gh-backlog"].url,
+    submodules.submodules["gpt5.6-reviewer"].url,
   ]);
 
-  execFileSync("git", ["-C", backlogRoot, "config", "user.name", "Pipi Test"]);
+  execFileSync("git", ["-C", reviewerRoot, "config", "user.name", "Pipi Test"]);
   execFileSync("git", [
     "-C",
-    backlogRoot,
+    reviewerRoot,
     "config",
     "user.email",
     "pipi-test@example.invalid",
   ]);
   writeFileSync(
-    join(backlogRoot, "README.md"),
-    `${readFileSync(join(backlogRoot, "README.md"), "utf8")}\nnext\n`,
+    join(reviewerRoot, "README.md"),
+    `${readFileSync(join(reviewerRoot, "README.md"), "utf8")}\nnext\n`,
   );
-  execFileSync("git", ["-C", backlogRoot, "add", "README.md"]);
-  execFileSync("git", ["-C", backlogRoot, "commit", "-qm", "test drift"]);
+  execFileSync("git", ["-C", reviewerRoot, "add", "README.md"]);
+  execFileSync("git", ["-C", reviewerRoot, "commit", "-qm", "test drift"]);
   assertRejectedWithoutState(
     runCloneInstaller(),
-    /Submodule plan-gh-backlog worktree is at .* expected/,
+    /Submodule gpt5\.6-reviewer worktree is at .* expected/,
   );
 });
 

@@ -93,8 +93,7 @@
       "./extensions"
     ],
     "skills": [
-      "./skills",
-      "./vendor/plan-gh-backlog"
+      "./skills"
     ],
     "themes": [
       "./themes"

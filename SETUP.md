@@ -63,7 +63,6 @@ Pipi uses pinned, read-only submodules:
 
 ```text
 vendor/gpt5.6-reviewer/skills/code-review
-vendor/plan-gh-backlog
 vendor/pi-codex
 ```
 

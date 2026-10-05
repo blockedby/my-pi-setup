@@ -1065,9 +1065,8 @@ const install = () => {
   if (options.shareAuth) validateAuthShare(regularAuthPath, pipiAuthPath);
   const submoduleAssets = validateSubmoduleAssets();
   const reviewerAssetsRoot = submoduleAssets["gpt5.6-reviewer"];
-  const backlogSkillDir = submoduleAssets["plan-gh-backlog"];
   const codexToolsRoot = submoduleAssets["pi-codex"];
-  if (!reviewerAssetsRoot || !backlogSkillDir || !codexToolsRoot) {
+  if (!reviewerAssetsRoot || !codexToolsRoot) {
     throw new Error("Required submodule configuration is missing");
   }
   if (
@@ -1246,7 +1245,6 @@ const install = () => {
         `Preserved adopted legacy skills under: ${sharedSkillMigration.backupRoot}`,
       );
     }
-    console.log(`Plan GitHub backlog skill: ${backlogSkillDir}`);
     console.log(`Browser Chrome MCP config: ${pipiMcpPath}`);
     console.log(`Herdr Pipi integration: ${herdrIntegrationPath}`);
     if (codexExecutable) console.log(`Codex CLI: ${codexExecutable}`);

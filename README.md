@@ -50,7 +50,7 @@ When supported, start with `/pipelines:implementing-pipeline <task>` or `/pipeli
 
 ### Skills
 
-Pipi uses your shared browser, frontend-quality, and code-review skills without installing competing copies. See [shared skill setup](docs/shared-skills.md).
+Pipi uses your shared browser, frontend-quality, code-review, and optional plan-gh-backlog skills without installing competing copies. See [shared skill setup](docs/shared-skills.md).
 
 | Skill                  | Purpose                                         |
 | ---------------------- | ----------------------------------------------- |
@@ -65,7 +65,7 @@ Pipi uses your shared browser, frontend-quality, and code-review skills without 
 
 Pipi installs beside regular Pi and requires a stable supported Bun 1.4+ command to be installed first; Pipi never downloads or replaces Bun. Root/extensions share one frozen Bun workspace lock; the isolated installed runtime has one exact deployment lock. Its settings, sessions, MCP configuration, and authentication directory remain under `~/.pipi`. It does not copy regular Pi secrets. Authentication sharing is opt-in. The capability-verified, permission-restricted workflow sandbox is the sole documented Node runtime exception because its security boundary must not be weakened.
 
-The installer pins and validates the bundled review, backlog, and Codex-tool submodules. Exploration and review are read-only. Delegation does not authorize commits, pushes, deployments, or other external changes.
+The installer pins and validates the bundled review and Codex-tool submodules. Exploration and review are read-only. Delegation does not authorize commits, pushes, deployments, or other external changes.
 
 In [Herdr](https://github.com/herdrdev/herdr), Pipi shows background subagent and pipeline activity and highlights when a question needs your answer. See [Herdr integration](docs/herdr-pipi-integration.md) for setup and current limitations.
 

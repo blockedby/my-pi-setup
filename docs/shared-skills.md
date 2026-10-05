@@ -2,7 +2,7 @@
 
 PiPi consumes `browser-chrome`, `frontend-quality`, and `code-review` through the shared discovery directory `~/.agents/skills`. These skills are user-owned prerequisites, not private PiPi copies. Existing symlinks into development checkouts remain user-owned: installation must not replace the links or write into their targets.
 
-PiPi-specific skills remain package resources. `plan-gh-backlog` remains a pinned package resource. The pinned reviewer submodule remains a read-only reference dependency, but is not exposed as a second `code-review` skill.
+PiPi-specific skills remain package resources. `plan-gh-backlog` is optional and discovered from the user-owned `~/.agents/skills/plan-gh-backlog`; PiPi does not bundle, install, update, or require it. The pinned reviewer submodule remains a read-only reference dependency, but is not exposed as a second `code-review` skill.
 
 ## Installing shared prerequisites
 
