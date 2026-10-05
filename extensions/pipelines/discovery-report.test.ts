@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  createExtensionRuntime,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  type ExtensionToolContext,
+} from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
 import {
   FEATURE_PIPELINE_DISCOVERY_ROLES,
@@ -21,6 +28,26 @@ import {
   createPipelineDiscoverySubmitTool,
   createPipelineDiscoverySynthesisSubmitTool,
 } from "./session.ts";
+
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 function validReport(role: FeaturePipelineDiscoveryRole) {
   const evidence = [
@@ -284,7 +311,7 @@ test("pipeline_discovery_synthesis_submit reuses terminating typed submission", 
     synthesis,
     undefined,
     undefined,
-    {} as ExtensionContext,
+    toolContext(),
   );
   assert.equal(result.terminate, true);
   assert.deepEqual(accepted, [synthesis]);
@@ -307,7 +334,7 @@ test("pipeline_discovery_submit uses the concrete role schema and terminates acc
     report,
     undefined,
     undefined,
-    {} as ExtensionContext,
+    toolContext(),
   );
   assert.equal(result.terminate, true);
   assert.deepEqual(accepted, [report]);

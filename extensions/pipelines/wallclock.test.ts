@@ -3,7 +3,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  createExtensionRuntime,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  type ExtensionToolContext,
+} from "@earendil-works/pi-coding-agent";
 import type {
   AgentNodeSpec,
   AgentTreeSession,
@@ -29,6 +36,26 @@ import {
   type PipelineMonotonicClock,
   type PipelineWallclockScheduler,
 } from "./wallclock.ts";
+
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 class FakeClock implements PipelineMonotonicClock {
   value = 0;
@@ -311,7 +338,7 @@ test("execution finish is a constrained terminating provenance tool", async () =
     { output: "partial" },
     undefined,
     undefined,
-    {} as ExtensionContext,
+    toolContext(),
   );
   assert.equal(result.terminate, true);
   assert.deepEqual(submitted, { output: "partial" });

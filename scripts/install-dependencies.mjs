@@ -129,7 +129,7 @@ export const prepareIsolatedBunRuntime = ({
       writeFileSync(join(stage, file), readFileSync(source), { mode: 0o600 });
     }
     runBunInstall({ bunExecutable, cwd: stage, cacheDirectory });
-    for (const executable of ["pi", "pi-mcp-adapter", "chrome-devtools-mcp"]) {
+    for (const executable of ["pi", "chrome-devtools-mcp"]) {
       if (!existsSync(join(stage, "node_modules", ".bin", executable))) {
         throw new Error(
           `Isolated Bun install did not create required executable: ${executable}`,

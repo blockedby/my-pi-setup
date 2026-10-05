@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
+import { isLegacyMcpAdapterSource } from "./legacy-mcp.mjs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -46,6 +47,7 @@ const runtimeManifest = JSON.parse(
   readFileSync(join(repositoryRoot, "package.json"), "utf8"),
 );
 const runtimePiSpec =
+  runtimeManifest.devDependencies?.["@earendil-works/pi-coding-agent"] ??
   runtimeManifest.dependencies?.["@earendil-works/pi-coding-agent"];
 const runtimePiVersion =
   typeof runtimePiSpec === "string"
@@ -57,19 +59,16 @@ if (!runtimePiVersion)
   );
 const runtimePiPackage = `@earendil-works/pi-coding-agent@${runtimePiVersion}`;
 const managedLauncherMarker = "# Managed by pipi-alias installer.";
-const mcpAdapterVersion = "2.15.0";
-const legacyMcpAdapterPackagePrefix = "npm:pi-mcp-adapter";
 const removedPiSubagentsPackagePrefix = "npm:pi-subagents";
-const browserMcpPackage = "chrome-devtools-mcp@1.8.0";
+const browserMcpPackage = "chrome-devtools-mcp@1.10.1";
 const isolatedRuntimeManifest = JSON.parse(
   readFileSync(join(isolatedRuntimeSource, "package.json"), "utf8"),
 );
 if (
   isolatedRuntimeManifest.dependencies?.["@earendil-works/pi-coding-agent"] !==
     runtimePiVersion ||
-  isolatedRuntimeManifest.dependencies?.["pi-mcp-adapter"] !==
-    mcpAdapterVersion ||
-  isolatedRuntimeManifest.dependencies?.["chrome-devtools-mcp"] !== "1.8.0"
+  isolatedRuntimeManifest.dependencies?.["pi-mcp-adapter"] !== undefined ||
+  isolatedRuntimeManifest.dependencies?.["chrome-devtools-mcp"] !== "1.10.1"
 ) {
   throw new Error(
     "config/pipi-runtime/package.json is not aligned with the installer package pins.",
@@ -77,6 +76,7 @@ if (
 }
 const browserAssetsRoot = join(repositoryRoot, "vendor", "pi-agent-setup");
 const codexToolsSubmoduleRoot = join(repositoryRoot, "vendor", "pi-codex");
+const codexToolsAdapterRoot = join(repositoryRoot, "adapters", "codex-tools");
 const legacyCodexToolsSiblingRoot = resolve(repositoryRoot, "..", "pi-codex");
 const submoduleConfigPath = join(repositoryRoot, "config", "submodules.json");
 const modelOverridesSource = join(
@@ -110,7 +110,7 @@ const parseArgs = (args) => {
   const options = {
     bun: undefined,
     pi: undefined,
-    codexTools: codexToolsSubmoduleRoot,
+    codexTools: codexToolsAdapterRoot,
     binDir: undefined,
     shareAuth: false,
     adoptSharedSkills: false,
@@ -239,28 +239,12 @@ export const normalizeCodexToolsPackage = ({
   return normalizedPackages;
 };
 
-const pinLocalPackage = (packages, legacyPrefix, pinnedSource) => {
-  const matchingIndexes = packages.flatMap((entry, index) => {
-    const source = packageSource(entry);
-    return source === pinnedSource ||
-      source === legacyPrefix ||
-      source?.startsWith(`${legacyPrefix}@`)
-      ? [index]
-      : [];
-  });
-  if (matchingIndexes.length === 0) {
-    packages.push(pinnedSource);
-    return;
+const removeLegacyMcpPackage = (packages, agentDir) => {
+  for (let index = packages.length - 1; index >= 0; index -= 1) {
+    if (isLegacyMcpAdapterSource(packageSource(packages[index]), agentDir)) {
+      packages.splice(index, 1);
+    }
   }
-
-  const firstIndex = matchingIndexes[0];
-  const firstEntry = packages[firstIndex];
-  packages[firstIndex] =
-    typeof firstEntry === "string"
-      ? pinnedSource
-      : { ...firstEntry, source: pinnedSource };
-  for (const index of matchingIndexes.slice(1).reverse())
-    packages.splice(index, 1);
 };
 
 const writeJson = (path, value) => {
@@ -655,7 +639,7 @@ if [ ! -f "$browser_manifest" ]; then
   echo "Pinned chrome-devtools-mcp manifest is missing: $browser_manifest" >&2
   exit 127
 fi
-"$recorded_bun" -e 'const { readFileSync } = require("node:fs"); const manifest = JSON.parse(readFileSync(process.argv.at(-1), "utf8")); if (manifest.name !== "chrome-devtools-mcp" || manifest.version !== "1.8.0" || !["build/src/bin/chrome-devtools-mcp.js", "./build/src/bin/chrome-devtools-mcp.js"].includes(manifest.bin?.["chrome-devtools-mcp"])) process.exit(1)' "$browser_manifest" || {
+"$recorded_bun" -e 'const { readFileSync } = require("node:fs"); const manifest = JSON.parse(readFileSync(process.argv.at(-1), "utf8")); if (manifest.name !== "chrome-devtools-mcp" || manifest.version !== "1.10.1" || !["build/src/bin/chrome-devtools-mcp.js", "./build/src/bin/chrome-devtools-mcp.js"].includes(manifest.bin?.["chrome-devtools-mcp"])) process.exit(1)' "$browser_manifest" || {
   echo "Pinned chrome-devtools-mcp package metadata is invalid: $browser_manifest" >&2
   exit 2
 }`;
@@ -802,7 +786,14 @@ const validateBrowserChromeMcpOwnership = (
       throw new Error(`Refusing invalid MCP environment for ${name}`);
     }
     for (const [key, expected] of Object.entries(expectedRuntimeEnv)) {
-      if (server.env?.[key] !== undefined && server.env[key] !== expected) {
+      const isPreviousManagedPin =
+        key === "BROWSER_CHROME_MCP_PACKAGE" &&
+        server.env?.[key] === "chrome-devtools-mcp@1.8.0";
+      if (
+        server.env?.[key] !== undefined &&
+        server.env[key] !== expected &&
+        !isPreviousManagedPin
+      ) {
         throw new Error(
           `Refusing to overwrite customized MCP environment ${key} for ${name}; resolve it explicitly before reinstalling.`,
         );
@@ -1127,11 +1118,7 @@ const install = () => {
       ? [...pipiSettings.packages]
       : [];
     addPackage(packages, repositoryRoot);
-    pinLocalPackage(
-      packages,
-      legacyMcpAdapterPackagePrefix,
-      join(isolatedRuntimePrefix, "node_modules", "pi-mcp-adapter"),
-    );
+    removeLegacyMcpPackage(packages, agentDir);
     for (let index = packages.length - 1; index >= 0; index -= 1) {
       const source = packageSource(packages[index]);
       if (
@@ -1143,7 +1130,10 @@ const install = () => {
     }
     packages = normalizeCodexToolsPackage({
       packages,
-      desiredPath: options.codexTools,
+      desiredPath:
+        options.codexTools === codexToolsSubmoduleRoot
+          ? codexToolsAdapterRoot
+          : options.codexTools,
       settingsBaseDir: agentDir,
       home,
     });

@@ -5,9 +5,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import type {
-  ExtensionContext,
-  ToolDefinition,
+import {
+  createExtensionRuntime,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  type ExtensionToolContext,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type {
   AgentNodeSpec,
@@ -73,6 +78,26 @@ import type {
   ValidatedFeatureSynthesis,
 } from "./feature-worktrees.ts";
 import type { PipelineWallclockScheduler } from "./wallclock.ts";
+
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 interface LinkedWorktreeFixture {
   root: string;
@@ -2108,7 +2133,7 @@ async function finishEmbeddedAudit(
       { ids: [synthesisNode.id] },
       undefined,
       undefined,
-      {} as ExtensionContext,
+      toolContext(),
     );
   }
 }
@@ -2173,7 +2198,7 @@ async function invokeRegisteredCompletion(
       completionParams(rootSession),
       undefined,
       undefined,
-      {} as ExtensionContext,
+      toolContext(),
     ),
     new Promise<never>((_, reject) =>
       setImmediate(() =>
@@ -4919,7 +4944,7 @@ test("child wait delivers the validated final audit report even when synthesis f
     { ids: [synthesizer.id] },
     undefined,
     undefined,
-    {} as ExtensionContext,
+    toolContext(),
   );
   const rendered = JSON.stringify(result);
   assert.match(
@@ -4994,7 +5019,7 @@ test("child wait joins the active audit pump before delivering final synthesis",
     { ids: [synthesisNode.id] },
     undefined,
     undefined,
-    {} as ExtensionContext,
+    toolContext(),
   );
 
   synthesisSession.emit({
@@ -5049,7 +5074,7 @@ test("controller-owned audit tracks do not report false finalText contract viola
       { ids: [track.id] },
       undefined,
       undefined,
-      {} as ExtensionContext,
+      toolContext(),
     ),
   );
   assert.doesNotMatch(rendered, /Report contract violation/);

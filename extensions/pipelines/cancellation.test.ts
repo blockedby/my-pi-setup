@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  createExtensionRuntime,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  type ExtensionToolContext,
+} from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import type { PipelineRunSnapshot } from "./domain.ts";
 import {
@@ -9,6 +16,26 @@ import {
   PIPELINE_CANCEL_MAX_IDS,
   PIPELINE_CANCEL_PARAMETERS,
 } from "./cancellation.ts";
+
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 function snapshot(
   id: string,
@@ -162,7 +189,7 @@ test("pipeline cancellation tool exposes bounded structured per-id outcomes", as
     { ids: ["active", "done", "unknown"] },
     undefined,
     undefined,
-    {} as ExtensionContext,
+    toolContext(),
   );
 
   assert.equal(

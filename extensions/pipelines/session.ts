@@ -1294,9 +1294,8 @@ export function createPipelineSessionFactory(
         async send(text) {
           assertAvailable();
           const dispatched = dispatchText(text);
-          return session.isStreaming
-            ? session.steer(dispatched)
-            : session.prompt(dispatched);
+          if (session.isStreaming) await session.steer(dispatched);
+          else await session.prompt(dispatched);
         },
         enableMutation() {
           if (!featureBoundary || !isFeatureFinalizer) return;

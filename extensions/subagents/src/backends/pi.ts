@@ -15,9 +15,13 @@ import type { AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
 import type {
   AgentSession,
   AgentSessionEvent,
+  InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
+  createCodemodeExtension,
+  createMcpExtension,
+  createToolSearchExtension,
   DefaultResourceLoader,
   getAgentDir,
   SessionManager,
@@ -77,6 +81,30 @@ export function refreshPiUsageAfterCompaction(
  */
 // --- Child session helpers (ported from v1 shared/child-session.ts) -----------
 
+/** Native Pi extensions supplied to ordinary SDK children as configurable built-ins. */
+export function createChildBuiltinExtensions() {
+  return [
+    {
+      name: "codemode",
+      factory: createCodemodeExtension(),
+      replaceable: true,
+      builtin: true,
+    },
+    {
+      name: "tool-search",
+      factory: createToolSearchExtension(),
+      replaceable: true,
+      builtin: true,
+    },
+    {
+      name: "mcp",
+      factory: createMcpExtension(),
+      replaceable: true,
+      builtin: true,
+    },
+  ] satisfies InlineExtension[];
+}
+
 /** Load normal global/package resources and trust-gated project resources. */
 async function createChildResources(
   cwd: string,
@@ -91,6 +119,7 @@ async function createChildResources(
     cwd,
     agentDir,
     settingsManager,
+    extensionFactories: createChildBuiltinExtensions(),
     appendSystemPromptOverride: (base) =>
       appendProfileSystemPrompt(base, profileSystemPrompt),
   });

@@ -6,9 +6,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import type {
-  ExtensionContext,
-  ToolDefinition,
+import {
+  createExtensionRuntime,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  type ExtensionToolContext,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { CleanupEvidence } from "./cleanup-evidence.ts";
 import { runFeatureCheckCommand } from "./feature-task-runtime.ts";
@@ -17,6 +22,26 @@ import {
   createFeatureToolBoundary,
   runFeatureSandboxCommand,
 } from "./feature-sandbox.ts";
+
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 test("ordinary tools and preparation share a credential-free filesystem and environment", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pipi-prepare-boundary-"));
@@ -217,7 +242,7 @@ test("preparation cancellation terminates background descendants without cancell
   }
 });
 
-const context = { cwd: "/" } as unknown as ExtensionContext;
+const context = toolContext("/");
 
 function cleanupEvidence() {
   const records: CleanupEvidence[] = [];
@@ -233,7 +258,7 @@ function tool(
 ) {
   const selected = boundary.tools.find((item) => item.name === name);
   assert.ok(selected, name);
-  return selected as ToolDefinition;
+  return selected;
 }
 
 async function execute(selected: ToolDefinition, params: unknown) {

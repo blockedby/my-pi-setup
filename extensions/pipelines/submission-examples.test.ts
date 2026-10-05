@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  createExtensionRuntime,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  type ExtensionToolContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   AUDIT_SEGMENT_LUNA_ROLES,
   FEATURE_PIPELINE_DISCOVERY_ROLES,
@@ -49,6 +56,26 @@ import {
   buildPipelineChildPrompt,
   buildPlanPipelinePrompt,
 } from "./prompt.ts";
+
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 const request = {
   pipelineName: "example-submission",
@@ -153,7 +180,7 @@ test("plan submission example is accepted by the real terminating tool schema", 
     PLAN_SUBMISSION_EXAMPLE,
     undefined,
     undefined,
-    {} as ExtensionContext,
+    toolContext(),
   );
   assert.equal(result.terminate, true);
   assert.deepEqual(submitted, PLAN_SUBMISSION_EXAMPLE);

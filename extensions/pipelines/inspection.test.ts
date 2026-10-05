@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  createExtensionRuntime,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  type ExtensionToolContext,
+} from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import type { AgentNodeSnapshot } from "../shared/agent-tree/domain.ts";
 import type { AcceptanceEnvelope } from "./run-acceptance.ts";
@@ -25,6 +32,25 @@ import {
 } from "./inspection.ts";
 
 const now = 20_000;
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 function agent(
   overrides: Partial<AgentNodeSnapshot> &
@@ -163,7 +189,7 @@ test("registers only pipeline_check and pipeline_list inspection tools and execu
   assert.deepEqual(tools[0]?.parameters, PIPELINE_CHECK_PARAMETERS);
   assert.deepEqual(tools[1]?.parameters, PIPELINE_LIST_PARAMETERS);
 
-  const ctx = {} as ExtensionContext;
+  const ctx = toolContext();
   const checked = await tools[0]!.execute(
     "tool-1",
     { id: "run-1" },

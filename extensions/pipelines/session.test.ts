@@ -18,13 +18,17 @@ import {
 } from "./feature-planning.test.ts";
 import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
+  createExtensionRuntime,
   defineTool,
   createBashToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
+  ExtensionRunner,
+  ModelRegistry,
+  ModelRuntime,
   SessionManager,
   type AgentSession,
-  type ExtensionContext,
+  type ExtensionToolContext,
 } from "@earendil-works/pi-coding-agent";
 import {
   AUDIT_SYNTHESIS_ROLE,
@@ -49,6 +53,26 @@ import {
   createPipelineSessionFactory,
   TaskToolContractError,
 } from "./session.ts";
+
+const fixtureModelRuntime = await ModelRuntime.create({
+  modelsPath: null,
+  refreshOnCreate: false,
+});
+
+function toolContext(cwd = process.cwd()) {
+  const runner = new ExtensionRunner(
+    [],
+    createExtensionRuntime(),
+    cwd,
+    SessionManager.inMemory(cwd),
+    new ModelRegistry(fixtureModelRuntime),
+  );
+  const context: ExtensionToolContext = runner.createToolContext(
+    "fixture",
+    undefined,
+  );
+  return context;
+}
 
 for (const [contract, fixture] of [
   [FEATURE_CANDIDATE_PLAN_SUBMISSION, candidatePlan],
@@ -88,7 +112,7 @@ for (const [contract, fixture] of [
       args,
       undefined,
       undefined,
-      {} as ExtensionContext,
+      toolContext(),
     );
     assert.equal(result.terminate, true);
     assert.deepEqual(submitted, [defaultFeaturePlanningNarrative(raw)]);
@@ -153,7 +177,7 @@ test("ordinary native tools fence revoked authority and drain an aborted command
   const fixture = await createFixture();
   const authority = new AbortController();
   const fence = createOrdinaryToolLeaseFence(authority.signal);
-  const context = { cwd: fixture.cwd } as ExtensionContext;
+  const context = toolContext(fixture.cwd);
   const invoke = (
     tool: ReturnType<typeof defineTool>,
     args: Record<string, unknown>,
@@ -208,7 +232,7 @@ test("ordinary teardown fails closed when execution ignores cancellation", async
     {},
     undefined,
     undefined,
-    {} as ExtensionContext,
+    toolContext(),
   );
   const rejected = assert.rejects(pending);
   await Promise.resolve();
@@ -437,7 +461,7 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
       { path: path.join(skillDir, "resource.txt") },
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     assert.equal(
       resource.content
@@ -451,7 +475,7 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
       { path: path.join(discoveredDir, "resource.txt") },
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     assert.equal(
       discovered.content
@@ -479,9 +503,13 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
       assert.equal(Value.Check(tool.parameters, args), true);
       assert.equal(Value.Check(tool.parameters, {}), false);
       await assert.rejects(
-        tool.execute(name, args, undefined, undefined, {
-          cwd: fixture.cwd,
-        } as unknown as ExtensionContext),
+        tool.execute(
+          name,
+          args,
+          undefined,
+          undefined,
+          toolContext(fixture.cwd),
+        ),
         (error: unknown) =>
           error instanceof TaskToolContractError && error.code === "read-only",
       );
@@ -498,7 +526,7 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
         { checkId: "review-check" },
         undefined,
         undefined,
-        { cwd: fixture.cwd } as unknown as ExtensionContext,
+        toolContext(fixture.cwd),
       ),
       (error: unknown) => {
         assert.ok(error instanceof TaskToolContractError);
@@ -520,7 +548,7 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
         { commitPaths: [], summary: "Read-only finalization probe." },
         undefined,
         undefined,
-        { cwd: fixture.cwd } as unknown as ExtensionContext,
+        toolContext(fixture.cwd),
       ),
       (error: unknown) => {
         assert.ok(error instanceof TaskToolContractError);
@@ -605,7 +633,7 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
       supplementaryRequest,
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     assert.deepEqual(checkRequests, ["supplementary"]);
 
@@ -628,7 +656,7 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
       pageRequest,
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     assert.deepEqual(diffRequests, [pageRequest]);
 
@@ -636,9 +664,13 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
       const tool: ReturnType<AgentSession["getToolDefinition"]> =
         sdkSession.getToolDefinition(name);
       assert.ok(tool);
-      await tool.execute(name, args, undefined, undefined, {
-        cwd: fixture.cwd,
-      } as unknown as ExtensionContext);
+      await tool.execute(
+        name,
+        args,
+        undefined,
+        undefined,
+        toolContext(fixture.cwd),
+      );
     }
     assert.deepEqual(
       recoveryRequests,
@@ -667,7 +699,7 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
       recipeUpdate,
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     assert.deepEqual(recipeRequests, [supplementaryRequest, recipeUpdate]);
 
@@ -715,21 +747,21 @@ test("persistent Astra finalizer gains its pre-registered task tools only after 
       omittedDiscardPaths,
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     const emptyResult = await finalize.execute(
       "feature-finalizer-finalize-empty-discard-paths",
       emptyDiscardPaths,
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     const multipleResult = await finalize.execute(
       "feature-finalizer-finalize-multiple-discard-paths",
       multipleDiscardPaths,
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     assert.equal(omittedResult.terminate, true);
     assert.equal(emptyResult.terminate, true);
@@ -856,18 +888,26 @@ test("feature workers expose task finalization but not the unrelated execution-f
         assert.ok(tool);
         assert.equal(Value.Check(tool.parameters, args), true);
         await assert.rejects(
-          tool.execute(name, args, undefined, undefined, {
-            cwd: fixture.cwd,
-          } as unknown as ExtensionContext),
+          tool.execute(
+            name,
+            args,
+            undefined,
+            undefined,
+            toolContext(fixture.cwd),
+          ),
           /unsupported by this host/,
         );
       }
       const diff = sdkSession.getToolDefinition("pipeline_task_diff");
       assert.ok(diff);
       await assert.rejects(
-        diff.execute("task-host-diff", {}, undefined, undefined, {
-          cwd: fixture.cwd,
-        } as unknown as ExtensionContext),
+        diff.execute(
+          "task-host-diff",
+          {},
+          undefined,
+          undefined,
+          toolContext(fixture.cwd),
+        ),
         (error: unknown) => error === diffError,
       );
     } finally {
@@ -1092,7 +1132,7 @@ test("pipeline sessions leave only child waits unbounded", async () => {
         {},
         signal,
         undefined,
-        { cwd: fixture.cwd } as unknown as ExtensionContext,
+        toolContext(fixture.cwd),
       );
     };
 
@@ -1281,7 +1321,7 @@ test("artifact reads stay with the root and explicit audit synthesis", async () 
       request,
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     assert.deepEqual(fakeReads, [request]);
     assert.deepEqual(result.details, { ...request, returnedBytes: 12 });
@@ -1386,7 +1426,7 @@ test("plan synthesis sessions expose only local reads and their terminating subm
       { plan: "# Exact plan\n" },
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     assert.equal(result.terminate, true);
     assert.deepEqual(submitted, { plan: "# Exact plan\n" });
@@ -1522,7 +1562,7 @@ test("authorized context discovery exposes a usable readiness callback tool", as
       input,
       controller.signal,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
 
     assert.equal(callbackCalls.length, 1);
@@ -1549,7 +1589,7 @@ test("authorized context discovery exposes a usable readiness callback tool", as
       withoutExcerpt,
       undefined,
       undefined,
-      { cwd: fixture.cwd } as unknown as ExtensionContext,
+      toolContext(fixture.cwd),
     );
     assert.deepEqual(callbackCalls.at(-1)?.input, withoutExcerpt);
   } finally {
