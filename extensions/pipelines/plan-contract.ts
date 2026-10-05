@@ -7,7 +7,8 @@ import {
   STATIC_LUNA_AUDIT_ROLES,
   PLAN_PIPELINE_DISCOVERY_ROLES,
   PLAN_PIPELINE_ID,
-  SMALL_FEATURE_PIPELINE_ID,
+  IMPLEMENTING_PIPELINE_ID,
+  isImplementingWorkflow,
   type PipelineDefinitionId,
 } from "./domain.ts";
 import { validateFeatureDiscoveryReport } from "./discovery-report.ts";
@@ -474,14 +475,26 @@ function validLunaFinding(value: unknown) {
 function validUnprovenCheck(value: unknown) {
   if (!isRecord(value)) return false;
   return (
-    exactKeys(value, ["claim", "reason", "requiredCheck"]) &&
+    exactKeys(value, [
+      "claim",
+      "reason",
+      "requiredCheck",
+      ...(value.requirement === undefined ? [] : ["requirement"]),
+    ]) &&
     [value.claim, value.reason, value.requiredCheck].every((item) =>
       nonEmptyString(item),
-    )
+    ) &&
+    (value.requirement === undefined ||
+      ["required", "follow_up", "not_applicable"].includes(
+        String(value.requirement),
+      ))
   );
 }
 
-function validImplementationReport(report: Record<string, unknown>) {
+function validImplementationReport(
+  report: Record<string, unknown>,
+  allowNoChanges = false,
+) {
   const validStrings = (value: unknown, minimum = 0) =>
     Array.isArray(value) &&
     value.length >= minimum &&
@@ -495,7 +508,7 @@ function validImplementationReport(report: Record<string, unknown>) {
       "unresolvedItems",
     ]) &&
     nonEmptyString(report.summary) &&
-    validStrings(report.changedPaths, 1) &&
+    validStrings(report.changedPaths, allowNoChanges ? 0 : 1) &&
     validStrings(report.checks, 1) &&
     validStrings(report.assumptions) &&
     validStrings(report.unresolvedItems)
@@ -643,9 +656,12 @@ export function validatePipelineReport(
       : [`Unsupported plan-pipeline report role "${role}".`];
   }
 
-  if (definition === SMALL_FEATURE_PIPELINE_ID) {
+  if (isImplementingWorkflow(definition)) {
     if (role === "implement-small-feature") {
-      return validImplementationReport(report)
+      return validImplementationReport(
+        report,
+        definition === IMPLEMENTING_PIPELINE_ID,
+      )
         ? []
         : [
             "Implementation report must contain exactly a non-empty summary, non-empty changedPaths and checks string arrays, plus assumptions and unresolvedItems string arrays.",

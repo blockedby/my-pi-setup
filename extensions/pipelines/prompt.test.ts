@@ -111,6 +111,30 @@ test("plan and audit definitions never grant commit authority", () => {
   }
 });
 
+test("implementing grants optional commits only to its persistent implementer", () => {
+  for (const gitCommit of [undefined, false, true]) {
+    assert.equal(
+      pipelineCommitPolicy("implementing-pipeline", "implement-small-feature", {
+        gitCommit,
+      }).commitAllowed,
+      gitCommit === true,
+    );
+    for (const role of [
+      "pipeline-root",
+      "audit-feature-outcome",
+      "audit-logic-invariants",
+      "audit-functional-correctness",
+      "audit-reliability-regressions",
+    ] as const) {
+      assert.equal(
+        pipelineCommitPolicy("implementing-pipeline", role, { gitCommit })
+          .commitAllowed,
+        false,
+      );
+    }
+  }
+});
+
 test("small-feature commit audit requirements are a structured contract", () => {
   assert.deepEqual(Object.keys(SMALL_FEATURE_AUDIT_GIT_REQUIREMENTS), [
     "evidence",

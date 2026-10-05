@@ -39,7 +39,6 @@ import {
   AUDIT_SEGMENT_LUNA_ROLES,
   AUDIT_SYNTHESIS_ROLE,
   EXECUTOR_AUDIT_ROLE,
-  LUNA_MODEL,
   SOL_MODEL,
   STATIC_LUNA_AUDIT_ROLES,
   TERRA_MODEL,
@@ -815,7 +814,7 @@ test("executor prompt requires script inspection, safe execution, workspace repo
   assert.match(staticPrompt, /Do not run shell commands/);
 });
 
-test("standalone audit graph is Luna-only and activates synthesis on the first valid report", async () => {
+test("standalone audit graph defaults to Sol and activates synthesis on the first valid report", async () => {
   const run = harness();
   const runId = run.controller.start({
     pipelineName: "audit-bounded-change-run",
@@ -831,12 +830,12 @@ test("standalone audit graph is Luna-only and activates synthesis on the first v
   assert.equal(snapshot?.stage, "audit");
   assert.equal(snapshot?.agents.length, 6);
   assert.equal(
-    snapshot?.agents.every((item) => item.model === LUNA_MODEL),
+    snapshot?.agents.every((item) => item.model === SOL_MODEL),
     true,
   );
-  assert.equal(
-    snapshot?.agents.some((item) => item.model === SOL_MODEL),
-    false,
+  assert.deepEqual(
+    snapshot?.agents.map((item) => item.role),
+    [AUDIT_SYNTHESIS_ROLE, ...AUDIT_SEGMENT_LUNA_ROLES],
   );
   assert.equal(
     snapshot?.agents.some((item) => item.model === TERRA_MODEL),

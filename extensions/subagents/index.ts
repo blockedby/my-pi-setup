@@ -77,11 +77,7 @@ import {
   type SubagentRuntime,
 } from "./src/runtime.ts";
 import { openSubagentPicker, openSubagentTakeover } from "./src/ui/takeover.ts";
-import {
-  applySubagentProfile,
-  profileNames,
-  type SubagentProfile,
-} from "./src/policy.ts";
+import { applySubagentProfile, profileNames } from "./src/policy.ts";
 import { createActivityPublisher } from "../herdr-pipi/activity.ts";
 
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
@@ -351,8 +347,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: SUBAGENT_SPAWN_PROMPT_GUIDELINES,
     parameters: SUBAGENT_SPAWN_PARAMETERS,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const manager = await getManager();
-      const profile = params.profile as SubagentProfile | undefined;
+      const profile = params.profile;
       const resolved = applySubagentProfile(profile, {
         harness: params.harness,
         model: params.model,
@@ -367,6 +362,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const title = params.name.trim().slice(0, 160) || "subagent";
+      const manager = await getManager();
       const snap = await runTool(
         getRuntime(),
         manager.spawn(harness, {

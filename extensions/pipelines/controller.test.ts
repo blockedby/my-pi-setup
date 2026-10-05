@@ -20,10 +20,10 @@ import type {
   AgentTreeSessionEvent,
 } from "../shared/agent-tree/domain.ts";
 import {
-  PipelineController,
   pipelineDiscoverySubmissionAllowed,
   type PipelineControllerOptions,
 } from "./controller.ts";
+import { LegacyPipelineTestController as PipelineController } from "./__fixtures__/legacy-controller.ts";
 import { inspectPipeline, PIPELINE_CHECK_MAX_BYTES } from "./inspection.ts";
 import { executeFeatureGraph } from "./feature-graph-executor.ts";
 import {
@@ -1360,7 +1360,7 @@ test("plan and audit reject commit authority, while small-feature retains it", a
           ...(pipeline === "plan-pipeline" ? { planPath: null } : {}),
         }),
       new RegExp(
-        `git_commit is only supported for feature-pipeline and small-feature-pipeline.*${pipeline}`,
+        `git_commit is only supported for implementing-pipeline.*${pipeline}`,
       ),
     );
   }
@@ -4011,6 +4011,14 @@ test("terminal evidence is durable, bounded, and ignores late terminal events", 
     assert.equal(handoff.evidenceIncomplete, false);
     assert.ok(handoff.evidence);
     assert.ok(handoff.evidenceManifest);
+    assert.equal(
+      run.controller
+        .get(runId)
+        ?.acceptance?.pipelineExecutionAcceptance.criteria.find(
+          (criterion) => criterion.id === "cleanup-policy",
+        )?.status,
+      "not_applicable",
+    );
 
     const runDir = path.join(run.artifactRoot, runId);
     const manifest = JSON.parse(
@@ -4459,34 +4467,40 @@ test("roles select fixed models, remain direct root children, and record attempt
     assumptions: [],
     checks: [],
   });
-  assert.equal(first.model, LUNA_MODEL);
-  assert.equal(retry.model, LUNA_MODEL);
-  const lunaRoles = new Set<string>([
-    ...FEATURE_PIPELINE_DISCOVERY_ROLES,
+  assert.equal(first.model, SOL_MODEL);
+  assert.equal(retry.model, SOL_MODEL);
+  const discoveryRoles = new Set<string>(FEATURE_PIPELINE_DISCOVERY_ROLES);
+  const auditRoles = new Set<string>([
     ...STATIC_LUNA_AUDIT_ROLES,
     ...AUDIT_SEGMENT_LUNA_ROLES,
     "audit-synthesis",
   ]);
-  for (const session of run.sessions.filter(({ spec }) =>
-    lunaRoles.has(spec.role),
+  for (const session of run.sessions.filter(
+    ({ spec }) => discoveryRoles.has(spec.role) || auditRoles.has(spec.role),
   )) {
-    assert.equal(session.spec.model, LUNA_MODEL);
+    const isDiscovery = discoveryRoles.has(session.spec.role);
+    assert.equal(session.spec.model, isDiscovery ? LUNA_MODEL : SOL_MODEL);
     assert.equal(
       pipelineThinkingLevel(session.spec.model, session.spec.thinkingLevel),
-      "medium",
+      isDiscovery ? "medium" : "high",
     );
   }
   for (const agent of [first, retry, ...finalAgents]) {
     const session = run.sessions.find(({ spec }) => spec.id === agent.id);
     assert.ok(session);
-    assert.equal(session.spec.model, LUNA_MODEL);
+    assert.equal(session.spec.model, SOL_MODEL);
     assert.equal(
       pipelineThinkingLevel(session.spec.model, session.spec.thinkingLevel),
-      "medium",
+      "high",
     );
   }
+  assert.equal(finalAgents.length, AUDIT_SEGMENT_LUNA_ROLES.length + 1);
+  assert.deepEqual(
+    finalAgents.map((agent) => agent.role),
+    [...AUDIT_SEGMENT_LUNA_ROLES, "audit-synthesis"],
+  );
   assert.equal(
-    finalAgents.every((agent) => agent.model === LUNA_MODEL),
+    finalAgents.every((agent) => agent.model === SOL_MODEL),
     true,
   );
   assert.equal(first.parentId, rootId);
@@ -4517,7 +4531,7 @@ test("roles select fixed models, remain direct root children, and record attempt
   await run.controller.dispose();
 });
 
-test("small-feature-pipeline fans four Luna audits into one same-session remediation", async () => {
+test("small-feature-pipeline fans four Sol audits into one same-session remediation", async () => {
   const run = harness();
   const runId = run.controller.start({
     ...nonFeatureRequest("small-feature-pipeline"),
@@ -4542,13 +4556,13 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     runId,
     SMALL_FEATURE_IMPLEMENTER_ROLE,
   );
-  assert.equal(implementer.model, ASTRA_MODEL);
+  assert.equal(implementer.model, SOL_MODEL);
   assert.equal(implementer.persistent, true);
   const initialImplementerSession = run.sessions.find(
     (session) => session.spec.role === SMALL_FEATURE_IMPLEMENTER_ROLE,
   );
   assert.ok(initialImplementerSession);
-  assert.equal(initialImplementerSession.spec.model, ASTRA_MODEL);
+  assert.equal(initialImplementerSession.spec.model, SOL_MODEL);
   assert.equal(initialImplementerSession.spec.thinkingLevel, "low");
   assert.equal(
     pipelineThinkingLevel(
@@ -4578,7 +4592,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
   for (const [index, role] of STATIC_LUNA_AUDIT_ROLES.entries()) {
     const auditor = auditors[index];
     assert.ok(auditor);
-    assert.equal(auditor.model, LUNA_MODEL);
+    assert.equal(auditor.model, SOL_MODEL);
     assert.equal(auditor.persistent, false);
     const auditorSession = run.sessions.find(
       (session) => session.spec.role === role,
@@ -4610,7 +4624,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
   assert.equal(run.controller.get(runId)?.stage, "final-resolve");
   assert.throws(
     () => run.controller.setStage(runId, "complete"),
-    /requires one same-session Astra remediation pass/,
+    /requires one same-session implementer remediation pass/,
   );
 
   const remediationMessage = "Resolve all audit reports";
@@ -4620,13 +4634,12 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
   );
   assert.ok(implementerSession);
   assert.equal(implementerSession, initialImplementerSession);
-  assert.equal(implementerSession.spec.model, ASTRA_MODEL);
+  assert.equal(implementerSession.spec.model, SOL_MODEL);
   assert.equal(implementerSession.spec.thinkingLevel, "low");
   assert.equal(implementerSession.sends.length, 1);
-  assert.match(
-    implementerSession.sends[0] ?? "",
-    /Independent Luna audit reports to resolve/,
-  );
+  const remediating = run.controller.getAgent(runId, implementer.id);
+  assert.equal(remediating.attempt, implementer.attempt);
+  assert.equal(remediating.status, "running");
   for (const role of STATIC_LUNA_AUDIT_ROLES) {
     assert.equal(
       implementerSession.sends[0]?.includes(reportForRole(role)),
@@ -4648,7 +4661,7 @@ test("small-feature-pipeline fans four Luna audits into one same-session remedia
     checks: ["focused tests passed"],
     assumptions: [],
     git: ["working tree inspected"],
-    reports: ["Astra implementation", "Four Luna audits", "Astra remediation"],
+    reports: ["Sol implementation", "Four Sol audits", "Sol remediation"],
     unresolvedItems: [],
     workingDir: implementationWorkingDir(),
   };

@@ -24,7 +24,33 @@ export const FEATURE_PIPELINE_ID = "feature-pipeline" as const;
 export const SMALL_FEATURE_PIPELINE_ID = "small-feature-pipeline" as const;
 export const PLAN_PIPELINE_ID = "plan-pipeline" as const;
 export const AUDIT_PIPELINE_ID = "audit-pipeline" as const;
+export const IMPLEMENTING_PIPELINE_ID = "implementing-pipeline" as const;
+export const PUBLIC_PIPELINE_IDS = [
+  IMPLEMENTING_PIPELINE_ID,
+  AUDIT_PIPELINE_ID,
+] as const;
+export type PublicPipelineId = (typeof PUBLIC_PIPELINE_IDS)[number];
+
+export function assertPipelineLaunchSupported(
+  definition: PipelineDefinitionId,
+) {
+  if (!PUBLIC_PIPELINE_IDS.some((id) => id === definition)) {
+    throw new Error(
+      `Unsupported pipeline launch: ${definition}. Use implementing-pipeline or audit-pipeline; legacy definitions are inspection-only.`,
+    );
+  }
+}
+
+export function isImplementingWorkflow(definition: PipelineDefinitionId) {
+  return (
+    definition === IMPLEMENTING_PIPELINE_ID ||
+    definition === SMALL_FEATURE_PIPELINE_ID
+  );
+}
+
+// Legacy identities remain readable; only PUBLIC_PIPELINE_IDS admit new runs.
 export const PIPELINE_DEFINITION_IDS = [
+  IMPLEMENTING_PIPELINE_ID,
   FEATURE_PIPELINE_ID,
   SMALL_FEATURE_PIPELINE_ID,
   PLAN_PIPELINE_ID,
@@ -33,8 +59,10 @@ export const PIPELINE_DEFINITION_IDS = [
 export type PipelineDefinitionId = (typeof PIPELINE_DEFINITION_IDS)[number];
 
 export const ASTRA_MODEL = "openai-codex/gpt-6-astra";
-export const SOL_MODEL = "openai-codex/gpt-5.6-sol";
-export const LUNA_MODEL = "openai-codex/gpt-5.6-luna";
+export const SOL_MODEL = "openai-codex/gpt-6.1-sol";
+export const LUNA_MODEL = "openai-codex/gpt-6-luna";
+export const PIPELINE_MODELS = [ASTRA_MODEL, SOL_MODEL, LUNA_MODEL] as const;
+export type PipelineModel = (typeof PIPELINE_MODELS)[number];
 export const TERRA_MODEL = "openai-codex/gpt-5.6-terra";
 
 export function pipelineThinkingLevel(model: string) {
@@ -207,6 +235,15 @@ export const PIPELINE_CHILD_CONTEXT_POLICIES: PipelineChildContextPolicies = {
       priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
     },
   },
+  [IMPLEMENTING_PIPELINE_ID]: Object.fromEntries(
+    STATIC_LUNA_AUDIT_ROLES.map((role) => [
+      role,
+      {
+        gitEvidence: true,
+        priorReportRole: SMALL_FEATURE_IMPLEMENTER_ROLE,
+      } as const,
+    ]),
+  ),
   [PLAN_PIPELINE_ID]: {},
   [AUDIT_PIPELINE_ID]: {
     [FEATURE_OUTCOME_AUDIT_ROLE]: { gitEvidence: true },
@@ -228,11 +265,18 @@ export interface PipelineDefinition {
   readonly id: PipelineDefinitionId;
   readonly title: string;
   readonly rootTitle: string;
-  readonly rootModel: typeof ASTRA_MODEL | typeof LUNA_MODEL;
+  readonly rootModel: PipelineModel;
   readonly childRoles: ReadonlyArray<PipelineChildRole>;
 }
 
 export const PIPELINE_DEFINITIONS: ReadonlyArray<PipelineDefinition> = [
+  {
+    id: IMPLEMENTING_PIPELINE_ID,
+    title: "Implementing pipeline",
+    rootTitle: "Implementing pipeline coordinator",
+    rootModel: SOL_MODEL,
+    childRoles: SMALL_FEATURE_PIPELINE_CHILD_ROLES,
+  },
   {
     id: FEATURE_PIPELINE_ID,
     title: "Feature pipeline",
@@ -257,8 +301,8 @@ export const PIPELINE_DEFINITIONS: ReadonlyArray<PipelineDefinition> = [
   {
     id: AUDIT_PIPELINE_ID,
     title: "Audit pipeline",
-    rootTitle: "Audit pipeline Luna synthesizer",
-    rootModel: LUNA_MODEL,
+    rootTitle: "Audit pipeline synthesizer",
+    rootModel: SOL_MODEL,
     childRoles: AUDIT_PIPELINE_CHILD_ROLES,
   },
 ];
@@ -269,7 +313,7 @@ export function definitionFor(id: PipelineDefinitionId) {
 
 export function rolesForDefinition(id: PipelineDefinitionId) {
   if (id === FEATURE_PIPELINE_ID) return FEATURE_PIPELINE_CHILD_ROLES;
-  if (id === SMALL_FEATURE_PIPELINE_ID) {
+  if (isImplementingWorkflow(id)) {
     return SMALL_FEATURE_PIPELINE_CHILD_ROLES;
   }
   if (id === PLAN_PIPELINE_ID) return PLAN_PIPELINE_CHILD_ROLES;
@@ -279,14 +323,14 @@ export function rolesForDefinition(id: PipelineDefinitionId) {
 export function stagesForDefinition(
   id: PipelineDefinitionId,
 ): ReadonlyArray<PipelineStage> {
-  if (id === SMALL_FEATURE_PIPELINE_ID) return SMALL_FEATURE_PIPELINE_STAGES;
+  if (isImplementingWorkflow(id)) return SMALL_FEATURE_PIPELINE_STAGES;
   if (id === AUDIT_PIPELINE_ID) return AUDIT_PIPELINE_STAGES;
   if (id === PLAN_PIPELINE_ID) return PLAN_PIPELINE_STAGES;
   return PIPELINE_STAGES;
 }
 
 export function initialStageForDefinition(id: PipelineDefinitionId) {
-  if (id === SMALL_FEATURE_PIPELINE_ID) return "build";
+  if (isImplementingWorkflow(id)) return "build";
   if (id === AUDIT_PIPELINE_ID) return "audit";
   return "discover";
 }
@@ -436,6 +480,10 @@ export interface PipelineRunRequest {
   readonly pipelineName: string;
   readonly workingDir: string;
   readonly task: string;
+  /** Initial role selections; session-local model switches are recorded separately. */
+  readonly roleModels?: Readonly<
+    Partial<Record<PipelineModelRole, PipelineModel>>
+  >;
   /** Required absolute pre-existing parent for feature graph worktrees. */
   readonly worktreeRoot?: string;
   /** Required ordered child-worktree preparation commands for feature. */
@@ -451,6 +499,76 @@ export interface PipelineRunRequest {
 }
 
 export type PipelineCommitRole = PipelineChildRole | "pipeline-root";
+export type PipelineModelRole =
+  | typeof SMALL_FEATURE_IMPLEMENTER_ROLE
+  | StaticLunaAuditRole
+  | typeof EXECUTOR_AUDIT_ROLE
+  | typeof AUDIT_SYNTHESIS_ROLE
+  | "pipeline-root";
+export const PIPELINE_MODEL_ROLES = [
+  "pipeline-root",
+  SMALL_FEATURE_IMPLEMENTER_ROLE,
+  ...AUDIT_SEGMENT_LUNA_ROLES,
+  AUDIT_SYNTHESIS_ROLE,
+] as const satisfies ReadonlyArray<PipelineModelRole>;
+
+export function modelRolesForDefinition(definition: PipelineDefinitionId) {
+  return definition === AUDIT_PIPELINE_ID
+    ? [...AUDIT_SEGMENT_LUNA_ROLES, AUDIT_SYNTHESIS_ROLE]
+    : ["pipeline-root", ...SMALL_FEATURE_PIPELINE_CHILD_ROLES];
+}
+
+export function validatePipelineRoleModels(
+  definition: PipelineDefinitionId,
+  selections: PipelineRunRequest["roleModels"],
+  available?: (model: string) => boolean,
+) {
+  if (
+    selections !== undefined &&
+    (!selections || typeof selections !== "object" || Array.isArray(selections))
+  ) {
+    throw new Error("roleModels must be an object of role/model selections.");
+  }
+  for (const [role, model] of Object.entries(selections ?? {})) {
+    if (!modelRolesForDefinition(definition).includes(role)) {
+      throw new Error(`Model role ${role} is not available in ${definition}.`);
+    }
+    if (!PIPELINE_MODELS.some((candidate) => candidate === model)) {
+      throw new Error(`Unsupported pipeline model: ${model}.`);
+    }
+  }
+  if (available) {
+    for (const role of modelRolesForDefinition(definition)) {
+      const model = selectedPipelineModel(definition, role, selections);
+      if (!available(model))
+        throw new Error(`Required pipeline model is unavailable: ${model}`);
+    }
+  }
+}
+
+export function selectedPipelineModel(
+  definition: PipelineDefinitionId,
+  role: string,
+  selections?: PipelineRunRequest["roleModels"],
+) {
+  const selected = Object.entries(selections ?? {}).find(
+    ([key]) => key === role,
+  )?.[1];
+  if (selected) return selected;
+  if (role === "pipeline-root") return definitionFor(definition).rootModel;
+  if (
+    definition === IMPLEMENTING_PIPELINE_ID &&
+    role === SMALL_FEATURE_IMPLEMENTER_ROLE
+  )
+    return SOL_MODEL;
+  if (role === AUDIT_SYNTHESIS_ROLE) return SOL_MODEL;
+  const childRole = rolesForDefinition(definition).find(
+    (candidate) => candidate === role,
+  );
+  if (!childRole)
+    throw new Error(`Unknown model role ${role} for ${definition}.`);
+  return modelForRole(childRole);
+}
 
 /** The sole role that may receive ordinary-commit authority in each supported definition. */
 export const PIPELINE_COMMIT_AUTHORITY_ROLES: Readonly<
@@ -458,6 +576,7 @@ export const PIPELINE_COMMIT_AUTHORITY_ROLES: Readonly<
 > = {
   [FEATURE_PIPELINE_ID]: "pipeline-root",
   [SMALL_FEATURE_PIPELINE_ID]: SMALL_FEATURE_IMPLEMENTER_ROLE,
+  [IMPLEMENTING_PIPELINE_ID]: SMALL_FEATURE_IMPLEMENTER_ROLE,
 };
 
 export function pipelineCommitAuthorityRole(definition: PipelineDefinitionId) {
@@ -475,7 +594,7 @@ export function assertPipelineGitCommitSupported(
   }
   if (requested && !pipelineCommitAuthorityRole(definition)) {
     throw new Error(
-      `git_commit is only supported for feature-pipeline and small-feature-pipeline; received ${definition}.`,
+      `git_commit is only supported for implementing-pipeline (or dormant legacy implementation definitions); received ${definition}.`,
     );
   }
 }
@@ -501,10 +620,12 @@ export function modelForRole(role: PipelineChildRole) {
   if (role === FINAL_AUDIT_ROLE) return TERRA_MODEL;
   if (
     role === SMALL_FEATURE_IMPLEMENTER_ROLE ||
-    FEATURE_PLAN_ROLES.some((candidate) => candidate === role)
-  ) {
+    role === AUDIT_SYNTHESIS_ROLE ||
+    AUDIT_SEGMENT_LUNA_ROLES.some((auditRole) => auditRole === role)
+  )
+    return SOL_MODEL;
+  if (FEATURE_PLAN_ROLES.some((candidate) => candidate === role))
     return ASTRA_MODEL;
-  }
   return LUNA_MODEL;
 }
 

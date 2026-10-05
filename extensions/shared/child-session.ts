@@ -96,6 +96,8 @@ export function pipelineRootToolPolicy() {
   return { excludeTools: [...PIPELINE_ROOT_EXCLUDED_TOOL_NAMES] };
 }
 
+/** Dormant legacy implementation policy; modern implementing sessions use
+ * normal child tools through their definition-specific session policy. */
 export function smallFeatureImplementerToolPolicy() {
   return {
     excludeTools: [

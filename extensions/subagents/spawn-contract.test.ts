@@ -6,7 +6,14 @@ import { SUBAGENT_SPAWN_PARAMETERS } from "./index.ts";
 test("subagent_spawn schema exposes all supported profiles", () => {
   const base = { prompt: "Inspect the repository", name: "inspect" };
 
-  for (const profile of ["luna-explore", "luna-worker", "sol-worker"]) {
+  for (const profile of [
+    "explore",
+    "implement",
+    "review",
+    "luna-explore",
+    "luna-worker",
+    "sol-worker",
+  ]) {
     assert.equal(
       Check(SUBAGENT_SPAWN_PARAMETERS, { ...base, profile }),
       true,
@@ -17,6 +24,40 @@ test("subagent_spawn schema exposes all supported profiles", () => {
   for (const profile of ["terra-audit", "unknown-profile"]) {
     assert.equal(Check(SUBAGENT_SPAWN_PARAMETERS, { ...base, profile }), false);
   }
+});
+
+test("subagent_spawn accepts role profiles with independent model and effort overrides", () => {
+  for (const profile of ["explore", "implement", "review"]) {
+    for (const model of [
+      "openai-codex/gpt-6-astra",
+      "openai-codex/gpt-6.1-sol",
+      "openai-codex/gpt-6-luna",
+      "custom/task-model",
+    ]) {
+      for (const reasoning_effort of ["off", "medium", "high", "max"]) {
+        assert.equal(
+          Check(SUBAGENT_SPAWN_PARAMETERS, {
+            prompt: "Own the complete task",
+            name: "owner",
+            profile,
+            harness: "pi",
+            model,
+            reasoning_effort,
+          }),
+          true,
+        );
+      }
+    }
+  }
+  assert.equal(
+    Check(SUBAGENT_SPAWN_PARAMETERS, {
+      prompt: "Inspect",
+      name: "inspect",
+      profile: "review",
+      reasoning_effort: "unknown",
+    }),
+    false,
+  );
 });
 
 test("subagent_spawn retains profile-free harness and model selection", () => {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { Check } from "typebox/value";
 import {
   DefaultResourceLoader,
   SettingsManager,
@@ -63,6 +64,71 @@ test("production Pipi and pinned Codex adapter load without host dependency warn
     const result = loader.getExtensions();
     assert.deepEqual(result.errors, []);
     assert.deepEqual(result.warnings, []);
+    const pipelines = result.extensions.find(
+      (extension) =>
+        extension.resolvedPath ===
+        join(repositoryRoot, "extensions", "pipelines", "index.ts"),
+    );
+    assert.ok(pipelines, "Production pipeline extension is discovered");
+    const parameters =
+      pipelines.tools.get("pipeline_run")?.definition.parameters;
+    assert.ok(parameters, "Production launch tool has its schema");
+    const launch = {
+      pipeline_name: "verify-modern-tool-schema",
+      task: "Provider-free schema probe",
+    };
+    assert.equal(Check(parameters, launch), true);
+    for (const pipeline of ["implementing-pipeline", "audit-pipeline"])
+      assert.equal(Check(parameters, { ...launch, pipeline }), true);
+    for (const pipeline of [
+      "feature-pipeline",
+      "small-feature-pipeline",
+      "plan-pipeline",
+    ])
+      assert.equal(Check(parameters, { ...launch, pipeline }), false);
+    assert.deepEqual(
+      [...pipelines.commands.keys()]
+        .filter((name) => name.startsWith("pipelines:"))
+        .sort(),
+      ["pipelines:audit-pipeline", "pipelines:implementing-pipeline"],
+    );
+    const subagents = result.extensions.find(
+      (extension) =>
+        extension.resolvedPath ===
+        join(repositoryRoot, "extensions", "subagents", "index.ts"),
+    );
+    const spawnParameters =
+      subagents?.tools.get("subagent_spawn")?.definition.parameters;
+    assert.ok(
+      spawnParameters,
+      "Production subagent launch schema is discovered",
+    );
+    for (const profile of [
+      "explore",
+      "implement",
+      "review",
+      "luna-explore",
+      "luna-worker",
+      "sol-worker",
+    ])
+      assert.equal(
+        Check(spawnParameters, {
+          prompt: "Offline schema probe",
+          name: "probe",
+          profile,
+          model: "openai-codex/gpt-6.1-sol",
+          reasoning_effort: "max",
+        }),
+        true,
+      );
+    assert.equal(
+      Check(spawnParameters, {
+        prompt: "Offline schema probe",
+        name: "probe",
+        profile: "nonexistent",
+      }),
+      false,
+    );
     const codex = result.extensions.filter(
       (extension) =>
         extension.resolvedPath ===

@@ -5,8 +5,8 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 ## Why use it
 
 - **Less context switching.** Search, implementation, review, browser debugging, and long-running commands stay in one coding environment.
-- **Predictable delegation.** Choose a focused agent or a fixed pipeline instead of manually coordinating a large prompt.
-- **Safer automation.** Read-only roles, bounded tools, explicit commit permission, and deterministic checks keep authority narrow.
+- **Flexible delegation.** Work solo, choose a focused agent, or opt into a pipeline.
+- **Safer automation.** Read-only exploration and review, scoped implementation, and explicit delivery permission keep authority narrow.
 - **Clear progress.** `/pipelines` shows active stages, agents, attempts, and status at a glance.
 - **Isolated setup.** Bun runtime wiring, settings, sessions, and authentication live under `~/.pipi`; regular Pi remains untouched.
 
@@ -14,28 +14,28 @@ Pipi is a ready-to-use, isolated Pi workspace for serious coding tasks. It combi
 
 ### Agents
 
-| Agent/profile            | Best for                                |
-| ------------------------ | --------------------------------------- |
-| Pi subagent              | General delegated work                  |
-| `luna-explore`           | Read-only repository exploration        |
-| `luna-worker`            | Scoped implementation and testing       |
-| `sol-worker`            | Deeper implementation with Sol/medium   |
-| Claude or Codex subagent | Tasks that benefit from another backend |
+The approved agent system separates roles from model choice:
+
+| Role        | Best for                          | Default model |
+| ----------- | --------------------------------- | ------------- |
+| `explore`   | Read-only repository exploration  | GPT6 Luna     |
+| `implement` | Scoped implementation and testing | Sol6.1        |
+| `review`    | Independent read-only review      | Sol6.1        |
+
+The orchestrating agent chooses a model for each task, with Astra used rarely and explicit overrides welcome. Pi, Claude Code, and Codex harnesses remain options. Delegation is optional; requests to work solo are respected.
 
 ### Pipelines
 
-| Pipeline                 | How it works                                                                                                    |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| `small-feature-pipeline` | One implementer → four parallel reviewers → a final fix pass.                                                   |
-| `feature-pipeline`       | Parallel exploration → two candidate plans → one unified plan → graph implementation → final review and audit.  |
-| `plan-pipeline`          | Six parallel research tracks → Astra synthesis → one implementation plan, returned directly or saved to a file. |
-| `audit-pipeline`         | Four parallel code reviews + one verification track → one consolidated report.                                  |
+| Approved pipeline       | How it works                                                         |
+| ----------------------- | -------------------------------------------------------------------- |
+| `implementing-pipeline` | Study → implement → independent audits → repair in the same session. |
+| `audit-pipeline`        | Independent read-only audits → one consolidated report.              |
 
-Start a pipeline with `/pipelines:<name> <task>`, for example `/pipelines:plan-pipeline Plan the search feature`. Omit the task to use the current conversation. Type `/pipelines:` to see the available commands.
+These are the only pipelines approved for new launches. Legacy feature, plan, and small-feature pipelines are retired from new-launch guidance. Pipelines are opt-in, not a prerequisite for implementation or review.
 
-Run `/pipelines` to inspect progress or ask Pipi to cancel one or more active runs. Each launch gets a recognizable name plus a short unique suffix, so repeated runs remain easy to distinguish. Pipeline stages warn before a caller-selected wallclock limit; use `30s`–`24h` durations when launching a run, or omit the limit to leave timing disabled. Press `Enter` to expand a run or open the agent responsible for a stage. Status colors make running, completed, limited, and failed work easy to scan.
+**Runtime transition:** these roles and pipelines describe the approved modernization; older installations may still expose legacy names. Check availability before launching. See [agent system](docs/agent-system.md) for transition details.
 
-Implementation agents work in dedicated Git worktrees, keeping feature changes isolated from the main checkout while pipelines handle implementation, review, and verification.
+When supported, start with `/pipelines:implementing-pipeline <task>` or `/pipelines:audit-pipeline <task>`. Run `/pipelines` to inspect progress or ask Pipi to cancel active runs. Implementation pipelines use a caller-prepared dedicated Git worktree to keep changes isolated.
 
 ### Everyday tools
 
@@ -65,7 +65,7 @@ Pipi uses your shared browser, frontend-quality, and code-review skills without 
 
 Pipi installs beside regular Pi and requires a stable supported Bun 1.4+ command to be installed first; Pipi never downloads or replaces Bun. Root/extensions share one frozen Bun workspace lock; the isolated installed runtime has one exact deployment lock. Its settings, sessions, MCP configuration, and authentication directory remain under `~/.pipi`. It does not copy regular Pi secrets. Authentication sharing is opt-in. The capability-verified, permission-restricted workflow sandbox is the sole documented Node runtime exception because its security boundary must not be weakened.
 
-The installer pins and validates the bundled review, backlog, and Codex-tool submodules. Pipeline roles receive only the tools needed for their job, with explicit commit permission for implementation pipelines.
+The installer pins and validates the bundled review, backlog, and Codex-tool submodules. Exploration and review are read-only. Delegation does not authorize commits, pushes, deployments, or other external changes.
 
 In [Herdr](https://github.com/herdrdev/herdr), Pipi shows background subagent and pipeline activity and highlights when a question needs your answer. See [Herdr integration](docs/herdr-pipi-integration.md) for setup and current limitations.
 
@@ -77,7 +77,7 @@ See [SETUP.md](SETUP.md) for installation, updates, authentication, MCP configur
 
 Pipeline runs are session-scoped and are not resumed after shutdown or reload.
 
-For implementation details, contracts, and limits, see [Hardcoded pipelines design](docs/pipelines-v1-design.md).
+For role boundaries, workspace preparation, and the approved modernization, see [Agent system](docs/agent-system.md). The [legacy pipeline design](docs/pipelines-v1-design.md) is a historical implementation reference, not current launch guidance.
 
 Additional references:
 

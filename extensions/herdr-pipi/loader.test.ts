@@ -48,9 +48,7 @@ const expectedRegistrations = {
     ],
     handlers: ["session_start", "session_shutdown"],
     commands: [
-      "pipelines:feature-pipeline",
-      "pipelines:small-feature-pipeline",
-      "pipelines:plan-pipeline",
+      "pipelines:implementing-pipeline",
       "pipelines:audit-pipeline",
       "pipelines",
     ],

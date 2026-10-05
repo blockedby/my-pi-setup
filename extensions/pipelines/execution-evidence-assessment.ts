@@ -519,6 +519,20 @@ function assessProvenance(
       }
     }
   }
+  const switches = orderedEvents(events).filter(
+    ({ event }) => event.kind === "model_selected",
+  );
+  for (const { event } of switches) {
+    const previous = factString(event, "previousModel");
+    const selected = factString(event, "model");
+    if (!previous || !selected || !event.detail?.trim()) {
+      invalid.push(
+        "Model selection is missing its previous/current identity or reason.",
+      );
+    } else {
+      selections.push(`${previous} -> ${selected}`);
+    }
+  }
   let status: AcceptanceCriterion["status"];
   if (sessions.length === 0 || invalid.length > 0) {
     status = "unproven";
@@ -535,7 +549,12 @@ function assessProvenance(
     "model-provenance",
     status,
     detail,
-    sessions.length > 0 ? ["run-events:session_created"] : [],
+    sessions.length > 0
+      ? [
+          "run-events:session_created",
+          ...(switches.length ? ["run-events:model_selected"] : []),
+        ]
+      : [],
   );
 }
 
@@ -997,6 +1016,7 @@ function legitimateOutcomeOnlyNoOp(facts: ReturnType<typeof cleanupFacts>) {
 function assessCleanup(
   events: ReadonlyArray<RunEvent>,
   completeness: ExecutionEvidenceAssessmentInput["completeness"],
+  controllerResourcesExpected: boolean,
 ) {
   const ordered = orderedEvents(events);
   const intents = new Map<string, EventWithOrder[]>();
@@ -1019,6 +1039,19 @@ function assessCleanup(
     target.set(operationId, entries);
   }
   const operationIds = new Set([...intents.keys(), ...outcomes.keys()]);
+  if (
+    operationIds.size === 0 &&
+    malformed === 0 &&
+    !controllerResourcesExpected &&
+    completeness === "complete"
+  ) {
+    return criterion(
+      "cleanup-policy",
+      "not_applicable",
+      "This run owns no feature graph resources and records no cleanup operations; no deletion is required.",
+      ["run-evidence:completeness"],
+    );
+  }
   if (operationIds.size === 0 || malformed > 0) {
     return criterion(
       "cleanup-policy",
@@ -1186,7 +1219,7 @@ export function assessExecutionEvidence(
     assessAttempts(input.events, input.completeness),
     graphCriterion,
     concurrencyCriterion,
-    assessCleanup(input.events, input.completeness),
+    assessCleanup(input.events, input.completeness, input.featureGraphRequired),
     assessPersistence(input.events, input.graphEvents, input.completeness),
   ].map((item) =>
     graphClockMismatch || linked.malformed

@@ -206,9 +206,8 @@ test("wallclock parser accepts canonical inclusive bounds and disables omission"
 test("public pipeline input keeps the limit optional, canonical, and bounded", () => {
   const request = {
     pipeline_name: "bounded-wallclock-plan",
-    pipeline: "plan-pipeline",
+    pipeline: "audit-pipeline",
     task: "Produce a plan",
-    plan_path: null,
   };
   assert.equal(Check(PIPELINE_RUN_PARAMETERS, request), true);
   assert.equal(
@@ -227,9 +226,8 @@ test("public pipeline input keeps the limit optional, canonical, and bounded", (
     assert.equal(
       Check(PIPELINE_RUN_PARAMETERS, {
         pipeline_name: "bounded-wallclock-plan",
-        pipeline: "plan-pipeline",
+        pipeline: "audit-pipeline",
         task: "Produce a plan",
-        plan_path: null,
         wallclock_limit,
       }),
       false,
@@ -239,9 +237,8 @@ test("public pipeline input keeps the limit optional, canonical, and bounded", (
     assert.equal(
       Check(PIPELINE_RUN_PARAMETERS, {
         pipeline_name: "bounded-wallclock-plan",
-        pipeline: "plan-pipeline",
+        pipeline: "audit-pipeline",
         task: "Produce a plan",
-        plan_path: null,
         wallclock_limit,
       }),
       true,
@@ -270,11 +267,10 @@ test("controller leaves timing disabled when the caller omits a limit", async ()
   });
   const runId = controller.start({
     pipelineName: "untimed-wallclock-plan",
-    pipeline: "plan-pipeline",
+    pipeline: "audit-pipeline",
     task: "Produce a plan",
     workingDir: "/tmp",
     gitCommit: false,
-    planPath: null,
   });
   const run = controller.get(runId);
   assert.equal(run?.wallclockLimitMs, undefined);
@@ -305,11 +301,10 @@ test("controller rejects out-of-range limits before inserting or creating a run"
     () =>
       controller.start({
         pipelineName: "admission-wallclock-plan",
-        pipeline: "plan-pipeline",
+        pipeline: "audit-pipeline",
         task: "Produce a plan",
         workingDir: "/tmp",
         gitCommit: false,
-        planPath: null,
         wallclockLimit: "29s",
       }),
     /wallclock_limit/,
@@ -350,6 +345,7 @@ test("timed stage matrix leaves only plan completion untimed", () => {
       [
         "feature-pipeline",
         "small-feature-pipeline",
+        "implementing-pipeline",
         "plan-pipeline",
         "audit-pipeline",
       ] as const
@@ -386,6 +382,9 @@ test("timed stage matrix leaves only plan completion untimed", () => {
       ["small-feature-pipeline", "build", true],
       ["small-feature-pipeline", "final-audit", true],
       ["small-feature-pipeline", "final-resolve", true],
+      ["implementing-pipeline", "build", true],
+      ["implementing-pipeline", "final-audit", true],
+      ["implementing-pipeline", "final-resolve", true],
       ["plan-pipeline", "discover", true],
       ["plan-pipeline", "synthesize", true],
       ["audit-pipeline", "audit", true],
@@ -429,19 +428,34 @@ test("controller warns current-stage sessions at 80% and settles once at 100%", 
 
   const runId = controller.start({
     pipelineName: "wallclock-plan-test",
-    pipeline: "plan-pipeline",
+    pipeline: "audit-pipeline",
     task: "Produce a plan",
     workingDir: "/tmp",
     gitCommit: false,
-    planPath: null,
     wallclockLimit: "30s",
   });
-  await flush();
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      unsubscribe();
+      reject(new Error("Audit startup did not settle"));
+    }, 5000);
+    const unsubscribe = controller.subscribe(() => {
+      const snapshot = controller.get(runId);
+      if (
+        snapshot?.agents.length === 6 &&
+        snapshot.agents.every((agent) => agent.status !== "starting")
+      ) {
+        unsubscribe();
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
   clock.value = 24_000;
   scheduler.runDue();
   assert.equal(
     sessions.filter((session) => session.sends.length > 0).length,
-    6,
+    5,
   );
   assert.equal(controller.get(runId)?.wallclock?.warningReached, true);
   assert.equal(controller.get(runId)?.status, "running");
@@ -451,7 +465,7 @@ test("controller warns current-stage sessions at 80% and settles once at 100%", 
   await flush();
   const handoff = await awaitHandoff(handoffWaiter.promise);
   assert.equal(controller.get(runId)?.status, "limited");
-  assert.equal(controller.get(runId)?.limitation?.stage, "discover");
+  assert.equal(controller.get(runId)?.limitation?.stage, "audit");
   assert.equal(controller.get(runId)?.limitation?.elapsedMs, 30_000);
   assert.equal(handoffs.length, 1);
   assert.equal(handoff.status, "limited");

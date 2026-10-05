@@ -1,95 +1,53 @@
 ---
 name: subagents
-description: Use when the user asks to use subagents; choose a worker profile or task-specific model and delegate bounded work.
+description: Use when the user asks to use subagents; choose a role and task-specific model for bounded delegation.
 ---
 
 # Subagents
 
-Each subagent is headless, has its own context window, cannot see the parent conversation, cannot ask the user, and cannot spawn subagents or workflows. Give every child a self-contained prompt with paths, constraints, and the expected report.
+Delegation is optional. Respect requests to work solo or avoid pipelines; do not automatically route implementation, planning, or review into a pipeline. Keep cross-cutting integration and final acceptance with the main agent.
 
-## Truncated-result advisory
+Each child is headless, has its own context window, cannot see the parent conversation, cannot ask the user, and cannot recursively orchestrate subagents, workflows, or pipelines. Supply a self-contained task with relevant paths, constraints, acceptance evidence, and the expected report.
 
-When a completed tool result explicitly reports truncation metadata, the parent may receive one passive advisory per run. If it appears, consider `subagent_spawn` with `profile: "luna-explore"` and a self-contained prompt; do not wait or poll for it. The advisory never blocks the current tool, auto-spawns, sends a message, or creates another turn. Child sessions bypass it naturally because `subagent_spawn` is unavailable there.
+## Roles and model choice
 
-## Pi Harness
+The approved role profiles are independent of model selection:
 
-**Harness:** `pi`
-**Prompt nicknames:** “pi”, “pi agent”, “pi subagent”
-**Best default:** Use when the user does not request another harness. It inherits the parent model and thinking level when `model` or `reasoning_effort` is omitted.
+| Profile     | Scope                                       | Default model |
+| ----------- | ------------------------------------------- | ------------- |
+| `explore`   | Read-only investigation and evidence        | GPT6 Luna     |
+| `implement` | Scoped changes and proportionate checks     | Sol6.1        |
+| `review`    | Independent read-only review and validation | Sol6.1        |
 
-### Luna-First Rule
+The orchestrating agent chooses Sol6.1 or Luna6 per task and Astra rarely when justified. Explicit model and reasoning overrides are permitted; roles do not fix a model. Honor user-selected harnesses and models. Resolve actual provider/model IDs from the available model registry rather than guessing them from these display names.
 
-Default routine, independent work to Luna before using Sol directly:
+There is no Luna-first rule and no mandatory microtask, pseudocode, or file-ownership decomposition. Delegate coherent outcomes. Split ownership only where parallel edits would otherwise conflict; parallel work should be genuinely independent and worth the coordination cost.
 
-- `luna-explore` is a read-only profile for:
-  - routine independent exploration
-  - clarifying code patterns
-  - reading and analyzing large files, logs, traces, and diffs
-  - identifying candidate approaches
-- `luna-worker` is a mutable profile for:
-  - focused implementation and alternative implementations
-  - documenting purpose
-  - reproducing bugs and running tool chains
-  - debugging
-  - test generation and test execution
-  - mechanical refactors
-  - comparing candidate solutions
+Explorers and reviewers must not mutate workspace files, configuration, Git, credentials, or external state, including through verification commands. Implementers may make scoped workspace changes and run checks, but must not perform unrequested Git delivery, deployment, credential changes, or other external-state changes. A role or pipeline launch is not delivery permission.
 
-It is safe to run up to eight genuinely independent Luna workers in parallel. Their results arrive as automatic follow-ups in a later parent turn. Route routine repository initial or closure audits through the hardcoded `audit-pipeline`, which runs four isolated Luna tracks and one incremental Luna synthesis session. Use `sol-worker` for implementation tasks needing deeper reasoning than routine Luna work: it provides a ready-to-use Sol/medium worker without repeating model configuration. Keep cross-cutting integration and final acceptance with the main agent. The former `terra-audit` profile is removed; routine audits belong in `audit-pipeline`.
+## Launch and manage
 
-Profiles are conveniences, not a restriction on model choice. Without a profile, the orchestrator can choose any available model and reasoning level suited to the task; supply an explicit `harness`. Omitting model or reasoning preserves the harness defaults (Pi inherits the parent values).
+Use `subagent_spawn` with a complete `prompt`, a short `name`, a trusted `working_dir` when needed, and the selected role and model supported by the installed tool schema. For profile-free launches, select an explicit `harness`; use `pi` unless the user requests another available harness. Claude Code and Codex require their respective CLIs and authentication.
 
-Pi can use any model shown by `pi --list-models`. Prefer `provider/model-id`; a bare model id only works when unambiguous. Common picks in this environment:
+Inspect the installed schema before launching: older running sessions can advertise a previous interface. Compatibility aliases `luna-explore`, `luna-worker` and `sol-worker` resolve to the modern roles/defaults, not the old model versions. Do not silently fall back to retired pipeline launches. Pipeline sessions may select a model with `pipeline_model_select`; direct subagents use launch-time selection. See [agent system](../../docs/agent-system.md).
 
-| Model                            | Recommended effort |
-| -------------------------------- | ------------------ |
-| inherited parent model (default) | inherited          |
-| `openai-codex/gpt-5.6-sol`       | `medium`           |
-| `openai-codex/gpt-5.6-terra`     | `high`             |
-| `openai-codex/gpt-5.6-luna`      | `max`             |
-| `opencode/claude-fable-5`        | `medium`           |
+Results arrive automatically as follow-ups. Continue useful independent work after spawning; if none remains, end the turn with the overall task pending. Do not block, sleep, or poll for completion.
 
-**Thinking budgets:** `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. These map directly to pi thinking levels.
-
-## Claude Code Harness
-
-**Harness:** `claude`
-**Prompt nicknames:** “claude”, “Claude Code”, “claude agent”, “claude subagent”, "cc"
-**Best default:** use the latest fable model on high reasoning. Do not default to anything else, if the user does not specify, use fable.
-
-| Model hint | Model               | Recommended effort |
-| ---------- | ------------------- | ------------------ |
-| `fable`    | latest Claude Fable | `high`             |
-
-**Thinking budgets:** `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. The extension maps these to Claude thinking-token budgets: 0, 1,024, 4,096, 10,000, 16,000, 32,000, and 63,999 tokens respectively.
-
-Requires Claude Code to be installed and authenticated.
-
-## Codex Harness
-
-**Harness:** `codex`
-**Prompt nicknames:** “codex”, “Codex CLI”, “codex agent”, “codex subagent”
-**Best default:** `gpt-5.6-sol` with `high` effort for coding work. Do not use anything other than sol unless the user specifically asks for it.
-
-| Model           | Recommended effort |
-| --------------- | ------------------ |
-| `gpt-5.6-sol`   | `high`             |
-| `gpt-5.6-terra` | `high`             |
-| `gpt-5.6-luna`  | `high`             |
-
-**Thinking budgets accepted by the extension:** `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Codex maps these to the nearest effort supported by the selected model; `off`/`minimal` become `minimal`, while `max` becomes the highest extension-supported Codex effort.
-
-Requires the Codex CLI to be installed and authenticated.
-
-## Spawn and Manage
-
-Call `subagent_spawn` with a complete `prompt`, short `name`, and either an explicit `harness` or a profile. A profile call supplies only `profile`, `prompt`, and `name` (plus optional `working_dir`); `luna-explore` fixes Pi/Luna/max reasoning and is read-only, `luna-worker` fixes Pi/Luna/max reasoning and may make scoped workspace changes, and `sol-worker` fixes Pi/Sol/medium reasoning and may make scoped workspace changes. Workers may edit files and run tests, but must not commit, push, change credentials, or make unrelated or external-state changes. Profile children retain normal child tools, with only recursive orchestration and user-interaction tools excluded. Explicit profile conflicts are rejected. Direct Pi quotas are Sol=4, Terra=8, Luna=16; Claude and Codex share an aggregate cap of 4. `sol-worker` shares Sol's quota with profile-free Sol launches. These quotas apply only to direct subagents, never pipeline graphs.
-
-- `subagent_check({ id })`: inspect progress once when it is useful; never poll.
-- `subagent_list()`: inspect all runs once when their status is useful; never poll.
+- `subagent_check({ id })` or `subagent_list()`: inspect once when status is useful.
 - `subagent_cancel({ ids })`: stop runs while preserving partial transcripts.
 - `/subagents`: inspect or take over a run interactively.
 
-After spawning, continue useful independent parent work. If none remains, end the current turn and leave the overall task pending. The subagent result is delivered automatically as a follow-up and triggers a new parent turn.
+If a completed result reports truncation, decide whether further read-only exploration is useful; the passive advisory is not a delegation requirement.
 
-Do not wait or poll for subagents. Do not use `sleep`, repeated checks/lists, or any other blocking command just to wait for completion.
+Direct-subagent concurrency quotas apply only to direct launches. Pipeline graphs predeclare their roots and children and must not enforce, inherit, queue on, or account for those quotas. Consult the installed tool contract for current limits.
+
+## Optional pipelines
+
+Only `implementing-pipeline` and `audit-pipeline` are approved for new public launches:
+
+- `implementing-pipeline`: study → implement → independent read-only audits → repair in the original implementation session.
+- `audit-pipeline`: independent read-only audits with a consolidated evidence-based report.
+
+`feature-pipeline`, `plan-pipeline`, and `small-feature-pipeline` are disabled for new launches under the approved design. Do not substitute one if the new implementation pipeline is unavailable. Use direct work or an agreed supported alternative instead.
+
+Pipeline use never bypasses role boundaries, caller-owned workspace preparation, user intent, or main-agent acceptance. See [agent system](../../docs/agent-system.md) for preparation and review handoffs.

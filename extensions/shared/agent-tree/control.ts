@@ -286,6 +286,7 @@ export class AgentTreeController {
           : {}),
       } satisfies TreeEvidenceSessionEvent;
     }
+    if (event.type === "model_selected") return event;
     if (event.type !== "settled") return undefined;
     if (event.outcome.type === "completed") {
       return {
@@ -319,7 +320,9 @@ export class AgentTreeController {
   }
 
   private onEvent(entry: Entry, event: AgentTreeSessionEvent) {
-    if (event.type === "run_started") {
+    if (event.type === "model_selected") {
+      entry.node.model = event.model;
+    } else if (event.type === "run_started") {
       entry.node.status = "running";
       entry.node.settledAt = undefined;
       entry.node.error = undefined;

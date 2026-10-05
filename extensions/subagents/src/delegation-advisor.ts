@@ -1,9 +1,5 @@
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 
-/** Model-visible guidance appended after an explicit truncated tool result. */
-export const DELEGATION_ADVISORY_TEXT =
-  'Advisory: this result was truncated. Consider delegating a self-contained follow-up to `subagent_spawn` with `profile: "luna-explore"`; do not wait or poll for it.';
-
 type ToolResultContent = TextContent | ImageContent;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -41,40 +37,22 @@ export function isTruncatedToolResult(toolName: string, details: unknown) {
   return false;
 }
 
-/**
- * Holds the one-advisory-per-parent-run state without retaining paths, queries,
- * or any other event history.
+/** Compatibility API: tools already supply their own continuation/read hints.
+ * Truncation is not evidence that a task needs delegation.
  */
 export function createDelegationAdvisor() {
-  let advised = false;
-
   return {
     reset() {
-      advised = false;
+      // No run state is retained.
     },
-
-    patchResult(options: {
+    patchResult(_options: {
       activeTools: readonly string[];
       toolName: string;
       details: unknown;
       isError: boolean;
       content: readonly ToolResultContent[];
     }) {
-      if (
-        advised ||
-        options.isError ||
-        !options.activeTools.includes("subagent_spawn") ||
-        !isTruncatedToolResult(options.toolName, options.details)
-      ) {
-        return;
-      }
-
-      advised = true;
-      const advisoryTextBlock: TextContent = {
-        type: "text",
-        text: DELEGATION_ADVISORY_TEXT,
-      };
-      return { content: [...options.content, advisoryTextBlock] };
+      return undefined;
     },
   };
 }

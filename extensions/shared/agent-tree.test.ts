@@ -6,6 +6,7 @@ import type {
   AgentNodeSpec,
   AgentTreeSession,
   AgentTreeSessionEvent,
+  TreeEvidenceEvent,
 } from "./agent-tree/domain.ts";
 import { MAX_TRANSCRIPT_ITEMS } from "./agent-tree/transcript.ts";
 
@@ -72,6 +73,54 @@ function fakeFactory() {
     },
   };
 }
+
+test("session-local model changes update display and evidence without changing ownership or lifecycle", async () => {
+  const fake = fakeFactory();
+  const evidence: TreeEvidenceEvent[] = [];
+  const tree = new AgentTreeController({
+    factory: fake.factory,
+    observer: (event) => {
+      evidence.push(event);
+    },
+  });
+  const node = await tree.spawn({
+    scopeId: "run-model",
+    role: "implement",
+    attempt: 1,
+    title: "Implement",
+    model: "sol",
+    cwd: "/tmp",
+    prompt: "Work",
+    persistent: true,
+  });
+  const session = fake.created[0]!.session;
+  session.emit({ type: "run_started" });
+  session.emit({
+    type: "model_selected",
+    previousModel: "sol",
+    model: "luna",
+    reason: "Routine remaining checks",
+  });
+  assert.equal(tree.view.get(node.id)?.model, "luna");
+  assert.equal(tree.view.get(node.id)?.role, "implement");
+  assert.equal(tree.view.get(node.id)?.status, "running");
+  assert.equal(fake.created.length, 1);
+  assert.equal(
+    evidence.some(
+      (event) =>
+        event.type === "session_event" &&
+        event.event.type === "model_selected" &&
+        event.event.reason === "Routine remaining checks",
+    ),
+    true,
+  );
+  session.emit({
+    type: "settled",
+    outcome: { type: "completed", finalText: "Done" },
+  });
+  assert.equal(tree.view.get(node.id)?.status, "idle");
+  await tree.dispose();
+});
 
 test("agent tree preserves parent, role, attempt, controls, and bounded transcripts", async () => {
   const fake = fakeFactory();

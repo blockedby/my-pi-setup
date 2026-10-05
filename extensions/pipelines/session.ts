@@ -50,6 +50,8 @@ import {
   type PlanPipelineDiscoveryRole,
   SMALL_FEATURE_IMPLEMENTER_ROLE,
   SMALL_FEATURE_PIPELINE_ID,
+  IMPLEMENTING_PIPELINE_ID,
+  isImplementingWorkflow,
   type FeaturePipelineDiscoveryRole,
   type PipelineDefinitionId,
   type PipelineLunaAuditRole,
@@ -78,6 +80,7 @@ import { planDiscoveryReportSchema } from "./plan-discovery-report.ts";
 import { FEATURE_DISCOVERY_SYNTHESIS_SCHEMA } from "./feature-best-of-three.ts";
 import { createFeatureToolBoundary } from "./feature-sandbox.ts";
 import { AgentSessionUnavailableError } from "../shared/agent-tree/domain.ts";
+import { createPipelineModelSelectTool } from "./model-selection.ts";
 import type {
   AgentNodeSpec,
   AgentTreeSessionEvent,
@@ -737,7 +740,7 @@ export function pipelineSessionToolPolicy(
         ? planPipelineSynthesisToolPolicy()
         : planPipelineRootToolPolicy();
     }
-    if (definition === SMALL_FEATURE_PIPELINE_ID) {
+    if (isImplementingWorkflow(definition)) {
       return readOnlyPipelineRootToolPolicy();
     }
     return pipelineRootToolPolicy();
@@ -774,6 +777,14 @@ export function pipelineSessionToolPolicy(
   }
   if (definition === PLAN_PIPELINE_ID) {
     return withoutWebTools(planPipelineChildToolPolicy().excludeTools);
+  }
+  if (
+    definition === IMPLEMENTING_PIPELINE_ID &&
+    role === SMALL_FEATURE_IMPLEMENTER_ROLE
+  ) {
+    // Normal autonomous tools, but no recursive orchestration/delegation.
+    // Shared child policies are parent-owned and remain unchanged.
+    return { excludeTools: [...childToolPolicy().excludeTools, "codex_task"] };
   }
   if (definition === SMALL_FEATURE_PIPELINE_ID) {
     return role === SMALL_FEATURE_IMPLEMENTER_ROLE
@@ -1101,7 +1112,24 @@ export function createPipelineSessionFactory(
               },
             })
           : undefined;
+      const modelListeners = new Set<(event: AgentTreeSessionEvent) => void>();
+      const modelSelectTool =
+        definition === IMPLEMENTING_PIPELINE_ID ||
+        definition === AUDIT_PIPELINE_ID
+          ? createPipelineModelSelectTool({
+              registry: options.modelRegistry,
+              session: () => {
+                if (!activeSession) throw new Error("Session is unavailable.");
+                return activeSession;
+              },
+              selected: (selection) => {
+                for (const listener of modelListeners)
+                  listener({ type: "model_selected", ...selection });
+              },
+            })
+          : undefined;
       const sessionTools = [
+        ...(modelSelectTool ? [modelSelectTool] : []),
         ...(readinessTool ? [readinessTool] : []),
         ...artifactReadTools,
         ...(customTools ?? []),
@@ -1282,10 +1310,15 @@ export function createPipelineSessionFactory(
           return session.isStreaming;
         },
         subscribe(listener) {
-          return session.subscribe((event) => {
+          modelListeners.add(listener);
+          const unsubscribe = session.subscribe((event) => {
             const normalized = normalizeEvent(session, event);
             if (normalized) listener(normalized);
           });
+          return () => {
+            modelListeners.delete(listener);
+            unsubscribe();
+          };
         },
         async prompt(text) {
           assertAvailable();

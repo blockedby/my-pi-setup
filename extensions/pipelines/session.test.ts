@@ -1372,7 +1372,7 @@ test("plan synthesis sessions expose only local reads and their terminating subm
       modelRegistry: {
         find(provider, id) {
           assert.equal(provider, "openai-codex");
-          assert.equal(id, "gpt-5.6-luna");
+          assert.equal(id, "gpt-6-luna");
           return fauxProvider!.getModel();
         },
       },

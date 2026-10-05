@@ -37,11 +37,27 @@ import type {
   TranscriptPart,
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
-import { resolvePiModel } from "../policy.ts";
+import {
+  resolvePiModel,
+  SUBAGENT_PROFILES,
+  type SubagentProfile,
+} from "../policy.ts";
 import { CHILD_EXCLUDED_TOOL_NAMES } from "../../../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
+
+/** Narrow explicit mutation tools only; bash/checks still have host permissions.
+ * This supplements read-only guidance, not a filesystem or network sandbox.
+ */
+export function childExcludedToolNames(profile?: SubagentProfile) {
+  return [
+    ...CHILD_EXCLUDED_TOOL_NAMES,
+    ...(profile && SUBAGENT_PROFILES[profile].readOnly
+      ? ["edit", "write", "apply_patch_codex", "codex_task"]
+      : []),
+  ];
+}
 
 export function appendProfileSystemPrompt(
   base: ReadonlyArray<string>,
@@ -369,7 +385,7 @@ const makePiSession = (
           resourceLoader: loader,
           model,
           thinkingLevel,
-          excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES],
+          excludeTools: childExcludedToolNames(task.profile),
         });
         // Start child extension session hooks/resources in headless mode.
         // A rejection here would otherwise leak the freshly created session:
