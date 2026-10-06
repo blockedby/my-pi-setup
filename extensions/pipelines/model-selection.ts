@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { PIPELINE_MODELS } from "./domain.ts";
+import { resolveSubscriptionModel } from "../shared/codex-subscription.ts";
 
 export const PIPELINE_MODEL_SELECT_PARAMETERS = Type.Object(
   {
@@ -25,6 +26,8 @@ export interface PipelineModelSelection {
  * or global defaults. SDK selection performs its normal credential validation. */
 export function createPipelineModelSelectTool(options: {
   registry: Pick<ModelRegistry, "find">;
+  /** Fixed launch parent, not this session's latest selected model. */
+  parentProvider?: string;
   session: () => Pick<AgentSession, "model" | "setModel">;
   selected: (selection: PipelineModelSelection) => void;
 }) {
@@ -38,9 +41,11 @@ export function createPipelineModelSelectTool(options: {
       if (signal?.aborted) throw new Error("Model selection was cancelled.");
       if (!input.reason.trim())
         throw new Error("Model selection requires a concrete reason.");
-      const [provider, id] = input.model.split("/");
-      const model = options.registry.find(provider, id);
-      if (!model) throw new Error(`Unavailable pipeline model: ${input.model}`);
+      const model = resolveSubscriptionModel(
+        options.registry,
+        input.model,
+        options.parentProvider,
+      );
       const session = options.session();
       const previousModel = session.model
         ? `${session.model.provider}/${session.model.id}`
@@ -48,7 +53,7 @@ export function createPipelineModelSelectTool(options: {
       await session.setModel(model, { persist: false });
       const selection = {
         previousModel,
-        model: input.model,
+        model: `${model.provider}/${model.id}`,
         reason: input.reason.trim(),
       };
       options.selected(selection);

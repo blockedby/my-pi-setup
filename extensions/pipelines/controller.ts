@@ -438,7 +438,7 @@ function gitHead(workingDir: string) {
 
 export interface PipelineControllerOptions {
   /** Production admission uses the same registry as session creation. */
-  readonly modelAvailable?: (model: string) => boolean;
+  readonly modelAvailable?: (model: string, parentProvider?: string) => boolean;
   readonly createSessionFactory: (
     rootTools: (runId: string) => ReadonlyArray<ToolDefinition>,
     definitionForRun: (runId: string) => PipelineDefinitionId,
@@ -490,6 +490,7 @@ export interface PipelineControllerOptions {
       input: PlanningReadinessCheck,
       signal?: AbortSignal,
     ) => Promise<PlanningReadinessResult>,
+    parentProviderForRun?: (runId: string) => string | undefined,
   ) => AgentTreeSessionFactory;
   readonly onHandoff: (handoff: PipelineHandoff) => void | Promise<void>;
   readonly makeRunId?: (pipelineName: string) => string;
@@ -697,6 +698,7 @@ export class PipelineController {
             : [],
         (runId, role, token, input, signal) =>
           this.checkPlanningReadiness(runId, role, token, input, signal),
+        (runId) => this.requireRun(runId).request.parentProvider,
       ),
       // Pipeline graphs predeclare their model fan-out. Direct-subagent quotas
       // intentionally do not apply to pipeline roots or children.
@@ -1792,7 +1794,10 @@ export class PipelineController {
     validatePipelineRoleModels(
       definition,
       request.roleModels,
-      this.modelAvailable,
+      this.modelAvailable
+        ? (model) =>
+            this.modelAvailable?.(model, request.parentProvider) ?? false
+        : undefined,
     );
     if (definition === PLAN_PIPELINE_ID) {
       if (
