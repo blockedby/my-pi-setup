@@ -44,6 +44,7 @@ export {
   PIPELINE_WALLCLOCK_WARNING_RATIO,
   PIPELINE_WALLCLOCK_LIMIT_PATTERN,
 } from "./wallclock.ts";
+import { resolveSubscriptionModel } from "../shared/codex-subscription.ts";
 import { createPipelineSessionFactory } from "./session.ts";
 import {
   createPipelineInspectionTools,
@@ -302,10 +303,10 @@ export default function pipelines(pi: ExtensionAPI) {
     if (controller) return controller;
     let created: PipelineController;
     created = new PipelineController({
-      modelAvailable: (name) => {
-        const [provider, ...id] = name.split("/");
-        return Boolean(ctx.modelRegistry.find(provider, id.join("/")));
-      },
+      modelAvailable: (name, parentProvider) =>
+        Boolean(
+          resolveSubscriptionModel(ctx.modelRegistry, name, parentProvider),
+        ),
       createSessionFactory: (
         rootTools,
         definitionForRun,
@@ -320,9 +321,11 @@ export default function pipelines(pi: ExtensionAPI) {
         featureTaskHost,
         artifactTools,
         planningReadinessCheck,
+        parentProviderForRun,
       ) =>
         createPipelineSessionFactory({
           modelRegistry: ctx.modelRegistry,
+          parentProviderForRun,
           parentCwd: ctx.cwd,
           parentTrusted: ctx.isProjectTrusted(),
           rootTools,
@@ -415,6 +418,7 @@ export default function pipelines(pi: ExtensionAPI) {
           }
         : undefined;
       const runId = getController(ctx).start({
+        parentProvider: ctx.model?.provider,
         pipelineName: params.pipeline_name,
         task: params.task,
         workingDir,

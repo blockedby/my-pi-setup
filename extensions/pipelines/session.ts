@@ -6,6 +6,7 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   type ModelRegistry,
+  type ModelRuntime,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
@@ -81,6 +82,7 @@ import { FEATURE_DISCOVERY_SYNTHESIS_SCHEMA } from "./feature-best-of-three.ts";
 import { createFeatureToolBoundary } from "./feature-sandbox.ts";
 import { AgentSessionUnavailableError } from "../shared/agent-tree/domain.ts";
 import { createPipelineModelSelectTool } from "./model-selection.ts";
+import { resolveSubscriptionModel } from "../shared/codex-subscription.ts";
 import type {
   AgentNodeSpec,
   AgentTreeSessionEvent,
@@ -101,9 +103,12 @@ interface PipelineSessionFactoryOptions {
     role: string,
   ) => ReadonlyArray<ToolDefinition>;
   readonly modelRegistry: Pick<ModelRegistry, "find">;
+  readonly parentProviderForRun?: (runId: string) => string | undefined;
   readonly parentCwd: string;
   readonly parentTrusted: boolean;
   readonly agentDir?: string;
+  /** Optional host-supplied runtime, also permits fully offline SDK checks. */
+  readonly modelRuntime?: ModelRuntime;
   /** Test-only override for the per-tool execution timeout. */
   readonly toolCallTimeoutMs?: number;
   readonly sessionManager?: (cwd: string) => SessionManager;
@@ -892,12 +897,21 @@ export function createPipelineSessionFactory(
 ): AgentTreeSessionFactory {
   return {
     async create(spec: AgentNodeSpec) {
-      const [provider, ...idParts] = spec.model.split("/");
-      const model = options.modelRegistry.find(provider, idParts.join("/"));
-      if (!model)
-        throw new Error(
-          `Required pipeline model is unavailable: ${spec.model}`,
-        );
+      const parentProvider = options.parentProviderForRun?.(spec.scopeId ?? "");
+      const model = (() => {
+        try {
+          return resolveSubscriptionModel(
+            options.modelRegistry,
+            spec.model,
+            parentProvider,
+          );
+        } catch (error) {
+          throw new Error(
+            `Required pipeline model is unavailable: ${spec.model}. ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
+      })();
       const resources = await createChildResources({
         cwd: spec.cwd,
         projectTrusted: resolveStandaloneChildProjectTrust({
@@ -1118,6 +1132,7 @@ export function createPipelineSessionFactory(
         definition === AUDIT_PIPELINE_ID
           ? createPipelineModelSelectTool({
               registry: options.modelRegistry,
+              parentProvider,
               session: () => {
                 if (!activeSession) throw new Error("Session is unavailable.");
                 return activeSession;
@@ -1208,6 +1223,8 @@ export function createPipelineSessionFactory(
             : undefined;
       const { session } = await createAgentSession({
         cwd: spec.cwd,
+        ...(options.agentDir ? { agentDir: options.agentDir } : {}),
+        ...(options.modelRuntime ? { modelRuntime: options.modelRuntime } : {}),
         model,
         thinkingLevel: pipelineThinkingLevel(spec.model, spec.thinkingLevel),
         sessionManager:

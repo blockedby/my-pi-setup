@@ -1,4 +1,8 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
+import {
+  isCodexSubscriptionProvider,
+  resolveSubscriptionModel,
+} from "../../shared/codex-subscription.ts";
 import type {
   BackendName,
   ParentContext,
@@ -103,21 +107,32 @@ export function resolvePiModel(
 ) {
   if (!hint) {
     if (!inherited) return undefined;
+    if (isCodexSubscriptionProvider(inherited.provider))
+      return resolveSubscriptionModel(
+        registry,
+        `${inherited.provider}/${inherited.id}`,
+      );
     return registry.find(inherited.provider, inherited.id) ?? undefined;
   }
   const slash = hint.indexOf("/");
   if (slash > 0) {
-    const provider = hint.slice(0, slash);
-    const id = hint.slice(slash + 1);
-    const found = registry.find(provider, id);
-    if (found) return found;
-    throw new Error(`Unknown model "${hint}".`);
+    return resolveSubscriptionModel(registry, hint, inherited?.provider);
   }
   if (inherited) {
     const found = registry.find(inherited.provider, hint);
     if (found) return found;
   }
   const matches = registry.getAll().filter((model) => model.id === hint);
+  if (
+    inherited &&
+    isCodexSubscriptionProvider(inherited.provider) &&
+    (matches.length === 0 ||
+      matches.some((model) => isCodexSubscriptionProvider(model.provider)))
+  ) {
+    throw new Error(
+      `Unknown model "${inherited.provider}/${hint}" on inherited Codex subscription. No fallback to another subscription.`,
+    );
+  }
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
     throw new Error(
@@ -133,7 +148,10 @@ export function canonicalPiModelKey(
   if (!model) return "pi-unresolved";
   // Legacy and current IDs share family capacity; switching versions cannot
   // double a family's direct-subagent allowance.
-  const identity = `${model.provider}/${model.id}`;
+  const provider = isCodexSubscriptionProvider(model.provider)
+    ? "openai-codex"
+    : model.provider;
+  const identity = `${provider}/${model.id}`;
   const key =
     identity === "openai-codex/gpt-5.6-sol"
       ? "openai-codex/gpt-6.1-sol"

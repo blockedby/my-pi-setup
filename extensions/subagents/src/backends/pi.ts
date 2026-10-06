@@ -91,7 +91,8 @@ export function refreshPiUsageAfterCompaction(
 
 /**
  * Resolve the generic model hint against the parent registry (v1 semantics):
- * "provider/model-id" is exact; a bare id prefers the inherited provider,
+ * Base Codex hints inherit the parent subscription; numbered providers stay
+ * exact. A bare id prefers the inherited provider (Codex fails closed),
  * then must be unambiguous across providers. No hint inherits the parent
  * model; with nothing to inherit, the SDK default applies.
  */

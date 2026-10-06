@@ -477,6 +477,8 @@ export interface FeaturePipelineGraphSnapshot extends FeatureGraphExecutionSnaps
 }
 
 export interface PipelineRunRequest {
+  /** Launch-session provider, captured once; never inferred from a child. */
+  readonly parentProvider?: string;
   readonly pipelineName: string;
   readonly workingDir: string;
   readonly task: string;
